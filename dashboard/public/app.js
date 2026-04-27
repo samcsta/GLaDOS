@@ -922,7 +922,7 @@ function renderChatBotPane() {
       modelSel.innerHTML = ollamaOnly
         .map(m => `<option value="${m}">${m.replace('ollama-local/', '')}</option>`)
         .join('');
-      const current = details?.model || 'ollama-local/qwen3.6:35b';
+      const current = details?.model || 'ollama-local/glm-4.7-flash:latest';
       modelSel.value = current;
       modelLabel.textContent = current.replace('ollama-local/', '');
     } catch (e) { modelLabel.textContent = '(model list unavailable)'; }

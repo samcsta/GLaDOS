@@ -75,6 +75,18 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'adfs_active_directory_login',
+    description: 'Use a local credential profile to complete Ford ADFS Active Directory login inside an existing browser MCP/CDP page. Secret values are never returned.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        profile_id: { type: 'string', description: 'Local auth profile id, default ford-sso.' },
+        target_id: { type: 'string', description: 'Browser MCP targetId from browser.open/snapshot.' },
+        ws_url: { type: 'string', description: 'Optional CDP websocket URL from browser.open.' },
+      },
+    },
+  },
+  {
     name: 'evidence_bundle_create',
     description: 'Create a redacted evidence manifest under ~/.glados/investigations/<target>/evidence. Use for suspected or validated findings.',
     inputSchema: {
@@ -164,6 +176,17 @@ function readJsonFile(file, fallback = null) {
   catch { return fallback; }
 }
 
+function redactedUrl(u) {
+  try {
+    const parsed = new URL(u);
+    parsed.search = parsed.search ? '?[redacted]' : '';
+    parsed.hash = parsed.hash ? '#[redacted]' : '';
+    return parsed.toString();
+  } catch {
+    return u || null;
+  }
+}
+
 function operatorContext() {
   const context = readJsonFile(OPERATOR_CONTEXT, null);
   if (!context) {
@@ -204,6 +227,164 @@ function localAuthStatus() {
     profiles,
     redaction: 'Credential values are intentionally never returned by this tool.',
   };
+}
+
+async function resolveBrowserWsUrl(args) {
+  if (args.ws_url) return args.ws_url;
+  if (!args.target_id) throw new Error('target_id or ws_url required');
+  const res = await fetch('http://127.0.0.1:18800/json/list', { signal: AbortSignal.timeout(2000) });
+  if (!res.ok) throw new Error(`browser target list failed: HTTP ${res.status}`);
+  const targets = await res.json();
+  const target = (Array.isArray(targets) ? targets : []).find(t => t.id === args.target_id || t.targetId === args.target_id);
+  const wsUrl = target?.webSocketDebuggerUrl || target?.webSocketUrl || target?.wsUrl;
+  if (!wsUrl) throw new Error(`browser target not found for target_id ${args.target_id}`);
+  return wsUrl;
+}
+
+function cdpCall(ws, method, params = {}, timeoutMs = 5000) {
+  const id = ++cdpCall.nextId;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`${method} timed out`));
+    }, timeoutMs);
+    function cleanup() {
+      clearTimeout(timer);
+      ws.removeEventListener('message', onMessage);
+    }
+    function onMessage(ev) {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.id !== id) return;
+      cleanup();
+      if (msg.error) reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+      else resolve(msg.result || {});
+    }
+    ws.addEventListener('message', onMessage);
+    ws.send(JSON.stringify({ id, method, params }));
+  });
+}
+cdpCall.nextId = 0;
+
+function waitForWsOpen(ws, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('CDP websocket open timed out')), timeoutMs);
+    ws.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true });
+    ws.addEventListener('error', () => { clearTimeout(timer); reject(new Error('CDP websocket error')); }, { once: true });
+  });
+}
+
+async function adfsActiveDirectoryLogin(args) {
+  const profileId = args.profile_id || 'ford-sso';
+  const auth = readJsonFile(LOCAL_AUTH, null);
+  const profile = auth?.profiles?.[profileId];
+  if (!profile?.username || !profile?.password) {
+    return { ok: false, status: 'missing_profile', profile_id: profileId, redaction: 'No credential values returned.' };
+  }
+
+  const wsUrl = await resolveBrowserWsUrl(args);
+  const ws = new WebSocket(wsUrl);
+  await waitForWsOpen(ws);
+  try {
+    await cdpCall(ws, 'Runtime.enable');
+    const locationResult = await cdpCall(ws, 'Runtime.evaluate', {
+      expression: '({ href: location.href, host: location.hostname, title: document.title, text: document.body ? document.body.innerText.slice(0, 1000) : "" })',
+      returnByValue: true,
+    });
+    const current = locationResult.result?.value || {};
+    const allowedHosts = Array.isArray(profile.allowed_hosts) ? profile.allowed_hosts : [];
+    if (!allowedHosts.includes(current.host)) {
+      return {
+        ok: false,
+        status: 'host_not_allowed_for_profile',
+        profile_id: profileId,
+        host: current.host || null,
+        allowed_hosts: allowedHosts,
+        redaction: 'No credential values returned.',
+      };
+    }
+    if (!/Active Directory|ADFS|Sign in with one of these accounts/i.test(`${current.title}\n${current.text}\n${current.href}`)) {
+      return {
+        ok: false,
+        status: 'not_on_adfs_choice_page',
+        profile_id: profileId,
+        host: current.host || null,
+        url: redactedUrl(current.href),
+        redaction: 'No credential values returned.',
+      };
+    }
+
+    const script = `(async (username, password) => {
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+      const fire = el => {
+        for (const type of ['input', 'change', 'keyup', 'blur']) {
+          el.dispatchEvent(new Event(type, { bubbles: true }));
+        }
+      };
+      const byText = text => [...document.querySelectorAll('button,a,input[type=button],input[type=submit]')]
+        .find(el => visible(el) && new RegExp(text, 'i').test((el.innerText || el.value || el.getAttribute('aria-label') || '').trim()));
+      const click = el => {
+        if (!el) return false;
+        el.scrollIntoView({ block: 'center', inline: 'center' });
+        el.click();
+        return true;
+      };
+      const clickSubmit = () => click(byText('next|sign in|continue|submit|log in|login')) || false;
+
+      const clickedActiveDirectory = click(byText('Active Directory'));
+      await sleep(1800);
+
+      let userInput = [...document.querySelectorAll('input')]
+        .find(el => visible(el) && !/password|hidden|submit|button|checkbox|radio/i.test(el.type || '') && !el.disabled);
+      if (userInput) {
+        userInput.focus();
+        userInput.value = username;
+        fire(userInput);
+        clickSubmit();
+        await sleep(1800);
+      }
+
+      let passwordInput = [...document.querySelectorAll('input[type=password]')].find(el => visible(el) && !el.disabled);
+      if (passwordInput) {
+        passwordInput.focus();
+        passwordInput.value = password;
+        fire(passwordInput);
+        clickSubmit();
+        await sleep(3000);
+      }
+
+      return {
+        clickedActiveDirectory,
+        usernameFieldFound: !!userInput,
+        passwordFieldFound: !!passwordInput,
+        finalUrl: location.href,
+        finalHost: location.hostname,
+        title: document.title,
+        bodyPreview: document.body ? document.body.innerText.slice(0, 500) : ''
+      };
+    })(${JSON.stringify(profile.username)}, ${JSON.stringify(profile.password)})`;
+    const loginResult = await cdpCall(ws, 'Runtime.evaluate', {
+      expression: script,
+      awaitPromise: true,
+      returnByValue: true,
+    }, 15000);
+    const value = loginResult.result?.value || {};
+    return {
+      ok: true,
+      status: value.passwordFieldFound ? 'submitted_credentials' : (value.clickedActiveDirectory ? 'active_directory_selected' : 'attempted'),
+      profile_id: profileId,
+      clicked_active_directory: !!value.clickedActiveDirectory,
+      username_field_found: !!value.usernameFieldFound,
+      password_field_found: !!value.passwordFieldFound,
+      final_host: value.finalHost || null,
+      final_url: redactedUrl(value.finalUrl),
+      title: value.title || null,
+      redaction: 'Credential values were read from the local secret profile and submitted through CDP, but are never returned.',
+    };
+  } finally {
+    try { ws.close(); } catch {}
+  }
 }
 
 function engagementScope(engagementId) {
@@ -415,6 +596,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       case 'scope_guard_check': return json(scopeGuard(args));
       case 'operator_context': return json(operatorContext());
       case 'local_auth_status': return json(localAuthStatus());
+      case 'adfs_active_directory_login': return json(await adfsActiveDirectoryLogin(args));
       case 'evidence_bundle_create': return json(evidenceBundle(args));
       case 'js_endpoint_extract': return json(jsExtract(args));
       case 'openapi_inventory': return json(openapiInventory(args));

@@ -35,15 +35,11 @@ function readSessionsIndex(agentId) {
 
 const LIVE_MTIME_MS = 2 * 60 * 1000; // session JSONL touched within 2 min = live
 
-function currentSessionForAgent(agentId) {
-  const idx = readSessionsIndex(agentId);
-  if (!idx) return null;
-  const key = `agent:${agentId}:main`;
-  const entry = idx[key];
+function sessionSnapshot(agentId, key, entry) {
   if (!entry) return null;
-
+  const sessionFile = entry.sessionFile;
   let mtimeMs = 0;
-  try { mtimeMs = fs.statSync(entry.sessionFile).mtimeMs; } catch {}
+  try { mtimeMs = fs.statSync(sessionFile).mtimeMs; } catch {}
   const endedAtMs = typeof entry.endedAt === 'number' ? entry.endedAt : 0;
   const fresh = mtimeMs > 0 && (Date.now() - mtimeMs) < LIVE_MTIME_MS;
   const statusRunning = entry.status === 'running';
@@ -58,7 +54,7 @@ function currentSessionForAgent(agentId) {
     agentId,
     sessionKey: key,
     sessionId: entry.sessionId,
-    sessionFile: entry.sessionFile,
+    sessionFile,
     status: entry.status,
     live,
     abortedLastRun: !!entry.abortedLastRun,
@@ -67,7 +63,22 @@ function currentSessionForAgent(agentId) {
     mtimeMs,
     model: entry.model,
     modelProvider: entry.modelProvider,
+    runtime: key.includes(':subagent:') ? 'subagent' : 'main',
   };
+}
+
+function currentSessionForAgent(agentId) {
+  const idx = readSessionsIndex(agentId);
+  if (!idx) return null;
+  const snapshots = Object.entries(idx)
+    .filter(([key]) => key === `agent:${agentId}:main` || key.startsWith(`agent:${agentId}:subagent:`))
+    .map(([key, entry]) => sessionSnapshot(agentId, key, entry))
+    .filter(Boolean)
+    .sort((a, b) => {
+      if (a.live !== b.live) return a.live ? -1 : 1;
+      return (b.mtimeMs || b.startedAt || 0) - (a.mtimeMs || a.startedAt || 0);
+    });
+  return snapshots[0] || null;
 }
 
 function sessionsDir(agentId) {
@@ -107,6 +118,7 @@ module.exports = {
   loadAgentRegistry,
   listAgentIds,
   readSessionsIndex,
+  sessionSnapshot,
   currentSessionForAgent,
   sessionsDir,
   sendMessageToAgent,

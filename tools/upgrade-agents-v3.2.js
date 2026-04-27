@@ -329,7 +329,7 @@ const roles = {
 const newAgents = {
   'evidence-curator': {
     name: 'evidence-curator',
-    model: 'ollama-local/qwen3.6:35b',
+    model: 'ollama-local/glm-4.7-flash',
     role: 'Evidence Curator',
     vibe: 'Archivist who turns messy proxy rows and screenshots into clean evidence bundles.',
     runbook: {
@@ -348,7 +348,7 @@ const newAgents = {
   },
   'scope-guardian': {
     name: 'scope-guardian',
-    model: 'ollama-local/qwen3.6:35b',
+    model: 'ollama-local/glm-4.7-flash',
     role: 'Scope / RoE Guardian',
     vibe: 'Quiet compliance brain that says no before a clever idea becomes an incident.',
     runbook: {
@@ -607,8 +607,8 @@ function updateGladosRoster() {
   const p = path.join(WORKSPACES, 'glados', 'IDENTITY.md');
   let s = fs.readFileSync(p, 'utf8');
   const insert = [
-    '| 23 | evidence-curator | Evidence bundle curator | qwen3.6:35b (Ollama) |',
-    '| 24 | scope-guardian | Scope / RoE validator | qwen3.6:35b (Ollama) |',
+    '| 23 | evidence-curator | Evidence bundle curator | glm-4.7-flash (Ollama) |',
+    '| 24 | scope-guardian | Scope / RoE validator | glm-4.7-flash (Ollama) |',
     '| 25 | js-reverser | JavaScript reverse engineering | claude-sonnet-4-6 |',
     '| 26 | graphql-specialist | GraphQL security specialist | claude-sonnet-4-6 |',
     '| 27 | cloud-exposure | Cloud exposure specialist | claude-sonnet-4-6 |',

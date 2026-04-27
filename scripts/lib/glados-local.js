@@ -310,6 +310,7 @@ function generateOpenClawConfig(paths) {
   const llmApiKey = process.env.LLMAPI_API_KEY || existing?.models?.providers?.['custom-llmapi-redteamstuff-com']?.apiKey || 'replace-me';
   const llmBaseUrl = process.env.LLMAPI_BASE_URL || existing?.models?.providers?.['custom-llmapi-redteamstuff-com']?.baseUrl || 'https://llmapi.redteamstuff.com/';
   const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || existing?.models?.providers?.['ollama-local']?.baseUrl || 'http://localhost:11434/v1/';
+  const localModel = process.env.GLADOS_LOCAL_MODEL || 'glm-4.7-flash:latest';
   const burpProxy = process.env.BURP_PROXY || 'http://127.0.0.1:8080';
   const burpExtApi = process.env.BURP_EXT_API || 'http://127.0.0.1:1338';
   const burpApi = process.env.BURP_API || 'http://127.0.0.1:1337';
@@ -378,12 +379,7 @@ function generateOpenClawConfig(paths) {
           baseUrl: ollamaBaseUrl,
           ['api' + 'Key']: existing.models?.providers?.['ollama-local']?.apiKey || 'ollama',
           api: 'openai-completions',
-          models: existing.models?.providers?.['ollama-local']?.models || [
-            providerModel('qwen3.6:35b'),
-            providerModel('qwen3.5:35b'),
-            providerModel('glm-4.7-flash:latest'),
-            providerModel('gemma4:26b'),
-          ],
+          models: [providerModel(localModel)],
         },
       },
     },

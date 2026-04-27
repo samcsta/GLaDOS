@@ -96,46 +96,56 @@ function resetAgentSession(agentId, ts = new Date().toISOString().replace(/[:.]/
   const fs = require('node:fs');
   const os = require('node:os');
   const sessionsIdxPath = path.join(os.homedir(), '.openclaw/agents', agentId, 'sessions/sessions.json');
-  const key = `agent:${agentId}:main`;
   const snap = currentSessionForAgent(agentId);
   let idx = null;
-  let entry = null;
-  let archivedPath = null;
-  let removedLockPath = null;
+  const archivedPaths = [];
+  const removedLockPaths = [];
   let removedIndexEntry = false;
 
   try {
     idx = JSON.parse(fs.readFileSync(sessionsIdxPath, 'utf8'));
-    entry = idx?.[key] || null;
   } catch {}
 
-  const sessionFile = snap?.sessionFile || entry?.sessionFile;
-  if (sessionFile && fs.existsSync(sessionFile)) {
-    archivedPath = `${sessionFile}.archived-${ts}`;
-    fs.renameSync(sessionFile, archivedPath);
+  const entries = idx && typeof idx === 'object'
+    ? Object.entries(idx).filter(([key]) => key === `agent:${agentId}:main` || key.startsWith(`agent:${agentId}:subagent:`))
+    : [];
+  if (!entries.length && snap?.sessionFile) entries.push([snap.sessionKey || `agent:${agentId}:main`, { sessionFile: snap.sessionFile }]);
+
+  for (const [key, entry] of entries) {
+    const sessionFile = entry?.sessionFile;
+    if (sessionFile && fs.existsSync(sessionFile)) {
+      const archivedPath = `${sessionFile}.archived-${ts}`;
+      fs.renameSync(sessionFile, archivedPath);
+      archivedPaths.push(archivedPath);
+    }
+
+    const lockPath = sessionFile ? `${sessionFile}.lock` : null;
+    if (lockPath && fs.existsSync(lockPath)) {
+      fs.rmSync(lockPath, { force: true });
+      removedLockPaths.push(lockPath);
+    }
+
+    if (idx && idx[key]) {
+      delete idx[key];
+      removedIndexEntry = true;
+    }
   }
 
-  const lockPath = sessionFile ? `${sessionFile}.lock` : null;
-  if (lockPath && fs.existsSync(lockPath)) {
-    fs.rmSync(lockPath, { force: true });
-    removedLockPath = lockPath;
-  }
-
-  if (idx && idx[key]) {
-    delete idx[key];
+  if (idx && removedIndexEntry) {
     fs.writeFileSync(sessionsIdxPath, JSON.stringify(idx, null, 2));
-    removedIndexEntry = true;
   }
 
   buffers.delete(agentId);
-  broadcastLobby('session-reset', { agentId, archivedPath, removedIndexEntry });
+  broadcastLobby('session-reset', { agentId, archivedPath: archivedPaths[0] || null, archivedPaths, removedIndexEntry });
   return {
     ok: true,
     agentId,
-    archivedPath,
-    removedLockPath,
+    archivedPath: archivedPaths[0] || null,
+    archivedPaths,
+    removedLockPath: removedLockPaths[0] || null,
+    removedLockPaths,
     removedIndexEntry,
-    hadSession: !!sessionFile || removedIndexEntry,
+    hadSession: entries.length > 0 || removedIndexEntry,
   };
 }
 

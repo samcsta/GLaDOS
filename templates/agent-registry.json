@@ -32,7 +32,7 @@
   {
     "id": "atlas",
     "name": "atlas",
-    "model": "ollama-local/gemma4:26b",
+    "model": "ollama-local/glm-4.7-flash:latest",
     "enabled": true,
     "identity": {
       "name": "Atlas",
@@ -61,7 +61,7 @@
   {
     "id": "evidence-curator",
     "name": "evidence-curator",
-    "model": "ollama-local/qwen3.6:35b",
+    "model": "ollama-local/glm-4.7-flash:latest",
     "enabled": true
   },
   {
@@ -96,13 +96,13 @@
   {
     "id": "net-recon",
     "name": "net-recon",
-    "model": "ollama-local/qwen3.6:35b",
+    "model": "ollama-local/glm-4.7-flash:latest",
     "enabled": true
   },
   {
     "id": "origin-ip",
     "name": "origin-ip",
-    "model": "ollama-local/qwen3.5:35b",
+    "model": "ollama-local/glm-4.7-flash:latest",
     "enabled": true
   },
   {
@@ -126,7 +126,7 @@
   {
     "id": "plan-synthesizer",
     "name": "plan-synthesizer",
-    "model": "ollama-local/qwen3.6:35b",
+    "model": "ollama-local/glm-4.7-flash:latest",
     "enabled": true,
     "identity": {
       "name": "Plan Synthesizer",
@@ -161,19 +161,19 @@
   {
     "id": "report-validator",
     "name": "report-validator",
-    "model": "ollama-local/qwen3.6:35b",
+    "model": "ollama-local/glm-4.7-flash:latest",
     "enabled": true
   },
   {
     "id": "report-writer",
     "name": "report-writer",
-    "model": "ollama-local/qwen3.6:35b",
+    "model": "ollama-local/glm-4.7-flash:latest",
     "enabled": true
   },
   {
     "id": "scope-guardian",
     "name": "scope-guardian",
-    "model": "ollama-local/qwen3.6:35b",
+    "model": "ollama-local/glm-4.7-flash:latest",
     "enabled": true
   },
   {

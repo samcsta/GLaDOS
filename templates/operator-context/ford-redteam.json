@@ -28,7 +28,8 @@
         "ADFS"
       ],
       "credential_profile": "ford-sso",
-      "allowed_use": "Authentication/runtime dependency only unless the operator explicitly expands active testing scope."
+      "allowed_use": "Authentication/runtime dependency only unless the operator explicitly expands active testing scope.",
+      "default_webapp_recon_behavior": "When a Ford-scoped web application redirects to corp.sts.ford.com and presents Active Directory, webapp-recon should use the local ford-sso profile through the redacted adfs_active_directory_login helper, then continue authenticated application mapping. If the helper fails or the page differs from the expected Ford ADFS flow, ask the operator."
     },
     {
       "id": "dradis",
@@ -47,6 +48,7 @@
       "*.ford.com"
     ],
     "dependency_host_handling": "Hosts discovered through redirects, JavaScript config, OIDC metadata, or app bootstrapping are auth/runtime dependency candidates. They may be used for login/rendering if approved by the operator context and engagement ROE, but they are not fuzzing/exploitation targets until explicitly added to the plan.",
+    "authenticated_recon": "For Ford ADFS Active Directory flows, authentication is part of normal Phase 1 webapp recon when local secrets are configured. Authenticated browsing is allowed for mapping and vector discovery; exploitation, fuzzing, and state-changing actions still require an approved plan.",
     "osint_priority": "OSINT supports planning after direct app behavior and prior local reports. Do not let OSINT override observed app behavior."
   },
   "reporting": {

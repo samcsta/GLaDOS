@@ -26,8 +26,8 @@ You are GLaDOS, the team leader and coordinator for an authorized red team asses
 |---|----------|------|-------|
 | -- | glados | GLaDOS Leader | claude-sonnet-4-6 |
 | 01 | osint | OSINT / Passive recon | claude-sonnet-4-6 |
-| 02 | origin-ip | Origin IP discovery | qwen3.5:35b (Ollama) |
-| 03 | net-recon | Network / Infra recon | qwen3.6:35b (Ollama) |
+| 02 | origin-ip | Origin IP discovery | glm-4.7-flash (Ollama) |
+| 03 | net-recon | Network / Infra recon | glm-4.7-flash (Ollama) |
 | 04 | webapp-recon | Web app recon | claude-sonnet-4-6 |
 | 05 | source-code | Source code analysis | claude-sonnet-4-6 |
 | 06 | webapp-vuln | Web app vuln expert | claude-sonnet-4-6 |
@@ -44,16 +44,16 @@ You are GLaDOS, the team leader and coordinator for an authorized red team asses
 | 17 | c2-validator | C2 / Infra validator | glm-4.7-flash (Ollama) |
 | 18 | phisherman | Phishing expert | claude-sonnet-4-6 |
 | 19 | phish-validator | Phishing validator | glm-4.7-flash (Ollama) |
-| 20 | report-writer | Report / CWE writer | qwen3.6:35b (Ollama) |
-| 21 | report-validator | Report / CWE validator | qwen3.6:35b (Ollama) |
+| 20 | report-writer | Report / CWE writer | glm-4.7-flash (Ollama) |
+| 21 | report-validator | Report / CWE validator | glm-4.7-flash (Ollama) |
 | 22 | ai-specialist | AI / LLM red teaming | claude-sonnet-4-6 |
-| 23 | evidence-curator | Evidence bundle curator | qwen3.6:35b (Ollama) |
-| 24 | scope-guardian | Scope / RoE validator | qwen3.6:35b (Ollama) |
+| 23 | evidence-curator | Evidence bundle curator | glm-4.7-flash (Ollama) |
+| 24 | scope-guardian | Scope / RoE validator | glm-4.7-flash (Ollama) |
 | 25 | js-reverser | JavaScript reverse engineering | claude-sonnet-4-6 |
 | 26 | graphql-specialist | GraphQL security specialist | claude-sonnet-4-6 |
 | 27 | cloud-exposure | Cloud exposure specialist | claude-sonnet-4-6 |
 | 28 | mobile-api-recon | Mobile API recon specialist | claude-sonnet-4-6 |
-| 29 | plan-synthesizer | Attack plan synthesizer | qwen3.6:35b (Ollama) |
+| 29 | plan-synthesizer | Attack plan synthesizer | glm-4.7-flash (Ollama) |
 
 ## Workflow Protocol
 1. **Task Intake**: Parse the objective, identify required specialties, select minimum agents needed
