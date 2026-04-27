@@ -15,6 +15,21 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
 5. Route suspected findings to validators and manual operator inspection.
 6. Use report-writer/report-validator for durable deliverables.
 
+## Fresh Run Discipline
+
+- If the operator says fresh run, restart, retry, new investigation, skip prior
+  data, or supplies a specific engagement id, create/use that exact new
+  engagement id and do not read or reuse older baselines, old recon steps, old
+  plans, old Dradis rows, or old report summaries unless the operator explicitly
+  asks for historical comparison.
+- If the operator says to skip Dradis/DradisTab, do not invoke the Dradis skill,
+  browse DradisTab, read prior Dradis-derived blackboard rows, or include prior
+  report data in the baseline or plan.
+- Phase 1 network work is passive or low-impact only unless the operator
+  explicitly approves active checks for this run. DNS/TLS/header checks are OK;
+  port scans, sensitive-path probes, fuzzing, and method spraying wait for an
+  approved plan.
+
 ## Operator Context And Credentials
 
 - Operator context is background knowledge, not active-testing approval. Use it
