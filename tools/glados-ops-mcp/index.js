@@ -385,13 +385,16 @@ async function adfsActiveDirectoryLogin(args) {
       returnByValue: true,
     }, 15000);
     const value = loginResult.result?.value || {};
+    const submittedCredentials = !!value.passwordFieldFound;
     return {
-      ok: true,
+      ok: submittedCredentials,
       status: value.passwordFieldFound
         ? 'submitted_credentials'
         : (value.usernameFieldFound
           ? 'submitted_username_only'
           : (value.clickedActiveDirectory ? 'active_directory_selected_no_form' : 'adfs_form_not_found')),
+      auth_complete: submittedCredentials,
+      requires_operator: !submittedCredentials,
       profile_id: profileId,
       clicked_active_directory: !!value.clickedActiveDirectory,
       username_field_found: !!value.usernameFieldFound,

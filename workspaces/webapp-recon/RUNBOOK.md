@@ -19,8 +19,10 @@ Produce a direct, machine-readable map of the web application before any exploit
    available. Do not manually click past the auth choice page after helper
    failure, and do not print, request, or handle raw credential values yourself.
    Continue only when the helper reports credential submission and navigation
-   away from the auth wall. If the helper cannot proceed, stop and ask the
-   operator.
+   away from the auth wall. If the helper returns `ok:false`,
+   `requires_operator:true`, `active_directory_selected_no_form`, or any other
+   non-credential-submitted status, stop immediately and ask the operator. Do
+   not retry the helper unless the operator explicitly instructs you to.
 6. After successful authentication, continue browsing the authenticated
    application at low rate: menus, routes, forms, search/filter pages, object ID
    patterns, client-side endpoints, and workflow branches. Record SQLi, XSS,
