@@ -45,6 +45,10 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
   make that host an exploitation/fuzzing target.
 - Prioritize directly observed app behavior and prior local reports over OSINT.
   OSINT is supporting context and may be stale or wrong.
+- Do not dispatch OSINT in parallel with direct Phase 1 app/net recon unless the
+  operator explicitly asks for parallel OSINT. Run `webapp-recon` and low-impact
+  `net-recon` first, then use OSINT as a final corroboration pass before plan
+  synthesis. OSINT must never delay an auth-wall stop/ask decision.
 
 ## Subagent Dispatch
 

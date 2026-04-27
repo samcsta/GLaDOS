@@ -29,9 +29,11 @@ end under `baseline.summary` with `recon.complete=true`.
      store metadata, or approved mobile artifacts are in scope.
    - Output lands at `baseline.js_recon.*` and/or `baseline.mobile_api.*`.
 
-5. **OSINT (passive, 10-min hard cap, low-trust planning signal)** — dispatch
-   `osint` with remit: ASN, CDN, WAF header signatures, MX/TXT,
-   GitHub/GitLab mentions, archive.org.
+5. **OSINT (passive, 10-min hard cap, low-trust planning signal, last-pass)** —
+   dispatch `osint` only after direct webapp/browser recon and low-impact
+   net/DNS/TLS recon have produced their baseline, unless the operator
+   explicitly asks for parallel OSINT. Remit: ASN, CDN, WAF header signatures,
+   MX/TXT, GitHub/GitLab mentions, archive.org.
    - Timebox: 600s via watchdog.
    - osint writes `baseline.osint.*` with per-fact confidence and source.
    - Treat OSINT as corroborating context, not primary evidence. It must not

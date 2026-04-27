@@ -22,11 +22,13 @@ the blackboard under `baseline.*`. No exploitation permitted in Phase 1.
    client-side route/API discovery needs. Dispatch `mobile-api-recon` only when
    mobile artifacts, mobile API hosts, app-store metadata, or deep links are in
    scope.
-5. **OSINT (passive, 10-min hard cap, lower planning weight)** — dispatch
-   `osint`. ASN, CDN, WAF, MX/TXT, GitHub/GitLab mentions, archive.org. Each
-   fact gets a confidence score and source. OSINT supports and corroborates the
-   plan; it does not outrank direct app recon, Dradis history, DNS/TLS facts,
-   or operator-provided scope.
+5. **OSINT (passive, 10-min hard cap, lower planning weight, last-pass)** —
+   dispatch `osint` only after direct browser/app recon and low-impact net recon
+   have produced their baseline, unless the operator explicitly asks for OSINT
+   in parallel. ASN, CDN, WAF, MX/TXT, GitHub/GitLab mentions, archive.org.
+   Each fact gets a confidence score and source. OSINT supports and
+   corroborates the plan; it does not outrank direct app recon, Dradis history,
+   DNS/TLS facts, or operator-provided scope.
 6. **Origin-IP / net-recon (gated)** — if OSINT finds CDN or WAF, dispatch
    `origin-ip` first. Only fall through to `net-recon` if origin-IP confidence
    < 70%. Replaces the old binary LB Gate.
