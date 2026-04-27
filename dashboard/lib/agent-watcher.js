@@ -93,6 +93,11 @@ class AgentWatcher extends EventEmitter {
     tail.on('event', ev => {
       this.emit('event', { agentId, sessionId, ...ev });
     });
+    tail.on('missing', () => {
+      tail.close();
+      this.tails.delete(sessionFile);
+      this.emit('session-ended', { agentId, sessionId });
+    });
     tail.on('error', () => {});
     tail.start();
     this.emit('session-started', { agentId, sessionId, sessionFile });

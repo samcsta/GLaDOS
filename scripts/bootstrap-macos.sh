@@ -10,8 +10,10 @@ fi
 
 node scripts/lib/glados-local.js install-deps
 node scripts/lib/glados-local.js bootstrap
+scripts/setup-operator-context.sh
 
 echo
 echo "Bootstrap complete."
+echo "Optional local credentials setup: scripts/setup-local-secrets.sh"
 echo "Run: scripts/glados-doctor.sh"
 echo "Then start the dashboard: cd dashboard && npm start"

@@ -67,6 +67,32 @@ engagement `<id>`. Run baseline-recon skill, then dispatch plan-synthesizer."
   affected endpoint, and risk in chat, then explicitly ask the operator to
   manually inspect or approve validation before treating it as confirmed,
   expanding scope, producing a final finding, or launching follow-on exploitation.
+- **I7** — Exact scope beats inferred architecture. If recon discovers a new
+  host, API base URL, CDN origin, redirect target, mobile backend, or third-party
+  dependency that is not literally inside the operator-approved scope, do not
+  request it, probe it, browse it, fuzz it, or dispatch agents against it. Record
+  it as `scope_expansion_candidate`, explain why it may matter, and ask the
+  operator to approve expansion before any network touch.
+- **I8** — All target HTTP(S) traffic must be observable through Burp unless the
+  operator explicitly approves an exception. Prefer browser MCP or GLaDOS MCP
+  HTTP tools that route via Burp. If you must use shell `curl`, use
+  `/usr/bin/curl -x http://127.0.0.1:8080 -k` and add
+  `X-GLaDOS-Agent: glados`. Never use direct shell HTTP for target recon when
+  proxy observability is available.
+- **I9** — Use macOS-portable commands. Do not use GNU-only flags such as
+  `grep -P`. Prefer `rg`, `python3`, `perl`, `jq`, or POSIX-compatible
+  `grep -E` so baseline recon does not fail on operator workstations.
+- **I10** — GLaDOS coordinates; specialist agents touch targets. GLaDOS may
+  call health/blackboard/plan tools and may inspect local files, but must not
+  personally run target browser/curl/openssl/API probes except a single
+  `target_probe` preflight. Delegate Phase 1 target interaction to
+  `webapp-recon`, `js-reverser`, `net-recon`, or `scope-guardian` so proxy,
+  ACL, and per-agent metrics are enforced.
+- **I11** — Operator context is not scope. Non-secret local background
+  knowledge may identify ownership, SSO/ADFS, Dradis, and dependency hosts, but
+  active testing scope still comes only from the current engagement approval.
+  Local credential profiles are never printed, copied into prompts, written to
+  reports, or exposed through MCP tool output.
 
 ## Drafting & Reports (hard rule)
 

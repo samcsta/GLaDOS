@@ -15,7 +15,8 @@ The Git repo contains application code, scripts, docs, default agent seed templa
 | Blackboard DB | `~/.glados/blackboard/blackboard.db` |
 | Watchdog DB | `~/.glados/watchdog/watchdog.db` |
 | OpenClaw config, sessions, memory | `~/.openclaw/` |
-| Local secrets | `.env` and local OpenClaw config |
+| Operator context | `~/.glados/operator-context.json` |
+| Local secrets | `.env` and `~/.glados/secrets/local-auth.json` |
 
 Updates never overwrite local agents, reports, investigations, blackboards, watchdog state, `.env`, or OpenClaw sessions.
 
@@ -25,11 +26,16 @@ Updates never overwrite local agents, reports, investigations, blackboards, watc
 cp .env.example .env
 # edit .env and add your own local LLM API key
 scripts/bootstrap-macos.sh
+scripts/setup-local-secrets.sh # optional, local workstation only
 scripts/glados-doctor.sh
 cd dashboard && npm start
 ```
 
 Bootstrap copies the default agent seeds once into `~/.glados/workspaces/agents`, creates local runtime directories and DBs, installs Node dependencies, and generates `~/.openclaw/openclaw.json` so OpenClaw points at the local editable agents.
+
+Bootstrap also installs a non-secret starter operator context from `templates/operator-context/ford-redteam.json` into `~/.glados/operator-context.json`. That file can contain background knowledge such as Ford-owned domain indicators, ADFS/SSO hosts, Dradis hosts, and reporting paths. It does not grant active testing scope by itself.
+
+Credentials are local-only. Use `scripts/setup-local-secrets.sh` to create `~/.glados/secrets/local-auth.json` with workstation-specific credential profiles. GLaDOS can check which profiles exist, but the MCP status tool intentionally never returns usernames, passwords, tokens, or secret values.
 
 ## Updating
 
@@ -54,6 +60,12 @@ That file can show:
 - Custom local agent detected
 
 Applying upstream agent changes is an operator decision, not an automatic update.
+
+Updates do not overwrite `~/.glados/operator-context.json` or `~/.glados/secrets/local-auth.json`. If the committed operator context template changes, teammates can review it and refresh their local copy intentionally with:
+
+```bash
+scripts/setup-operator-context.sh --force
+```
 
 ## Customizing Agents
 
@@ -110,6 +122,8 @@ Core pieces:
 - Blackboard MCP: shared local SQLite state for findings, tasks, baseline recon, plans, approvals, and replans.
 - Watchdog MCP: target health, halts, circuit breaker, and deterministic plan dispatch checks.
 - GLaDOS ops MCP: scope guard checks, evidence bundle creation, JS/OpenAPI extraction, and safe command planning.
+- Operator context: non-secret background knowledge available to GLaDOS through `glados-ops.operator_context`.
+- Local auth status: redacted credential-profile availability through `glados-ops.local_auth_status`; credential values stay local and are not returned to agents.
 - Burp integration: routes active web traffic through Burp, attributes requests per agent, and exposes proxy history/metrics to the dashboard.
 
 ## Web App Assessment Flow

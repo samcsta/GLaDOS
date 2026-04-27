@@ -14,6 +14,8 @@ const GLADOS_RUNTIME_DIR = process.env.GLADOS_RUNTIME_DIR || path.join(os.homedi
 const BLACKBOARD_DB = process.env.BLACKBOARD_DB || path.join(GLADOS_RUNTIME_DIR, 'blackboard', 'blackboard.db');
 const WATCHDOG_DB = process.env.WATCHDOG_DB || path.join(GLADOS_RUNTIME_DIR, 'watchdog', 'watchdog.db');
 const INVESTIGATIONS = process.env.GLADOS_INVESTIGATIONS_DIR || path.join(GLADOS_RUNTIME_DIR, 'investigations');
+const OPERATOR_CONTEXT = process.env.GLADOS_OPERATOR_CONTEXT || path.join(GLADOS_RUNTIME_DIR, 'operator-context.json');
+const LOCAL_AUTH = process.env.GLADOS_LOCAL_AUTH || path.join(GLADOS_RUNTIME_DIR, 'secrets', 'local-auth.json');
 
 const blackboard = fs.existsSync(BLACKBOARD_DB) ? new Database(BLACKBOARD_DB, { readonly: true }) : null;
 const watchdog = fs.existsSync(WATCHDOG_DB) ? new Database(WATCHDOG_DB, { readonly: true }) : null;
@@ -61,6 +63,16 @@ const TOOLS = [
         risk_to_target: { type: 'string', enum: ['low', 'medium', 'high'] },
       },
     },
+  },
+  {
+    name: 'operator_context',
+    description: 'Read the non-secret local operator context, such as owned-domain background knowledge, auth flow cues, and reporting paths.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'local_auth_status',
+    description: 'Report which local credential profiles are configured without returning usernames, passwords, tokens, or secret values.',
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'evidence_bundle_create',
@@ -147,6 +159,53 @@ function readInput(args) {
   return fs.readFileSync(p, 'utf8');
 }
 
+function readJsonFile(file, fallback = null) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch { return fallback; }
+}
+
+function operatorContext() {
+  const context = readJsonFile(OPERATOR_CONTEXT, null);
+  if (!context) {
+    return {
+      configured: false,
+      path: OPERATOR_CONTEXT,
+      reason: 'operator context file not found or invalid JSON',
+    };
+  }
+  return {
+    configured: true,
+    path: OPERATOR_CONTEXT,
+    context,
+    note: 'Operator context is non-secret background knowledge. It does not expand active testing scope by itself.',
+  };
+}
+
+function localAuthStatus() {
+  const auth = readJsonFile(LOCAL_AUTH, null);
+  if (!auth?.profiles || typeof auth.profiles !== 'object') {
+    return {
+      configured: false,
+      path: LOCAL_AUTH,
+      profiles: [],
+      note: 'Run scripts/setup-local-secrets.sh to create local credential profiles.',
+    };
+  }
+  const profiles = Object.entries(auth.profiles).map(([id, profile]) => ({
+    id,
+    username_set: !!profile?.username,
+    password_set: !!profile?.password,
+    allowed_hosts: Array.isArray(profile?.allowed_hosts) ? profile.allowed_hosts : [],
+    notes: profile?.notes || '',
+  }));
+  return {
+    configured: true,
+    path: LOCAL_AUTH,
+    profiles,
+    redaction: 'Credential values are intentionally never returned by this tool.',
+  };
+}
+
 function engagementScope(engagementId) {
   if (!blackboard || !engagementId) return null;
   const row = blackboard.prepare('SELECT scope FROM engagements WHERE id = ?').get(engagementId);
@@ -201,7 +260,11 @@ function scopeGuard(args) {
   if (!scopeResult.ok) missing.push(scopeResult.reason);
   if (!['healthy', 'unknown'].includes(health.state)) missing.push(`target health is ${health.state}`);
   if (!preApprovedClass && !approved) missing.push('no approved plan includes this agent');
-  const requiresOperator = args.risk_to_target === 'high' || /post|exploit|mutat|delete|write|send|phish/i.test(args.action || '');
+  const actionText = String(args.action || '');
+  const riskyAction = /post|exploit|mutat|delete|write|send|phish/i.test(actionText);
+  const clearlyNegatedRisk = /\b(no|without|non[- ]?)\s+(post|exploit|exploitation|mutation|mutating|delete|write|send|phish|phishing|fuzzing)\b/i.test(actionText);
+  const requiresOperator = args.risk_to_target === 'high'
+    || (riskyAction && !clearlyNegatedRisk && !(preApprovedClass && args.risk_to_target === 'low'));
   return {
     allowed: missing.length === 0 && !requiresOperator,
     requires_operator: missing.length === 0 && requiresOperator,
@@ -350,6 +413,8 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
   try {
     switch (name) {
       case 'scope_guard_check': return json(scopeGuard(args));
+      case 'operator_context': return json(operatorContext());
+      case 'local_auth_status': return json(localAuthStatus());
       case 'evidence_bundle_create': return json(evidenceBundle(args));
       case 'js_endpoint_extract': return json(jsExtract(args));
       case 'openapi_inventory': return json(openapiInventory(args));

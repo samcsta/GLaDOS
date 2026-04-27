@@ -27,12 +27,21 @@ class JsonlTail extends EventEmitter {
 
   start() {
     fs.stat(this.filePath, (err, st) => {
-      if (err) return this.emit('error', err);
+      if (err) {
+        if (err.code === 'ENOENT') this.emit('missing', { filePath: this.filePath, error: err });
+        else this._emitError(err);
+        return;
+      }
       this.position = 0;
       this._readNewBytes(() => {
-        this._watcher = fs.watch(this.filePath, { persistent: true }, () => {
-          this._scheduleRead();
-        });
+        try {
+          this._watcher = fs.watch(this.filePath, { persistent: true }, () => {
+            this._scheduleRead();
+          });
+        } catch (e) {
+          if (e.code === 'ENOENT') this.emit('missing', { filePath: this.filePath, error: e });
+          else this._emitError(e);
+        }
       });
     });
     return this;
@@ -72,7 +81,10 @@ class JsonlTail extends EventEmitter {
         this.position += readBytes;
         done?.();
       });
-      stream.on('error', e => this.emit('error', e));
+      stream.on('error', e => {
+        if (e.code === 'ENOENT') this.emit('missing', { filePath: this.filePath, error: e });
+        else this._emitError(e);
+      });
     });
   }
 
@@ -87,6 +99,10 @@ class JsonlTail extends EventEmitter {
     this.closed = true;
     if (this._watcher) { try { this._watcher.close(); } catch {} }
     this.emit('end');
+  }
+
+  _emitError(err) {
+    if (this.listenerCount('error') > 0) this.emit('error', err);
   }
 }
 

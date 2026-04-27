@@ -1,4 +1,5 @@
 const path = require('node:path');
+const fs = require('node:fs');
 const express = require('express');
 const { PORT, BLACKBOARD_DB } = require('./lib/config');
 const { AgentWatcher } = require('./lib/agent-watcher');
@@ -52,13 +53,14 @@ function broadcastLobby(type, data) {
 
 function startChatTurn(agentId, message) {
   const turnId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const startedAt = Date.now();
   activeChatTurns.set(agentId, {
     turnId,
-    startedAt: Date.now(),
+    startedAt,
     messagePreview: String(message || '').slice(0, 160),
   });
   recentChatTurns.delete(agentId);
-  broadcastLobby('chat-turn-started', { agentId, turnId });
+  broadcastLobby('chat-turn-started', { agentId, turnId, startedAt });
   return turnId;
 }
 
@@ -99,6 +101,7 @@ function resetAgentSession(agentId, ts = new Date().toISOString().replace(/[:.]/
   let idx = null;
   let entry = null;
   let archivedPath = null;
+  let removedLockPath = null;
   let removedIndexEntry = false;
 
   try {
@@ -110,6 +113,12 @@ function resetAgentSession(agentId, ts = new Date().toISOString().replace(/[:.]/
   if (sessionFile && fs.existsSync(sessionFile)) {
     archivedPath = `${sessionFile}.archived-${ts}`;
     fs.renameSync(sessionFile, archivedPath);
+  }
+
+  const lockPath = sessionFile ? `${sessionFile}.lock` : null;
+  if (lockPath && fs.existsSync(lockPath)) {
+    fs.rmSync(lockPath, { force: true });
+    removedLockPath = lockPath;
   }
 
   if (idx && idx[key]) {
@@ -124,6 +133,7 @@ function resetAgentSession(agentId, ts = new Date().toISOString().replace(/[:.]/
     ok: true,
     agentId,
     archivedPath,
+    removedLockPath,
     removedIndexEntry,
     hadSession: !!sessionFile || removedIndexEntry,
   };
@@ -280,12 +290,18 @@ app.get('/api/agents/:id/transcript', (req, res) => {
   // read the current session file from disk and emit its history before going live.
   if (buf.length === 0) {
     const snap = currentSessionForAgent(agentId);
-    if (snap && snap.sessionFile) {
+    if (snap && snap.sessionFile && fs.existsSync(snap.sessionFile)) {
       const backfill = new JsonlTail(snap.sessionFile);
       backfill.on('event', ev => {
         const enriched = { agentId, sessionId: snap.sessionId, ...ev };
         pushBuffer(agentId, enriched);
         res.write(`data: ${JSON.stringify(enriched)}\n\n`);
+      });
+      backfill.on('missing', () => {
+        res.write(`event: transcript-warning\ndata: ${JSON.stringify({ agentId, warning: 'session file is no longer present; waiting for the next live session' })}\n\n`);
+      });
+      backfill.on('error', e => {
+        console.warn(`[transcript:${agentId}] backfill error:`, e.message);
       });
       backfill.start();
       // Close the backfill tail after one pass; live updates arrive via watcher.
@@ -743,10 +759,12 @@ app.get('/api/validate/:step', async (req, res) => {
       return res.json({ ok: true, detail: 'dashboard is responding — you just hit it' });
     }
     if (step === 'gateway') {
-      const r = await run('/usr/local/bin/openclaw', ['daemon', 'status'], 5000);
+      // On some workstations the OpenClaw status probe takes >5s while the
+      // daemon is healthy, especially right after a restart.
+      const r = await run('/usr/local/bin/openclaw', ['daemon', 'status'], 15000);
       if (r.code === 0 && /running/i.test(r.stdout)) return res.json({ ok: true, detail: 'openclaw daemon: running' });
       // Fallback — try homebrew bin path
-      const r2 = await run('/opt/homebrew/bin/openclaw', ['daemon', 'status'], 5000);
+      const r2 = await run('/opt/homebrew/bin/openclaw', ['daemon', 'status'], 15000);
       if (r2.code === 0 && /running/i.test(r2.stdout)) return res.json({ ok: true, detail: 'openclaw daemon: running' });
       return res.json({ ok: false, detail: 'openclaw daemon not running', hint: 'Run `openclaw daemon start` or click Restart gateway.' });
     }

@@ -242,6 +242,9 @@ function ensureTranscript(tabId, agentId) {
 	    recentlyStreamed: [],            // [{ kind: 'thinking'|'text', content, ts }]
 	    streamedTextKeys: new Map(),     // normalized "kind:text" -> ts; robust JSONL duplicate suppression
 	    pendingUserMessages: [],
+	    turnStartedAt: null,
+	    turnAgeMs: null,
+	    firstTokenSeenAt: null,
 	  };
   state.transcripts.set(tabId, rec);
   const es = new EventSource(`/api/agents/${encodeURIComponent(agentId)}/transcript`);
@@ -253,6 +256,7 @@ function ensureTranscript(tabId, agentId) {
     // the live entry. They arrive many-per-second and would blow out memory.
     if (ev.kind === 'thinking-stream' || ev.kind === 'text-stream') {
       const isText = ev.kind === 'text-stream';
+      rec.firstTokenSeenAt ||= Date.now();
       markTranscriptActivity(rec, tabId, isText ? 'responding' : 'thinking');
       handleStreamDelta(rec, ev);
       if (isText && ev.evtType === 'text_end') finishTranscriptTurn(rec, tabId);
@@ -290,10 +294,13 @@ function ensureTranscript(tabId, agentId) {
     if (rec.el && rec.el.isConnected) appendEntry(rec.el, ev, rec);
     if (rec.sending) {
       if (ev.kind === 'assistant-text' || ev.kind === 'prompt-error') {
+        rec.firstTokenSeenAt ||= Date.now();
         finishTranscriptTurn(rec, tabId);
       } else if (ev.kind === 'thinking') {
+        rec.firstTokenSeenAt ||= Date.now();
         markTranscriptActivity(rec, tabId, 'thinking');
       } else if (ev.kind === 'tool-call' || ev.kind === 'tool-result' || ev.kind === 'meta') {
+        rec.firstTokenSeenAt ||= Date.now();
         markTranscriptActivity(rec, tabId, 'working');
       }
     }
@@ -419,18 +426,36 @@ function finishTranscriptTurn(rec, tabId) {
   rec.sending = false;
   rec.activity = null;
   rec.lastActivityTs = Date.now();
+  rec.turnAgeMs = null;
   updateSendingIndicator(tabId);
+}
+
+function formatElapsed(ms) {
+  const s = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return m ? `${m}m ${String(r).padStart(2, '0')}s` : `${r}s`;
+}
+
+function transcriptTurnAge(rec) {
+  if (!rec) return 0;
+  if (Number.isFinite(rec.turnAgeMs)) return rec.turnAgeMs;
+  if (rec.turnStartedAt) return Date.now() - rec.turnStartedAt;
+  return 0;
 }
 
 function transcriptStatusText(rec, label) {
   const base = label || rec?.agentId || 'Agent';
   const activity = rec?.activity || 'waiting';
-  if (activity === 'thinking') return `${base} is thinking live…`;
-  if (activity === 'responding') return `${base} is responding live…`;
-	  if (activity === 'working') return `${base} is working…`;
+  const age = transcriptTurnAge(rec);
+  const ageText = age ? ` · ${formatElapsed(age)}` : '';
+  if (activity === 'thinking') return `${base} is thinking live${ageText}…`;
+  if (activity === 'responding') return `${base} is responding live${ageText}…`;
+	  if (activity === 'working') return `${base} is working${ageText}…`;
 	  if (activity === 'finalizing') return `${base} is finalizing the answer…`;
-	  if (activity === 'waiting' && rec?.thinkingLevel === 'off') return `${base} is waiting for the first token (thinking stream off)…`;
-	  return `${base} is waiting for the first token…`;
+	  if (activity === 'waiting' && rec?.thinkingLevel === 'off') return `${base} is waiting for the first token${ageText} (thinking stream off)…`;
+	  if (activity === 'waiting' && age >= 60_000) return `${base} is still waiting for the first token${ageText}…`;
+	  return `${base} is waiting for the first token${ageText}…`;
 	}
 
 function ackOptimisticUserMessage(rec, ev) {
@@ -469,11 +494,13 @@ async function refreshChatTurnStatus(tabId, agentId) {
     if (!r.ok) return;
     const status = await r.json();
     if (status.active) {
+      rec.turnStartedAt = status.startedAt || rec.turnStartedAt || Date.now();
+      rec.turnAgeMs = status.ageMs;
       if (!rec.sending) {
         rec.sending = true;
-        rec.activity = 'working';
+        rec.activity = rec.firstTokenSeenAt ? 'working' : 'waiting';
       } else if (!rec.activity) {
-        rec.activity = 'working';
+        rec.activity = rec.firstTokenSeenAt ? 'working' : 'waiting';
       }
       updateSendingIndicator(tabId);
     } else if (rec.sending && rec.activity === 'finalizing') {
@@ -786,6 +813,9 @@ function renderChatPane() {
 
     rec.sending = true;
     rec.activity = 'waiting';
+    rec.turnStartedAt = Date.now();
+    rec.turnAgeMs = 0;
+    rec.firstTokenSeenAt = null;
     updateSendingIndicator(tabId);
 
     // Fire-and-forget. The assistant's response streams back via SSE as soon
@@ -1013,6 +1043,9 @@ function renderChatBotPane() {
 
     rec.sending = true;
     rec.activity = 'waiting';
+    rec.turnStartedAt = Date.now();
+    rec.turnAgeMs = 0;
+    rec.firstTokenSeenAt = null;
     updateChatBotSendingIndicator();
 
     fetch('/api/chat/atlas', {
@@ -1409,6 +1442,8 @@ function subscribeLobby() {
     if (rec) {
       rec.sending = true;
       rec.activity = rec.activity || 'waiting';
+      rec.turnStartedAt = data.startedAt || rec.turnStartedAt || Date.now();
+      rec.turnAgeMs = null;
       updateSendingIndicator(tabId);
     }
     logEvent('started', `${data.agentId || 'agent'} turn started`);

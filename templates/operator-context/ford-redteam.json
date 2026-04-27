@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "name": "Ford red-team operator context",
+  "description": "Non-secret local operating knowledge for Ford red-team assessments. This file may be committed because it contains no credentials, tokens, customer data, or engagement evidence.",
+  "organization": {
+    "name": "Ford Motor Company",
+    "owned_domain_indicators": [
+      "ford.com",
+      "dealerconnection.com"
+    ],
+    "notes": [
+      "Treat Ford-owned domain indicators as background ownership knowledge, not automatic active-assessment approval.",
+      "Per-engagement scope still controls what GLaDOS and subagents may actively test."
+    ]
+  },
+  "auth_flows": [
+    {
+      "id": "ford-adfs",
+      "name": "Ford ADFS / Active Directory",
+      "login_hosts": [
+        "corp.sts.ford.com",
+        "www.is.dealerconnection.com"
+      ],
+      "ui_cues": [
+        "Active Directory",
+        "Dealer/Supplier/Other Login",
+        "Home Realm Discovery",
+        "ADFS"
+      ],
+      "credential_profile": "ford-sso",
+      "allowed_use": "Authentication/runtime dependency only unless the operator explicitly expands active testing scope."
+    },
+    {
+      "id": "dradis",
+      "name": "Dradis and DradisTab",
+      "login_hosts": [
+        "dradis.redteamstuff.com",
+        "dradistab.redteamstuff.com"
+      ],
+      "credential_profile": "dradis",
+      "allowed_use": "Prior-report lookup and report workflow only. Never push findings without operator approval."
+    }
+  ],
+  "scope_policy": {
+    "background_owned_domains": [
+      "*.dealerconnection.com",
+      "*.ford.com"
+    ],
+    "dependency_host_handling": "Hosts discovered through redirects, JavaScript config, OIDC metadata, or app bootstrapping are auth/runtime dependency candidates. They may be used for login/rendering if approved by the operator context and engagement ROE, but they are not fuzzing/exploitation targets until explicitly added to the plan.",
+    "osint_priority": "OSINT supports planning after direct app behavior and prior local reports. Do not let OSINT override observed app behavior."
+  },
+  "reporting": {
+    "findings_store": "~/.glados/blackboard/blackboard.db:findings",
+    "evidence_store": "~/.glados/investigations/<target>/evidence/",
+    "reports_store": "~/.glados/reports/<engagement>/"
+  }
+}

@@ -10,6 +10,7 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const TEMPLATE_ROOT = path.join(REPO_ROOT, 'templates', 'agents', 'default');
 const REGISTRY_PATH = path.join(REPO_ROOT, 'templates', 'agent-registry.json');
 const DOTENV_PATH = path.join(REPO_ROOT, '.env');
+const DEFAULT_OPERATOR_CONTEXT = path.join(REPO_ROOT, 'templates', 'operator-context', 'ford-redteam.json');
 
 function log(msg) { process.stdout.write(`${msg}\n`); }
 function warn(msg) { process.stderr.write(`WARN: ${msg}\n`); }
@@ -59,6 +60,9 @@ function localPaths() {
     customAgentsJson: path.join(runtimeDir, 'custom-agents.json'),
     seedStatePath: path.join(runtimeDir, 'agent-seed-state.json'),
     upstreamStatusPath: path.join(runtimeDir, 'upstream-agent-status.json'),
+    operatorContextPath: path.join(runtimeDir, 'operator-context.json'),
+    secretsDir: path.join(runtimeDir, 'secrets'),
+    localAuthPath: path.join(runtimeDir, 'secrets', 'local-auth.json'),
     openclawJson: path.join(openclawHome, 'openclaw.json'),
     openclawAgentsDir: path.join(openclawHome, 'agents'),
   };
@@ -154,10 +158,15 @@ function ensureRuntimeDirs(paths) {
     paths.investigationsDir,
     paths.blackboardDir,
     paths.watchdogDir,
+    paths.secretsDir,
     paths.openclawHome,
     paths.openclawAgentsDir,
   ]) ensureDir(dir);
   if (!fs.existsSync(paths.customAgentsJson)) writeJson(paths.customAgentsJson, { version: 1, agents: [] });
+  if (!fs.existsSync(paths.operatorContextPath) && fs.existsSync(DEFAULT_OPERATOR_CONTEXT)) {
+    fs.copyFileSync(DEFAULT_OPERATOR_CONTEXT, paths.operatorContextPath);
+    fs.chmodSync(paths.operatorContextPath, 0o600);
+  }
 }
 
 function bootstrapAgents(paths) {
@@ -323,6 +332,8 @@ function generateOpenClawConfig(paths) {
     GLADOS_AGENT_WORKSPACES: paths.agentsDir,
     GLADOS_REPORTS_DIR: paths.reportsDir,
     GLADOS_INVESTIGATIONS_DIR: paths.investigationsDir,
+    GLADOS_OPERATOR_CONTEXT: paths.operatorContextPath,
+    GLADOS_LOCAL_AUTH: paths.localAuthPath,
     BLACKBOARD_DB: paths.blackboardDb,
     WATCHDOG_DB: paths.watchdogDb,
     OPENCLAW_HOME: paths.openclawHome,
@@ -426,6 +437,8 @@ function generateOpenClawConfig(paths) {
       GLADOS_AGENT_WORKSPACES: paths.agentsDir,
       GLADOS_REPORTS_DIR: paths.reportsDir,
       GLADOS_INVESTIGATIONS_DIR: paths.investigationsDir,
+      GLADOS_OPERATOR_CONTEXT: paths.operatorContextPath,
+      GLADOS_LOCAL_AUTH: paths.localAuthPath,
       BLACKBOARD_DB: paths.blackboardDb,
       WATCHDOG_DB: paths.watchdogDb,
       BURP_PROXY: burpProxy,
