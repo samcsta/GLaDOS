@@ -322,12 +322,28 @@ async function adfsActiveDirectoryLogin(args) {
           el.dispatchEvent(new Event(type, { bubbles: true }));
         }
       };
-      const byText = text => [...document.querySelectorAll('button,a,input[type=button],input[type=submit]')]
-        .find(el => visible(el) && new RegExp(text, 'i').test((el.innerText || el.value || el.getAttribute('aria-label') || '').trim()));
+      const docs = () => {
+        const out = [document];
+        for (const frame of Array.from(window.frames || [])) {
+          try {
+            if (frame.document) out.push(frame.document);
+          } catch {}
+        }
+        return out;
+      };
+      const textOf = el => (el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+      const all = selector => docs().flatMap(doc => Array.from(doc.querySelectorAll(selector)));
+      const byText = text => {
+        const re = new RegExp(text, 'i');
+        const selector = 'button,a,input[type=button],input[type=submit],[role=button],div,span';
+        return all(selector).find(el => visible(el) && re.test(textOf(el)));
+      };
       const click = el => {
         if (!el) return false;
         el.scrollIntoView({ block: 'center', inline: 'center' });
-        el.click();
+        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
         return true;
       };
       const clickSubmit = () => click(byText('next|sign in|continue|submit|log in|login')) || false;
@@ -335,7 +351,7 @@ async function adfsActiveDirectoryLogin(args) {
       const clickedActiveDirectory = click(byText('Active Directory'));
       await sleep(1800);
 
-      let userInput = [...document.querySelectorAll('input')]
+      let userInput = all('input')
         .find(el => visible(el) && !/password|hidden|submit|button|checkbox|radio/i.test(el.type || '') && !el.disabled);
       if (userInput) {
         userInput.focus();
@@ -345,7 +361,7 @@ async function adfsActiveDirectoryLogin(args) {
         await sleep(1800);
       }
 
-      let passwordInput = [...document.querySelectorAll('input[type=password]')].find(el => visible(el) && !el.disabled);
+      let passwordInput = all('input[type=password]').find(el => visible(el) && !el.disabled);
       if (passwordInput) {
         passwordInput.focus();
         passwordInput.value = password;
@@ -360,8 +376,7 @@ async function adfsActiveDirectoryLogin(args) {
         passwordFieldFound: !!passwordInput,
         finalUrl: location.href,
         finalHost: location.hostname,
-        title: document.title,
-        bodyPreview: document.body ? document.body.innerText.slice(0, 500) : ''
+        title: document.title
       };
     })(${JSON.stringify(profile.username)}, ${JSON.stringify(profile.password)})`;
     const loginResult = await cdpCall(ws, 'Runtime.evaluate', {
@@ -372,7 +387,11 @@ async function adfsActiveDirectoryLogin(args) {
     const value = loginResult.result?.value || {};
     return {
       ok: true,
-      status: value.passwordFieldFound ? 'submitted_credentials' : (value.clickedActiveDirectory ? 'active_directory_selected' : 'attempted'),
+      status: value.passwordFieldFound
+        ? 'submitted_credentials'
+        : (value.usernameFieldFound
+          ? 'submitted_username_only'
+          : (value.clickedActiveDirectory ? 'active_directory_selected_no_form' : 'adfs_form_not_found')),
       profile_id: profileId,
       clicked_active_directory: !!value.clickedActiveDirectory,
       username_field_found: !!value.usernameFieldFound,

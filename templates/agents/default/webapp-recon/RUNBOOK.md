@@ -13,10 +13,14 @@ Produce a direct, machine-readable map of the web application before any exploit
 5. If a Ford ADFS / `corp.sts.ford.com` page appears with an **Active
    Directory** option, treat it as an approved auth dependency for Ford web app
    recon when `glados-ops__local_auth_status` shows the `ford-sso` profile is
-   configured. Click Active Directory and use
-   `glados-ops__adfs_active_directory_login` with the current browser
-   `targetId` or `wsUrl`. Do not print, request, or handle raw credential
-   values yourself. If the helper cannot proceed, stop and ask the operator.
+   configured. Use `glados-ops__adfs_active_directory_login` with the current
+   browser `targetId` or `wsUrl`; the helper is responsible for selecting Active
+   Directory and submitting the local secret profile when a credential form is
+   available. Do not manually click past the auth choice page after helper
+   failure, and do not print, request, or handle raw credential values yourself.
+   Continue only when the helper reports credential submission and navigation
+   away from the auth wall. If the helper cannot proceed, stop and ask the
+   operator.
 6. After successful authentication, continue browsing the authenticated
    application at low rate: menus, routes, forms, search/filter pages, object ID
    patterns, client-side endpoints, and workflow branches. Record SQLi, XSS,

@@ -34,6 +34,7 @@ function readSessionsIndex(agentId) {
 }
 
 const LIVE_MTIME_MS = 2 * 60 * 1000; // session JSONL touched within 2 min = live
+const PENDING_SESSION_MS = 20 * 60 * 1000; // local models may think/load before appending output
 
 function sessionSnapshot(agentId, key, entry) {
   if (!entry) return null;
@@ -41,14 +42,17 @@ function sessionSnapshot(agentId, key, entry) {
   let mtimeMs = 0;
   try { mtimeMs = fs.statSync(sessionFile).mtimeMs; } catch {}
   const endedAtMs = typeof entry.endedAt === 'number' ? entry.endedAt : 0;
-  const fresh = mtimeMs > 0 && (Date.now() - mtimeMs) < LIVE_MTIME_MS;
+  const now = Date.now();
+  const fresh = mtimeMs > 0 && (now - mtimeMs) < LIVE_MTIME_MS;
+  const startedRecently = typeof entry.startedAt === 'number' && (now - entry.startedAt) < PENDING_SESSION_MS;
   const statusRunning = entry.status === 'running';
   const cleanlyEnded = endedAtMs > 0 && (!entry.startedAt || endedAtMs >= entry.startedAt);
 
-  // Treat as live only if status says running AND there's no completed endedAt AND
-  // the JSONL has been touched recently. sessions.json leaves status="running" on
-  // dirty exits so we can't trust it alone.
-  const live = statusRunning && !cleanlyEnded && fresh;
+  // Treat freshly started running sessions as live even before their JSONL is
+  // touched. Local models can spend minutes loading or thinking before first
+  // output; tying liveness only to mtime makes the dashboard show false-idle.
+  // The pending window is bounded so dirty old sessions still age out.
+  const live = statusRunning && !cleanlyEnded && (fresh || startedRecently);
 
   return {
     agentId,
@@ -76,7 +80,7 @@ function currentSessionForAgent(agentId) {
     .filter(Boolean)
     .sort((a, b) => {
       if (a.live !== b.live) return a.live ? -1 : 1;
-      return (b.mtimeMs || b.startedAt || 0) - (a.mtimeMs || a.startedAt || 0);
+      return (b.startedAt || b.mtimeMs || 0) - (a.startedAt || a.mtimeMs || 0);
     });
   return snapshots[0] || null;
 }

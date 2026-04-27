@@ -53,6 +53,12 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
   `runtime: "acp"`.
 - Use the minimal prompt needed, include the engagement id and exact scope, and
   tell the subagent to write concise results to chat/blackboard.
+- Maintain the exact `childSessionKey` values returned by `sessions_spawn` for
+  the current engagement. If an internal subagent completion event arrives with
+  a session key or engagement id that is not in that current expected set, treat
+  it as a stale event from a prior run: ignore it, do not summarize it, do not
+  write its content into the current baseline, and continue waiting for the
+  current child sessions.
 
 ## Output Contract
 
