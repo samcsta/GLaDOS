@@ -1,0 +1,51 @@
+{
+  "_comment": "GLaDOS v3.1 per-agent fetch ACL. Copy to ~/.openclaw/glados-fetch-acl.json and edit per engagement. tag-injector.js reads this on every outbound call via an mtime-keyed cache, so edits take effect within ~1s. Leave enabled=false to keep v3.0 behavior (no ACL).",
+  "version": 1,
+  "enabled": false,
+  "default": "deny",
+  "agents": {
+    "osint": {
+      "allow": [
+        "*.shodan.io",
+        "*.censys.io",
+        "crt.sh",
+        "*.crt.sh",
+        "api.github.com",
+        "*.github.com",
+        "archive.org",
+        "web.archive.org",
+        "*.virustotal.com"
+      ]
+    },
+    "origin-ip": {
+      "allow": [
+        "*.shodan.io",
+        "*.censys.io",
+        "*.fofa.info",
+        "dns.google",
+        "cloudflare-dns.com"
+      ]
+    },
+    "net-recon": {
+      "allow": [
+        "dns.google",
+        "cloudflare-dns.com"
+      ]
+    },
+    "webapp-recon": {
+      "allow": [
+        "__FILL_TARGET_HOSTS__"
+      ]
+    },
+    "webapp-vuln": {
+      "allow": [
+        "__FILL_TARGET_HOSTS__"
+      ]
+    },
+    "api-expert": {
+      "allow": [
+        "__FILL_TARGET_HOSTS__"
+      ]
+    }
+  }
+}

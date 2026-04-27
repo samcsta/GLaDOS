@@ -1,0 +1,203 @@
+[
+  {
+    "id": "ad-expert",
+    "name": "ad-expert",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "ad-validator",
+    "name": "ad-validator",
+    "model": "ollama-local/glm-4.7-flash:latest",
+    "enabled": true
+  },
+  {
+    "id": "ai-specialist",
+    "name": "ai-specialist (yosyp)",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "api-expert",
+    "name": "api-expert",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "api-validator",
+    "name": "api-validator",
+    "model": "ollama-local/glm-4.7-flash:latest",
+    "enabled": true
+  },
+  {
+    "id": "atlas",
+    "name": "atlas",
+    "model": "ollama-local/gemma4:26b",
+    "enabled": true,
+    "identity": {
+      "name": "Atlas",
+      "theme": "Sam personal assistant — not part of GLaDOS",
+      "emoji": "🗺️"
+    }
+  },
+  {
+    "id": "c2-builder",
+    "name": "c2-builder",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "c2-validator",
+    "name": "c2-validator",
+    "model": "ollama-local/glm-4.7-flash:latest",
+    "enabled": true
+  },
+  {
+    "id": "cloud-exposure",
+    "name": "cloud-exposure",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "evidence-curator",
+    "name": "evidence-curator",
+    "model": "ollama-local/qwen3.6:35b",
+    "enabled": true
+  },
+  {
+    "id": "glados",
+    "name": "glados",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true,
+    "identity": {
+      "name": "GLaDOS",
+      "theme": "Red Team Leader / Assessment Coordinator",
+      "emoji": "🤖"
+    }
+  },
+  {
+    "id": "graphql-specialist",
+    "name": "graphql-specialist",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "js-reverser",
+    "name": "js-reverser",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "mobile-api-recon",
+    "name": "mobile-api-recon",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "net-recon",
+    "name": "net-recon",
+    "model": "ollama-local/qwen3.6:35b",
+    "enabled": true
+  },
+  {
+    "id": "origin-ip",
+    "name": "origin-ip",
+    "model": "ollama-local/qwen3.5:35b",
+    "enabled": true
+  },
+  {
+    "id": "osint",
+    "name": "osint",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "phish-validator",
+    "name": "phish-validator",
+    "model": "ollama-local/glm-4.7-flash:latest",
+    "enabled": true
+  },
+  {
+    "id": "phisherman",
+    "name": "phisherman",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "plan-synthesizer",
+    "name": "plan-synthesizer",
+    "model": "ollama-local/qwen3.6:35b",
+    "enabled": true,
+    "identity": {
+      "name": "Plan Synthesizer",
+      "theme": "Phase 2 attack-plan synthesis",
+      "emoji": "📋"
+    }
+  },
+  {
+    "id": "poc-coder",
+    "name": "poc-coder",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "poc-validator",
+    "name": "poc-validator",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "postex",
+    "name": "postex",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "postex-validator",
+    "name": "postex-validator",
+    "model": "ollama-local/glm-4.7-flash:latest",
+    "enabled": true
+  },
+  {
+    "id": "report-validator",
+    "name": "report-validator",
+    "model": "ollama-local/qwen3.6:35b",
+    "enabled": true
+  },
+  {
+    "id": "report-writer",
+    "name": "report-writer",
+    "model": "ollama-local/qwen3.6:35b",
+    "enabled": true
+  },
+  {
+    "id": "scope-guardian",
+    "name": "scope-guardian",
+    "model": "ollama-local/qwen3.6:35b",
+    "enabled": true
+  },
+  {
+    "id": "source-code",
+    "name": "source-code",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "webapp-recon",
+    "name": "webapp-recon",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "webapp-validator",
+    "name": "webapp-validator",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  },
+  {
+    "id": "webapp-vuln",
+    "name": "webapp-vuln",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "enabled": true
+  }
+]

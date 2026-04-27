@@ -1,0 +1,21 @@
+{
+  "name": "blackboard-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for GLaDOS red team blackboard (SQLite)",
+  "main": "index.js",
+  "bin": {
+    "blackboard-mcp": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.8.0"
+  }
+}

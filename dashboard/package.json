@@ -1,0 +1,24 @@
+{
+  "name": "glados-ops-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Operator dashboard for GLaDOS red team engagements — live per-subagent transcript viewer, GLaDOS chat, halt controls.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "postinstall": "node scripts/ensure-pty-binary.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "chokidar": "^4.0.1",
+    "express": "^4.21.1",
+    "glados-watchdog": "file:../watchdog",
+    "node-pty": "^1.1.0",
+    "undici": "^8.1.0",
+    "ws": "^8.20.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,1 @@
+{"detail":{"error":"/audio/speech: Invalid model name passed in model=tts-1. Call `/v1/models` to view available models for your key."}}

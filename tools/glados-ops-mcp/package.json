@@ -1,0 +1,17 @@
+{
+  "name": "glados-ops-mcp",
+  "version": "0.1.0",
+  "description": "Operational helper MCP for GLaDOS agents: scope checks, evidence bundles, JS/OpenAPI extraction, and safe command planning.",
+  "main": "index.js",
+  "bin": {
+    "glados-ops-mcp": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.8.0"
+  }
+}

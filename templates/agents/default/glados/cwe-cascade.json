@@ -1,0 +1,66 @@
+{
+  "_comment": "GLaDOS v3.1 — CWE cascade weightings for dynamic replanning. When a validator writes a finding with confidence >= replan_threshold AND its CWE appears here, GLaDOS halts and proposes a replan biased toward enables_vectors.",
+  "replan_threshold": 0.9,
+  "cascades": {
+    "CWE-94": {
+      "name": "Code Injection / RCE",
+      "enables_vectors": ["postex", "data-exfil", "ad-expert", "c2-builder"],
+      "skips": ["api-fuzz", "webapp-vuln"],
+      "rationale": "RCE obsoletes further surface enumeration; pivot to post-exploitation."
+    },
+    "CWE-78": {
+      "name": "OS Command Injection",
+      "enables_vectors": ["postex", "data-exfil", "c2-builder"],
+      "skips": ["api-fuzz"],
+      "rationale": "Same logic as RCE; command exec is terminal surface-finding."
+    },
+    "CWE-287": {
+      "name": "Authentication Bypass",
+      "enables_vectors": ["postex", "ad-expert", "data-exfil", "authz-probe"],
+      "skips": [],
+      "rationale": "Auth bypass unlocks previously-gated routes; re-run recon inside the authenticated perimeter before picking next vector."
+    },
+    "CWE-918": {
+      "name": "SSRF",
+      "enables_vectors": ["cloud-metadata", "internal-recon", "origin-ip"],
+      "skips": [],
+      "rationale": "SSRF pivots to internal network surface — add cloud-metadata + internal recon, keep webapp chain."
+    },
+    "CWE-89": {
+      "name": "SQL Injection",
+      "enables_vectors": ["data-exfil", "authz-probe"],
+      "skips": [],
+      "rationale": "Stay in webapp chain but elevate data-exfil priority."
+    },
+    "CWE-798": {
+      "name": "Hardcoded Credentials",
+      "enables_vectors": ["ad-expert", "postex", "source-code"],
+      "skips": [],
+      "rationale": "Credentials pivot outward; trigger AD/postex paths."
+    },
+    "CWE-22": {
+      "name": "Path Traversal",
+      "enables_vectors": ["data-exfil", "source-code"],
+      "skips": [],
+      "rationale": "LFI often yields source code — schedule source-code agent in parallel."
+    },
+    "CWE-284": {
+      "name": "Improper Access Control (IDOR)",
+      "enables_vectors": ["authz-probe", "data-exfil"],
+      "skips": [],
+      "rationale": "IDOR without auth-bypass stays in current chain; escalate authz-probe depth."
+    },
+    "CWE-502": {
+      "name": "Deserialization",
+      "enables_vectors": ["postex", "poc-coder"],
+      "skips": ["api-fuzz"],
+      "rationale": "Deserialization = likely RCE; dispatch poc-coder + postex."
+    },
+    "CWE-611": {
+      "name": "XXE",
+      "enables_vectors": ["data-exfil", "internal-recon"],
+      "skips": [],
+      "rationale": "XXE often leaks files + SSRF-adjacent; keep chain, add internal-recon."
+    }
+  }
+}

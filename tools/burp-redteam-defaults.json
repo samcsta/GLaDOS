@@ -1,0 +1,22 @@
+{
+  "comment": "Per-engagement Burp Pro defaults. Loaded by the operator when starting a new engagement. Enforces a global rate + concurrency cap that applies to every agent whose traffic is proxied through Burp (see HTTPS_PROXY env + Chromium --proxy-server in ~/.openclaw/openclaw.json).",
+  "resource_pool": {
+    "name": "redteam-default",
+    "max_concurrent_requests_per_host": 3,
+    "min_interval_between_requests_ms": 500,
+    "max_concurrent_requests_total": 8
+  },
+  "scope": {
+    "include_patterns": [
+      "^https?://([^./]+\\.)*ford\\.com/"
+    ],
+    "exclude_patterns": [
+      "^https?://([^./]+\\.)*ford\\.com/(logout|signout|sign-out)"
+    ]
+  },
+  "notes": [
+    "Apply these settings via Burp Pro UI once per engagement: User options -> Connections -> Resource pools.",
+    "burp-gate.sh halt-all replaces the scope with an empty include + catch-all exclude to drop traffic.",
+    "burp-gate.sh resume-all restores the include pattern above."
+  ]
+}

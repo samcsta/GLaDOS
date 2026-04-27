@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>GLaDOS / OpenClaw — Web Assessment Flow</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0d0d0d;
+      color: #e0e0e0;
+      font-family: 'Courier New', monospace;
+      padding: 32px;
+    }
+    h1 {
+      color: #ff6c00;
+      font-size: 1.6rem;
+      letter-spacing: 0.1em;
+      margin-bottom: 6px;
+    }
+    .subtitle {
+      color: #888;
+      font-size: 0.8rem;
+      margin-bottom: 32px;
+      letter-spacing: 0.05em;
+    }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.72rem;
+      color: #aaa;
+    }
+    .legend-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+    .mermaid {
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 24px;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+
+<h1>GLaDOS / OpenClaw &mdash; Web Application Assessment Flow</h1>
+<p class="subtitle">Full execution path from user instruction to report delivery</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#ff6c00"></div>User / Interface Layer</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#c678dd"></div>GLaDOS Orchestrator</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#56b6c2"></div>Claude Sonnet Sub-agents</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#98c379"></div>Ollama Local Sub-agents</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#e06c75"></div>Decision / Gate</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#61afef"></div>Infrastructure / Tools</div>
+</div>
+
+<div class="mermaid">
+flowchart TD
+    %% ─── USER INPUT ───────────────────────────────────────────────
+    U([" USER\nTUI or Telegram\n'Assess https://target.example.com' "])
+    U --> OC
+
+    OC[" OpenClaw Gateway\nWebSocket · port 18789\nRoutes message to glados session "]
+    OC --> GS
+
+    %% ─── GLADOS STARTUP ────────────────────────────────────────────
+    subgraph STARTUP ["  GLaDOS Session Startup  "]
+      direction TB
+      GS[" GLaDOS wakes\nLoads SOUL.md · USER.md\nREDTEAM_MASTER.md\nMemory files "]
+      GS --> BB0[" blackboard_read()\nCheck for pending tasks "]
+    end
+
+    BB0 --> ENG
+
+    %% ─── ENGAGEMENT START ──────────────────────────────────────────
+    subgraph ENGAGE ["  Engagement Start Protocol  "]
+      direction TB
+      ENG[" GLaDOS: Clarify objective?\nif ambiguous → ask ONE question "]
+      ENG --> DRADIS[" Browser MCP → DradisTab\nCheck for prior report on target "]
+      DRADIS --> PRIORQ{Prior report\nfound?}
+      PRIORQ -->|Yes| PRIORLOAD[" Load prior CWEs / findings\nAsk analyst: Full · Repeat · Validate · New surface "]
+      PRIORQ -->|No| BBCREATE
+      PRIORLOAD --> BBCREATE
+      BBCREATE[" blackboard_engagement_create()\nInitialize engagement in SQLite "]
+      BBCREATE --> DAI[" Browser MCP → DomainsAI\nLoad existing asset context for target "]
+    end
+
+    DAI --> HGATE
+
+    %% ─── B1 PRE-DISPATCH HEALTH GATE ───────────────────────────────
+    HGATE[" watchdog_mcp.target_probe  target_url \nHEAD + body-length probe → watchdog.db\n state: healthy · degraded · down "]
+    HGATE --> HEALTHQ{state ==\nhealthy?}
+    HEALTHQ -->|No| HREFUSE[" GLaDOS refuses dispatch\nReports state to dashboard LIVE EVENTS\nWaits ≥60s before re-probe "]
+    HREFUSE --> HGATE
+    HEALTHQ -->|Yes| P1
+
+    %% ─── PHASE 1: OSINT ────────────────────────────────────────────
+    subgraph OSINT_PHASE ["  Phase 1 — Passive Recon  "]
+      direction TB
+      P1[" GLaDOS: sessions_send → osint agent "]
+      P1 --> OSINT_WORK[" OSINT agent  Claude Sonnet \ncrt.sh · Shodan · Censys\nDNS history · GitHub dorking\nTruffleHog · theHarvester\nBreach DBs · DMARC/SPF/DKIM\nTech stack fingerprinting "]
+      OSINT_WORK --> OSINT_BB[" blackboard_write()\nlb_detected · dmarc_weak\nemployee list · email formats\ncredentials · tech stack "]
+    end
+
+    OSINT_BB --> LBQ
+
+    %% ─── LOAD BALANCER GATE ────────────────────────────────────────
+    LBQ{lb_detected\nin blackboard?}
+    LBQ -->|Yes — CDN/WAF present| ORIGINIP
+    LBQ -->|No — direct origin| NETRECON
+
+    ORIGINIP[" sessions_send → origin-ip agent\n Ollama · qwen3.5:35b \nPassive origin IP discovery\nbehind CDN/WAF "]
+    NETRECON[" sessions_send → net-recon agent\n Ollama · qwen3.6:35b\nNmap scan of origin IP\nPort/service enumeration "]
+
+    ORIGINIP --> P2
+    NETRECON --> P2
+
+    %% ─── PHASE 2: APP RECON ────────────────────────────────────────
+    subgraph WEBAPP_RECON ["  Phase 2 — Application Recon  "]
+      direction TB
+      P2[" GLaDOS: sessions_send → webapp-recon agent "]
+      P2 --> WR_WORK[" webapp-recon  Claude Sonnet \nAll traffic via Burp Pro REST · localhost:1337\nDir scanning  feroxbuster via GCP SSH \nJavaScript analysis  LinkFinder \nWayback Machine CDX API\nEndpoint + parameter cataloging "]
+      WR_WORK --> WR_BB[" blackboard_write()\nEndpoint map · params · cookies\nauth flows · file upload paths "]
+    end
+
+    WR_BB --> P3DISPATCH
+
+    %% ─── PHASE 3: EXPLOITATION (PARALLEL) ─────────────────────────
+    P3DISPATCH[" GLaDOS: Analyze surface map\nDispatch exploitation agents "]
+
+    P3DISPATCH --> WV
+    P3DISPATCH --> APIQ
+    P3DISPATCH --> SCQ
+    P3DISPATCH --> AIQ
+
+    APIQ{API surface\nsignificant?}
+    SCQ{Source code\navailable?}
+    AIQ{AI/LLM\nfeatures?}
+
+    subgraph EXPLOIT ["  Phase 3 — Exploitation  "]
+      direction TB
+      WV[" webapp-vuln  Claude Sonnet \nAll inputs · forms · headers · cookies\nAuth flows  login · reset · MFA \nFile upload → webshell attempts\nSession management attacks\nIDOR enumeration\nViewState MAC tampering  ASP.NET \nFull kill chain → RCE as goal\nTags: PRIORITY or INFORMATIONAL "]
+      WV --> WV_BB[" blackboard_write()\nfindings · evidence · reproduction steps "]
+
+      APIQ -->|Yes| API[" api-expert  Claude Sonnet \nJWT confusion · BOLA\nOAuth misconfigs · GraphQL abuse "]
+      API --> API_BB[" blackboard_write()\nAPI findings "]
+
+      SCQ -->|Yes| SC[" source-code  Claude Sonnet \nStatic analysis of leaked\nor obtained source "]
+      SC --> SC_BB[" blackboard_write()\nCode-level findings "]
+
+      AIQ -->|Yes| AIS[" ai-specialist  Claude Sonnet \nPrompt injection · system prompt extraction\nJailbreaks · RAG poisoning\nOWASP LLM Top 10 · MITRE ATLAS "]
+      AIS --> AIS_BB[" blackboard_write()\nAI/LLM findings "]
+    end
+
+    WV_BB --> DEDUP
+    API_BB --> DEDUP
+    SC_BB --> DEDUP
+    AIS_BB --> DEDUP
+    APIQ -->|No| DEDUP
+    SCQ -->|No| DEDUP
+    AIQ -->|No| DEDUP
+
+    %% ─── DEDUP GATE ────────────────────────────────────────────────
+    DEDUP[" GLaDOS: blackboard_read() before every dispatch\nSkip if task already complete for this target "]
+
+    DEDUP --> P4
+
+    %% ─── PHASE 4: VALIDATION ───────────────────────────────────────
+    subgraph VALIDATE ["  Phase 4 — Peer Validation  (mandatory for every finding)  "]
+      direction TB
+      P4[" GLaDOS: sessions_send → validator agents "]
+
+      P4 --> WVL[" webapp-validator  Claude Sonnet \nIndependently reproduces every finding\nBOLA/IDOR: min 3 IDs × 2 roles\nVerdict: CONFIRMED · FALSE POSITIVE · NEEDS EVIDENCE\nDowngrades severity if insufficient evidence "]
+      WVL --> WVL_BB[" blackboard_write()\nvalidation_status · confidence "]
+
+      P4 --> AVL[" api-validator  Ollama · glm-4.7-flash \nAPI finding review "]
+      AVL --> AVL_BB[" blackboard_write() "]
+
+      P4 --> PVL[" poc-validator  Claude Sonnet \nSafety · scope · logic review "]
+      PVL --> PVL_BB[" blackboard_write() "]
+    end
+
+    WVL_BB --> P5
+    AVL_BB --> P5
+    PVL_BB --> P5
+
+    %% ─── PHASE 5: POC DEVELOPMENT ──────────────────────────────────
+    subgraph POC_PHASE ["  Phase 5 — PoC Development  "]
+      direction TB
+      P5[" GLaDOS: sessions_send → poc-coder agent "]
+      P5 --> PC[" poc-coder  Claude Sonnet \nNon-destructive working exploit  Python/Bash \nEnd-to-end execution + safety abort checks\nFull kill chain documentation\nPoC code + output → blackboard "]
+      PC --> POCVAL[" poc-validator  Claude Sonnet \nSafety: no writes/deletes/DoS\nScope compliance vs ROE\nLogic validation\nAssigns confidence rating "]
+      POCVAL --> POCQ{Passes\nreview?}
+      POCQ -->|No| PC
+      POCQ -->|Yes| POCBB[" blackboard_write()\nConfirmed PoC + confidence "]
+    end
+
+    POCBB --> SHELLQ
+
+    %% ─── POST-EX BRANCH ────────────────────────────────────────────
+    SHELLQ{shell_confirmed\nin blackboard?}
+    SHELLQ -->|No| ANALYSTGATE
+    SHELLQ -->|Yes| P6
+
+    subgraph POSTEX_PHASE ["  Phase 6 — Post-Exploitation  (if shell confirmed)  "]
+      direction TB
+      P6[" GLaDOS: sessions_send → postex agent "]
+      P6 --> PX[" postex  Claude Sonnet \nLinPEAS/WinPEAS privesc enum\nCredential harvesting  env/config/SSH \nInternal network mapping\nLateral movement chain docs\nPersistence mechanism ID "]
+      PX --> ADQ{Internal AD\nreachable?}
+      ADQ -->|Yes| AD[" ad-expert  Claude Sonnet \nBloodHound · Kerberoast · DCSync "]
+      ADQ -->|No| POSTEX_BB
+      AD --> POSTEX_BB
+      POSTEX_BB[" blackboard_write()\npostex findings + AD attack paths "]
+    end
+
+    POSTEX_BB --> ANALYSTGATE
+
+    %% ─── ANALYST APPROVAL ──────────────────────────────────────────
+    ANALYSTGATE[" GLaDOS → TUI / Telegram\nRelay confirmed peer-reviewed findings to Sam\nWAIT for explicit 'yes, write the report' "]
+    ANALYSTGATE --> APPROVALQ{Analyst\napproves?}
+    APPROVALQ -->|No — needs more| P3DISPATCH
+    APPROVALQ -->|Yes| P7
+
+    %% ─── PHASE 7: REPORT ───────────────────────────────────────────
+    subgraph REPORT_PHASE ["  Phase 7 — Report Generation  "]
+      direction TB
+      P7[" GLaDOS: sessions_send → report-writer agent "]
+      P7 --> RW[" report-writer  Ollama · qwen3.6:35b \nReads PRIORITY findings from blackboard\nChains related findings into attack narratives\nMaps each finding to CWE\nCVSS based on demonstrated impact\nOne .md file per CWE\nExecutive summary + technical + remediation "]
+      RW --> RVAL[" report-validator  Ollama · qwen3.6:35b \nCross-refs every claim vs blackboard evidence\nVerifies CWE IDs vs official DB\nRecalculates CVSS vectors\nConfirms all PRIORITY items are in report body "]
+      RVAL --> RVALQ{Report\nvalidated?}
+      RVALQ -->|No| RW
+      RVALQ -->|Yes| ROUT[" Output: investigations/[domain]/CWEs/*.md "]
+    end
+
+    ROUT --> DELIVERY
+
+    %% ─── DELIVERY ──────────────────────────────────────────────────
+    DELIVERY[" GLaDOS → TUI / Telegram\nNotify analyst: summary + file paths\nSam manually copies to Dradis Pro\n GLaDOS never auto-pushes — locked protocol  "]
+
+    %% ─── OPERATOR CONTROL PLANE (ambient, always active) ───────────
+    subgraph OPS ["  Operator Control Plane  (runs alongside every phase)  "]
+      direction TB
+      DASH[" GLaDOS Ops Dashboard\n http://localhost:4280 \nAuto-spawning per-agent tabs\nLive JSONL transcript stream\nGLaDOS chat pane\nHALT controls · indicators "]
+      WDMCP[" watchdog_mcp\ntarget_probe · target_health\nagent_halt · engagement_halt_all\ncircuit_status "]
+      BREAKER[" B2 Circuit Breaker\nPolls Burp history every 5s\n3× 5xx/429 in 60s → halt_all "]
+      BURPGATE[" A1 Burp-Gated Egress\nHTTPS_PROXY=127.0.0.1:8080\nburp-gate.sh halt-all → drop scope "]
+      EXECAPP[" A2 Tool-Permission Revocation\nexec-approvals.json deny rules\n per-agent, next tool call fails "]
+      BREAKER -->|trip event| DASH
+      WDMCP -->|writes| EXECAPP
+      WDMCP -->|invokes| BURPGATE
+      DASH -->|HALT button| WDMCP
+    end
+
+    HGATE -.->|refuses on !healthy| WDMCP
+    P1 -.->|tailed| DASH
+    P2 -.->|tailed| DASH
+    P3DISPATCH -.->|tailed| DASH
+
+    %% ─── STYLES ────────────────────────────────────────────────────
+    classDef user       fill:#6b2d00,stroke:#ff6c00,color:#ffe0c0
+    classDef orchestrator fill:#3a1f5e,stroke:#c678dd,color:#f0d0ff
+    classDef agentClaude fill:#0f3040,stroke:#56b6c2,color:#c8f0f8
+    classDef agentOllama fill:#0f2a0f,stroke:#98c379,color:#c8f8c8
+    classDef gate       fill:#3a0f0f,stroke:#e06c75,color:#f8c8c8
+    classDef infra      fill:#0f1a30,stroke:#61afef,color:#c8d8f8
+    classDef bb         fill:#1a1a0f,stroke:#e5c07b,color:#f8f0c0
+
+    class U,DELIVERY user
+    class OC,GS,BB0,ENG,DRADIS,BBCREATE,DAI,P1,P2,P3DISPATCH,DEDUP,P4,P5,P6,P7,ANALYSTGATE orchestrator
+    class OSINT_WORK,WR_WORK,WV,API,SC,AIS,WVL,AVL,PVL,PC,POCVAL,PX,AD,RW,RVAL,ROUT agentClaude
+    class ORIGINIP,NETRECON agentOllama
+    class PRIORQ,LBQ,APIQ,SCQ,AIQ,POCQ,SHELLQ,ADQ,APPROVALQ,RVALQ,RVALQ,HEALTHQ gate
+    class PRIORLOAD,HREFUSE infra
+    class HGATE,DASH,WDMCP,BREAKER,BURPGATE,EXECAPP infra
+    class OSINT_BB,WR_BB,WV_BB,API_BB,SC_BB,AIS_BB,WVL_BB,AVL_BB,PVL_BB,POCBB,POSTEX_BB bb
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    flowchart: {
+      curve: 'basis',
+      nodeSpacing: 40,
+      rankSpacing: 55,
+      padding: 16,
+    },
+    themeVariables: {
+      background: '#111',
+      primaryColor: '#1e293b',
+      primaryTextColor: '#e0e0e0',
+      primaryBorderColor: '#475569',
+      lineColor: '#64748b',
+      secondaryColor: '#1e1e2e',
+      tertiaryColor: '#0f172a',
+      edgeLabelBackground: '#1e293b',
+      fontFamily: 'Courier New, monospace',
+    }
+  });
+</script>
+</body>
+</html>

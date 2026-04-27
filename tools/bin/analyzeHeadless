@@ -1,0 +1,3 @@
+#!/usr/bin/env zsh
+export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home}"
+exec /opt/homebrew/opt/ghidra/libexec/support/analyzeHeadless "$@"

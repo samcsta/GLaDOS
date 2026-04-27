@@ -1,0 +1,53 @@
+---
+name: baseline-recon
+description: Phase 1 baseline recon checklist. Runs unconditionally at the start of every webapp engagement. Produces a blackboard summary card consumed by plan-synthesizer.
+---
+
+# baseline-recon
+
+Fixed ordered checklist. Do not skip steps. Do not exploit. All output lands
+on the blackboard under `baseline.*` keys; the summary card is written at the
+end under `baseline.summary` with `recon.complete=true`.
+
+## Steps
+
+1. **DradisTab lookup** (`WebFetch` → `dradistab.redteamstuff.com/lookup?host=<target>`).
+   - If hit: surface prior artifacts to operator, ask resume / validate / start-fresh.
+   - Record decision to `baseline.dradistab.{found, prior_engagement_id, decision}`.
+
+2. **DNS + TLS fingerprint** (`Bash` → `dig`, `openssl s_client -showcerts`).
+   - Write `baseline.dns.{a, cname_chain}`, `baseline.tls.{issuer, san, expires}`.
+
+3. **Structured browser recon** — dispatch `webapp-recon` with the JSON
+   schema remit (framework, endpoints, forms, auth_flow, tech_stack,
+   quick_wins). Output lands at `baseline.webapp_recon.*`.
+
+4. **Client artifact recon (conditional)**:
+   - Dispatch `js-reverser` if `webapp-recon` found large JS bundles, source
+     maps, client-side routes, GraphQL hints, API hosts, or feature flags.
+   - Dispatch `mobile-api-recon` only if mobile API hosts, deep links, app
+     store metadata, or approved mobile artifacts are in scope.
+   - Output lands at `baseline.js_recon.*` and/or `baseline.mobile_api.*`.
+
+5. **OSINT (passive, 10-min hard cap, low-trust planning signal)** — dispatch
+   `osint` with remit: ASN, CDN, WAF header signatures, MX/TXT,
+   GitHub/GitLab mentions, archive.org.
+   - Timebox: 600s via watchdog.
+   - osint writes `baseline.osint.*` with per-fact confidence and source.
+   - Treat OSINT as corroborating context, not primary evidence. It must not
+     outrank direct app observations, Dradis history, DNS/TLS facts, or
+     operator-provided scope when synthesizing a plan.
+
+6. **Origin-IP / net-recon gated branch:**
+   - If `baseline.osint.cdn` OR `baseline.osint.waf` present → dispatch `origin-ip`.
+   - If `baseline.origin_ip.confidence < 0.7` after that → dispatch `net-recon`.
+   - Else skip both.
+
+7. **Summary card write** — merge steps 1–6 into `baseline.summary` JSON
+   matching `recon_summary` in `workspaces/plan-synthesizer/PLAN_SCHEMA.md`.
+   Set `recon.complete=true`, `recon.complete_at=<iso8601>`.
+
+## Gate to Phase 2
+
+After step 6, dispatch `plan-synthesizer`. Do NOT dispatch any exploitation
+agent (see SOUL.md invariant I1).

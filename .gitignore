@@ -1,0 +1,55 @@
+# Local operator configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.der
+burp-ca.der
+
+# Local runtime state. These directories are per-workstation and must not be
+# shared through Git.
+.glados/
+.openclaw/
+Reports/
+reports/
+investigations/
+archive/
+blackboard/*.db
+blackboard/*.db-*
+watchdog/*.db
+watchdog/*.db-*
+workspaces/glados/MEMORY.md
+workspaces/*/MEMORY.md
+workspaces/glados/memory/
+workspaces/glados/investigations/
+workspaces/glados/target-hunting/
+workspaces/glados/.openclaw/
+workspaces/glados/openclaw-session-*.html
+
+# Build and dependency output
+node_modules/
+dashboard/node_modules/
+blackboard/blackboard-mcp/node_modules/
+watchdog/node_modules/
+watchdog/watchdog-mcp/node_modules/
+tools/glados-ops-mcp/node_modules/
+tools/burp-ext-glados-proxy-api/build/
+tools/burp-ext-glados-proxy-api/.gradle/
+
+# OS/editor noise
+.DS_Store
+*.swp
+*.tmp
+*.log
+
+# Burp exports and session artifacts
+*.burp
+*.burpstate
+*.har
+*.xml
+*.sqlite
+*.sqlite3
+*.jsonl
