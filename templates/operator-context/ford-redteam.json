@@ -18,8 +18,7 @@
       "id": "ford-adfs",
       "name": "Ford ADFS / Active Directory",
       "login_hosts": [
-        "corp.sts.ford.com",
-        "www.is.dealerconnection.com"
+        "corp.sts.ford.com"
       ],
       "ui_cues": [
         "Active Directory",
@@ -30,6 +29,27 @@
       "credential_profile": "ford-sso",
       "allowed_use": "Authentication/runtime dependency only unless the operator explicitly expands active testing scope.",
       "default_webapp_recon_behavior": "When a Ford-scoped web application redirects to corp.sts.ford.com and presents Active Directory, webapp-recon should use the local ford-sso profile through the redacted adfs_active_directory_login helper, then continue authenticated application mapping. If the helper fails or the page differs from the expected Ford ADFS flow, ask the operator."
+    },
+    {
+      "id": "microsoft-mfa",
+      "name": "Microsoft Online MFA",
+      "login_hosts": [
+        "login.microsoftonline.com"
+      ],
+      "host_patterns": [
+        "*.microsoftonline.com"
+      ],
+      "ui_cues": [
+        "Microsoft",
+        "Stay signed in?",
+        "Approve sign-in request",
+        "Verify your identity",
+        "Authenticator app",
+        "MFA"
+      ],
+      "credential_profile": null,
+      "allowed_use": "BLOCKED. Do not interact with Microsoft Online MFA flows. If a target redirects through login.microsoftonline.com or any *.microsoftonline.com host, stop and ask the operator. Only proceed if the operator explicitly authorizes for the current engagement.",
+      "default_webapp_recon_behavior": "On encountering any login.microsoftonline.com or *.microsoftonline.com page, stop immediately, screenshot the redirect chain captured so far, and ask the operator via GLaDOS. Do not click, type, submit credentials, retry, or open a new browser. Treat MFA as out-of-scope unless the operator explicitly authorizes interaction for this engagement."
     },
     {
       "id": "dradis",
