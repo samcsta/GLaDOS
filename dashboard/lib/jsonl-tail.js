@@ -171,10 +171,17 @@ function convertToEvents(obj) {
   }
 
   if (role === 'assistant' && Array.isArray(m.content)) {
+    const hasToolCall = m.content.some(c => c && c.type === 'toolCall');
     for (const c of m.content) {
       if (c.type === 'thinking' && c.thinking) {
         out.push({ kind: 'thinking', ts, id, text: c.thinking });
       } else if (c.type === 'text' && c.text) {
+        // Assistant messages that also contain tool calls are pre-tool
+        // commentary. Rendering them creates the appearance of "two replies"
+        // for one turn: a small "I'll check..." bubble before tools, then the
+        // actual answer after tool results. Keep tool-call visibility, but
+        // only render assistant text once the final no-tool-call message lands.
+        if (hasToolCall) continue;
         out.push({ kind: 'assistant-text', ts, id, text: c.text });
       } else if (c.type === 'toolCall') {
         out.push({

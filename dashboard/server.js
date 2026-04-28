@@ -56,6 +56,16 @@ const activeChatTurns = new Map(); // agentId -> { turnId, startedAt, messagePre
 const recentChatTurns = new Map(); // agentId -> { turnId, expiresAt } short grace for late raw-stream fs events
 let pendingGladosKickoff = null;
 let pendingGladosTargetRequest = null;
+const BLACKBOARD_STATE_TABLES = [
+  'replan_proposals',
+  'plan_approvals',
+  'plans',
+  'recon_steps',
+  'baseline_recon',
+  'tasks',
+  'findings',
+  'engagements',
+];
 
 function pushBuffer(agentId, ev) {
   let buf = buffers.get(agentId);
@@ -122,6 +132,23 @@ function recordUserTranscript(agentId, text, extra = {}) {
   });
 }
 
+function blackboardRowCounts() {
+  const Database = require('better-sqlite3');
+  let db;
+  try {
+    db = new Database(BLACKBOARD_DB, { readonly: true, fileMustExist: true });
+    const counts = {};
+    for (const table of BLACKBOARD_STATE_TABLES) {
+      counts[table] = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
+    }
+    return counts;
+  } catch {
+    return null;
+  } finally {
+    try { db?.close(); } catch {}
+  }
+}
+
 function normalizeTarget(value) {
   return String(value || '')
     .trim()
@@ -153,6 +180,12 @@ function isAssessmentReadinessIntent(message) {
   const text = String(message || '').toLowerCase();
   return /\b(ready|start|begin|run|launch|kick\s*off|spin\s*up)\b/.test(text)
     && /\b(assessment|investigation|engagement|web\s*app|team)\b/.test(text);
+}
+
+function isFreshSessionQuestion(message) {
+  const text = String(message || '').toLowerCase();
+  return /\b(fresh|new|clean)\s+session\b/.test(text)
+    || /\bis\s+this\s+(?:a\s+)?(?:fresh|new|clean)\b/.test(text);
 }
 
 function isKickoffApproval(message) {
@@ -393,16 +426,6 @@ function resetAgentSession(agentId, ts = new Date().toISOString().replace(/[:.]/
 // ~/.glados/reports/ are filesystem artifacts and are not touched here.
 function wipeBlackboard() {
   const Database = require('better-sqlite3');
-  const TABLES = [
-    'replan_proposals',
-    'plan_approvals',
-    'plans',
-    'recon_steps',
-    'baseline_recon',
-    'tasks',
-    'findings',
-    'engagements',
-  ];
   let db;
   try {
     db = new Database(BLACKBOARD_DB);
@@ -413,7 +436,7 @@ function wipeBlackboard() {
     db.pragma('foreign_keys = OFF');
     const counts = {};
     const tx = db.transaction(() => {
-      for (const t of TABLES) {
+      for (const t of BLACKBOARD_STATE_TABLES) {
         const n = db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
         counts[t] = n;
         db.prepare(`DELETE FROM ${t}`).run();
@@ -422,7 +445,7 @@ function wipeBlackboard() {
     });
     tx();
     db.pragma('foreign_keys = ON');
-    return { ok: true, tablesCleared: TABLES, rowsDeleted: counts };
+    return { ok: true, tablesCleared: BLACKBOARD_STATE_TABLES, rowsDeleted: counts };
   } catch (e) {
     return { ok: false, error: e.message };
   } finally {
@@ -848,9 +871,9 @@ app.get('/api/agents/:id/transcript', (req, res) => {
 app.post('/api/chat/glados', async (req, res) => {
   const message = (req.body && req.body.message) || '';
   if (!message.trim()) return res.status(400).json({ error: 'message required' });
-  recordUserTranscript('glados', message);
 
   if (pendingGladosKickoff) {
+    recordUserTranscript('glados', message);
     if (isKickoffCancel(message)) {
       const cancelled = pendingGladosKickoff;
       pendingGladosKickoff = null;
@@ -889,6 +912,7 @@ app.post('/api/chat/glados', async (req, res) => {
   }
 
   if (pendingGladosTargetRequest) {
+    recordUserTranscript('glados', message);
     if (isKickoffCancel(message)) {
       pendingGladosTargetRequest = null;
       const ev = transcriptEvent('glados', 'assistant-text', 'Cancelled assessment startup. No resources were checked and no agents were dispatched.');
@@ -910,10 +934,12 @@ app.post('/api/chat/glados', async (req, res) => {
 
   const kickoffTarget = extractInvestigationTarget(message);
   if (kickoffTarget) {
+    recordUserTranscript('glados', message);
     return res.json(createPendingGladosKickoff(kickoffTarget, message));
   }
 
   if (isAssessmentReadinessIntent(message)) {
+    recordUserTranscript('glados', message);
     pendingGladosTargetRequest = {
       createdAt: Date.now(),
       originalMessage: message,
@@ -924,6 +950,26 @@ app.post('/api/chat/glados', async (req, res) => {
       'Ready. The local ROE, operator context, and local secret profiles are already configured. What target should we assess?'
     );
     return res.json({ ok: true, gated: true, waitingForTarget: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
+  }
+
+  if (isFreshSessionQuestion(message)) {
+    recordUserTranscript('glados', message);
+    const counts = blackboardRowCounts();
+    const rows = counts ? Object.values(counts).reduce((sum, n) => sum + Number(n || 0), 0) : null;
+    const activeAgents = (() => {
+      try {
+        return loadAgentRegistry().filter(a => currentSessionForAgent(a.id)?.live).length;
+      } catch { return 0; }
+    })();
+    const stateText = rows === 0 && activeAgents === 0
+      ? 'Yes — this is a fresh GLaDOS session. No active agents are running, and the blackboard is clean.'
+      : `Not completely fresh: ${activeAgents} active agent(s), ${rows ?? 'unknown'} blackboard row(s).`;
+    const ev = transcriptEvent(
+      'glados',
+      'assistant-text',
+      stateText
+    );
+    return res.json({ ok: true, gated: true, synthetic: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
   }
 
   const turnId = startChatTurn('glados', message);

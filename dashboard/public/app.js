@@ -398,6 +398,31 @@ function reconcileStreamedEvent(rec, ev) {
   }
 }
 
+function removeRecentStreamedPreToolText(rec, toolTs) {
+  if (!rec) return;
+  const cutoff = Date.parse(toolTs || '') || Date.now();
+  rec.events = (rec.events || []).filter(ev => {
+    if (ev.kind !== 'assistant-text' || !ev._streamed) return true;
+    const evMs = Date.parse(ev.ts || '') || Number(ev.ts) || 0;
+    return Math.abs(cutoff - evMs) > 15_000;
+  });
+  if (rec.el && rec.el.isConnected) {
+    for (const node of [...rec.el.querySelectorAll('.entry.assistant-text')]) {
+      const key = node.dataset.streamKey || '';
+      if (!key) continue;
+      const nodeMs = Number(node.dataset.streamTs || 0);
+      if (nodeMs && Math.abs(cutoff - nodeMs) > 15_000) continue;
+      node.remove();
+    }
+  }
+  for (const [key, entry] of rec.streamEntries || []) {
+    if (key.endsWith(':assistant-text')) {
+      entry.el?.remove();
+      rec.streamEntries.delete(key);
+    }
+  }
+}
+
 function findVisibleUserMessage(rec, text) {
   if (!rec?.el || !rec.el.isConnected) return null;
   const candidates = [...rec.el.querySelectorAll('.entry.user-message')];
@@ -554,6 +579,7 @@ function handleStreamDelta(rec, ev) {
     const el = document.createElement('div');
     el.className = `entry ${entryKind} streaming`;
     el.dataset.streamKey = streamKey;
+    el.dataset.streamTs = String(Date.parse(ev.ts || '') || Date.now());
     if (rec?.agentId) el.dataset.agent = rec.agentId;
     const ts = ev.ts ? new Date(ev.ts).toLocaleTimeString() : '';
     el.innerHTML = `<span class="ts">${ts}</span><span class="stream-cursor"> ▍</span>`;
@@ -567,6 +593,7 @@ function handleStreamDelta(rec, ev) {
     const el = document.createElement('div');
     el.className = `entry ${entryKind} streaming`;
     el.dataset.streamKey = streamKey;
+    el.dataset.streamTs = String(Date.parse(ev.ts || '') || Date.now());
     if (rec?.agentId) el.dataset.agent = rec.agentId;
     const ts = ev.ts ? new Date(ev.ts).toLocaleTimeString() : '';
     el.innerHTML = `<span class="ts">${ts}</span><span class="stream-cursor"> ▍</span>`;
@@ -2976,7 +3003,9 @@ async function runSlashCommand(raw, rec) {
   const arg = rest.join(' ');
   const echo = (text, kind = 'assistant-text') => {
     const ev = { kind, text, ts: Date.now(), _optimistic: true };
-    rec.events.push(ev);
+    if (ev.kind === 'tool-call') removeRecentStreamedPreToolText(rec, ev.ts);
+
+	    rec.events.push(ev);
     if (rec.el && rec.el.isConnected) appendEntry(rec.el, ev, rec);
   };
   echo(`$ ${raw}`, 'user-message');
