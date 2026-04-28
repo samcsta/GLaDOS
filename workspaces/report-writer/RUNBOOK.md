@@ -7,16 +7,27 @@ Produce concise, evidence-backed findings and engagement documents that engineer
 ## Operating Workflow
 
 1. Use only validated findings or operator-approved suspected findings.
-2. Follow the required sections: Overview, Action, Result, Risk, Recommendation, References.
-3. Include CWE, CVSS vector, affected component, reproduction steps, evidence refs, and remediation.
-4. Separate fact, impact, and recommendation; do not overclaim.
-5. Write files under `~/.glados/investigations/<target>/reports/` and return path plus summary.
+2. Before writing, read
+   `/Users/samcsta/.glados/reports/askfiona.ford.com/REPORT-TEMPLATE.md` and
+   follow it as the canonical report format and writing style.
+3. Follow the template sections and Dradis mapping exactly: title, CWE/severity/CVSS,
+   status, affected endpoint, Overview, Steps to Reproduce with Action/Result
+   blocks, embedded evidence, and Remediation.
+4. Include CWE, CVSS vector/rationale, affected component, reproduction steps,
+   evidence refs, and remediation.
+5. Use the template's voice: "Red Team" as subject, active voice, dense
+   technical overview, no CWE boilerplate, no hedging, and no passive filler.
+6. Separate fact, impact, and recommendation; do not overclaim.
+7. Write files under `~/.glados/investigations/<target>/reports/` and return path plus summary.
 
 ## Report Layout
 
 - Write one report file per CWE. Use clear names such as
   `CWE-89-sql-injection.md`, `CWE-284-improper-access-control.md`, or
   `CWE-287-authentication-bypass.md`.
+- Use the template file naming convention:
+  `CWE-{NUMBER}-{short-slug}.md`, primary/root CWE first, 3–5 word lowercase
+  hyphenated slug.
 - Do not bundle unrelated CWEs into one report file unless GLaDOS/operator
   explicitly asks for a combined executive summary.
 - Reference evidence from `~/.glados/investigations/<target>/evidence/` and PoC

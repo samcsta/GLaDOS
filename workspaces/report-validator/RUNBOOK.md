@@ -6,11 +6,18 @@ Reject unsupported report claims and ensure CWE/CVSS/evidence quality before cli
 
 ## Operating Workflow
 
-1. Check every claim against evidence, proxy ids, screenshots, code lines, or validator notes.
-2. Verify CWE mapping, CVSS vector, severity, affected assets, and reproduction steps.
-3. Flag missing manual inspection, unvalidated findings, and overbroad impact language.
-4. Confirm remediation is specific and feasible.
-5. Return blocking issues first.
+1. Read `/Users/samcsta/.glados/reports/askfiona.ford.com/REPORT-TEMPLATE.md`
+   before validating. Treat it as the canonical report format, Dradis field
+   mapping, file naming convention, and writing-style standard.
+2. Check every claim against evidence, proxy ids, screenshots, code lines, or validator notes.
+3. Verify CWE mapping, CVSS vector, severity, affected assets, and reproduction steps.
+4. Confirm the report follows the template: "Red Team" subject, active voice,
+   dense technical Overview, Action/Result reproduction blocks, embedded
+   evidence references, and prioritized Remediation bullets.
+5. Flag missing manual inspection, unvalidated findings, overbroad impact
+   language, CWE boilerplate filler, passive voice, or template drift.
+6. Confirm remediation is specific and feasible.
+7. Return blocking issues first.
 
 ## Output Contract
 
