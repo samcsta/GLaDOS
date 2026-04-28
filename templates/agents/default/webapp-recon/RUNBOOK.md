@@ -12,6 +12,8 @@ authentication vectors you will encounter are:
 - **`corp.sts.ford.com`** — Ford ADFS. If the page presents an
   **Active Directory** sign-on option, this is the path to authenticate
   through to the web application landing page (see step 2 of the workflow).
+  This host is an authentication dependency only. It is **never** the web
+  application under test.
 - **`login.microsoftonline.com`** (and any `*.microsoftonline.com` host) —
   **Microsoft MFA. Do not interact with this surface.** If the redirect
   chain hits it, stop, screenshot the chain so far, and ask the operator
@@ -41,26 +43,38 @@ an in-scope target host. At that point:
 
 ### Hard rules
 
-1. **One ADFS login attempt per session, maximum.** If the helper completes
+1. **Never test or exploit the SSO/IdP host.** Do not fuzz, probe, tamper
+   with forms, inject payloads, enumerate paths, run vulnerability checks, or
+   write attack-vector leads against `corp.sts.ford.com`,
+   `login.microsoftonline.com`, or any other identity-provider host. Your only
+   permitted action on `corp.sts.ford.com` is to use the approved Active
+   Directory path to reach the actual target application.
+2. **Active Directory is the expected Ford ADFS path.** When
+   `corp.sts.ford.com` presents an Active Directory option and the local
+   `ford-sso` profile is configured, call
+   `glados-ops__adfs_active_directory_login` once. If you cannot identify the
+   Active Directory option or the helper cannot proceed, stop and ask GLaDOS;
+   do not improvise manual auth or test the ADFS page.
+3. **One ADFS login attempt per session, maximum.** If the helper completes
    and the browser lands back on an in-scope target host, authentication is
    done — do not retry, do not open a new browser, do not re-run the helper.
-2. **Never open a fresh browser to "try again."** If the helper reports
+4. **Never open a fresh browser to "try again."** If the helper reports
    credential submission and the URL is no longer on `corp.sts.ford.com`,
    authentication succeeded regardless of what the app body says.
-3. **Do not interpret app-side error pages as auth failure.** If you are
+5. **Do not interpret app-side error pages as auth failure.** If you are
    unsure whether you are past the auth wall, **stop and ask the operator
    via GLaDOS**. Do not guess. Do not retry. The cost of a wrong guess is
    a multi-attempt re-auth loop that burns time and tokens.
-4. **Microsoft MFA is off-limits.** If the redirect chain ever hits
+6. **Microsoft MFA is off-limits.** If the redirect chain ever hits
    `login.microsoftonline.com` or any `*.microsoftonline.com` host, stop
    immediately, screenshot the chain, and ask the operator. Do not click,
    type, or submit anything on that surface unless the operator explicitly
    authorizes it for this engagement.
-5. **Stay in scope.** Only `*.ford.com` and `*.dealerconnection.com` are
+7. **Stay in scope.** Only `*.ford.com` and `*.dealerconnection.com` are
    recon targets. Other hosts surfaced through redirects, JS config, OIDC
    metadata, or app bootstrapping are dependency context, not targets — do
    not probe them unless the operator explicitly adds them to scope.
-6. **Screenshots are mandatory** for: the landing page after auth, any
+8. **Screenshots are mandatory** for: the landing page after auth, any
    "user not found" / authorization-error page, any unusual or surprising
    response, every form, every error state, every page that becomes a
    finding lead.
@@ -103,10 +117,14 @@ an in-scope target host. At that point:
 7. Keep requests low-rate. Stop before state-changing actions, uploads,
    destructive buttons, form submissions beyond login, or anything that
    would affect external users/data.
-8. Record SQLi, XSS, IDOR, authz, upload, exposed-admin, and similar issues
-   as **hypotheses only** in `attack_vector_leads[]`. Validation is the
-   webapp-validator / vuln-specialist agents' job, not yours — hand off,
-   do not confirm.
+8. Record only meaningful, actionable CWE hypotheses in
+   `attack_vector_leads[]`: SQL injection, IDOR/improper access control,
+   auth bypass, command/code injection, deserialization, SSRF with real
+   internal reachability, dangerous file upload, or issues that plausibly
+   contribute to an RCE path. Ignore low-value observations as report
+   candidates unless they materially support a higher-impact chain.
+   Validation is the webapp-validator / vuln-specialist agents' job, not
+   yours — hand off, do not confirm.
 9. Capture evidence references: URL, method, status, proxy id, screenshot
    path.
 10. Write structured JSON to `baseline.webapp_recon`; avoid prose-only

@@ -73,6 +73,31 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
 9. Route suspected findings to validators and manual operator inspection.
 10. Use report-writer/report-validator for durable deliverables.
 
+## Investigation Artifacts And Reporting
+
+- For every new investigation, keep artifacts in a target-specific directory
+  that follows this shape:
+  - `~/.glados/investigations/<target>/evidence/`
+  - `~/.glados/investigations/<target>/findings/`
+  - `~/.glados/investigations/<target>/poc/`
+  - `~/.glados/investigations/<target>/reports/`
+- Evidence goes in `evidence/`; experimental or operator-run PoC helpers go in
+  `poc/`; working notes and validation records go in `findings/`; final
+  Dradis-ready writeups go in `reports/`.
+- Reports must be separated by CWE. Use filenames such as
+  `reports/CWE-89-sql-injection.md` and
+  `reports/CWE-284-improper-access-control.md`; do not combine unrelated CWEs
+  into one report file unless the operator explicitly asks for an executive
+  rollup.
+- Only route meaningful, actionable findings to report writing: SQL injection,
+  IDOR/improper access control, auth bypass, command/code injection,
+  deserialization, SSRF with concrete internal reachability, dangerous upload,
+  or issues that materially support a plausible RCE path. Low-value hygiene
+  observations stay as notes unless they are part of a higher-impact chain.
+- Final reports are local-only artifacts. Mirror or export them to
+  `~/.glados/reports/<target>/` only through explicit operator request or the
+  report export workflow.
+
 ## Fresh Run Discipline
 
 - If the operator says fresh run, restart, retry, new investigation, skip prior
