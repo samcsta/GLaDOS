@@ -1,5 +1,5 @@
 # GLaDOS Red Team — CWE Report Template
-*Modeled on the AskFiona-style Dradis Pro report format.*
+*Canonical Dradis-ready CWE report format for GLaDOS report agents.*
 
 ---
 

@@ -8,8 +8,10 @@ Produce concise, evidence-backed findings and engagement documents that engineer
 
 1. Use only validated findings or operator-approved suspected findings.
 2. Before writing, read
-   `~/.glados/reports/askfiona.ford.com/REPORT-TEMPLATE.md` and
+   `${GLADOS_REPO_ROOT}/templates/reporting/REPORT-TEMPLATE.md` and
    follow it as the canonical report format and writing style.
+   If the repo path is unavailable, fall back to
+   `~/.glados/reports/REPORT-TEMPLATE.md`.
 3. Follow the template sections and Dradis mapping exactly: title, CWE/severity/CVSS,
    status, affected endpoint, Overview, Steps to Reproduce with Action/Result
    blocks, embedded evidence, and Remediation.

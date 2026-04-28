@@ -6,9 +6,11 @@ Reject unsupported report claims and ensure CWE/CVSS/evidence quality before cli
 
 ## Operating Workflow
 
-1. Read `~/.glados/reports/askfiona.ford.com/REPORT-TEMPLATE.md`
+1. Read `${GLADOS_REPO_ROOT}/templates/reporting/REPORT-TEMPLATE.md`
    before validating. Treat it as the canonical report format, Dradis field
    mapping, file naming convention, and writing-style standard.
+   If the repo path is unavailable, fall back to
+   `~/.glados/reports/REPORT-TEMPLATE.md`.
 2. Check every claim against evidence, proxy ids, screenshots, code lines, or validator notes.
 3. Verify CWE mapping, CVSS vector, severity, affected assets, and reproduction steps.
 4. Confirm the report follows the template: "Red Team" subject, active voice,

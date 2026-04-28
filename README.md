@@ -30,8 +30,9 @@ On a fresh MacBook:
 # Xcode command line tools
 xcode-select --install
 
-# Homebrew packages used by GLaDOS, OpenClaw, Burp extension builds, and local tooling
-brew install node git openjdk@21 openjdk@17 gradle jq ripgrep sqlite ollama ffuf nmap
+# Homebrew packages used by GLaDOS, OpenClaw, Burp extension builds, and agent tooling
+brew install node git openjdk@21 openjdk@17 gradle jq ripgrep sqlite ollama ffuf nmap nuclei jadx apktool
+brew install --cask ghidra
 
 # Optional but recommended: make Java 21 available in shells
 echo 'export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home' >> ~/.zshrc
@@ -67,20 +68,20 @@ Bootstrap also installs a non-secret starter operator context from `templates/op
 
 Credentials are local-only. Use `scripts/setup-local-secrets.sh` to create `~/.glados/secrets/local-auth.json` with workstation-specific credential profiles. GLaDOS can check which profiles exist, but the MCP status tool intentionally never returns usernames, passwords, tokens, or secret values.
 
-Bootstrap also installs the report-writing template to:
+The canonical report-writing template lives in Git at:
 
 ```text
-~/.glados/reports/askfiona.ford.com/REPORT-TEMPLATE.md
+templates/reporting/REPORT-TEMPLATE.md
 ```
 
-The seed copy lives in Git at:
+Bootstrap also installs a neutral local fallback copy at:
 
 ```text
-templates/reporting/askfiona.ford.com/REPORT-TEMPLATE.md
+~/.glados/reports/REPORT-TEMPLATE.md
 ```
 
-Report-writing agents use that local runtime path as the canonical CWE report
-format and writing-style guide.
+Report-writing agents prefer the repo template path and use the local fallback
+only if the repo path is unavailable.
 
 ### 3. Ollama Setup
 
@@ -146,6 +147,36 @@ openclaw daemon restart
 
 If OpenClaw is upgraded with `npm install -g openclaw`, re-run the patch script.
 The dashboard health banner will warn when the patch markers are missing.
+
+### 5. MCP Servers And Agent Tools
+
+No separate MCP registration step is required. `scripts/bootstrap-macos.sh`
+installs the MCP server dependencies and writes them into
+`~/.openclaw/openclaw.json`:
+
+- `blackboard` MCP — findings, tasks, baseline recon, plans, approvals
+- `watchdog` MCP — target health, halt/resume, circuit breaker, plan gate
+- `glados-ops` MCP — operator context, local auth status, scope guard,
+  browser/auth helpers, evidence helpers
+- `computer-use` MCP — included if already installed on the workstation
+
+The Homebrew tools above are available to agents through the generated OpenClaw
+`PATH`. `ffuf`, `nmap`, and `nuclei` support web/API recon and validation.
+`jadx`, `apktool`, and `Ghidra` support mobile/binary/reversing workflows when
+those agents are used.
+
+### 6. Start GLaDOS
+
+```bash
+cd dashboard
+npm start
+```
+
+Open:
+
+```text
+http://localhost:4280
+```
 
 ## Updating
 

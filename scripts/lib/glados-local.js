@@ -172,8 +172,8 @@ function ensureRuntimeDirs(paths) {
 }
 
 function installReportTemplates(paths) {
-  const src = path.join(REPORTING_TEMPLATE_ROOT, 'askfiona.ford.com', 'REPORT-TEMPLATE.md');
-  const dst = path.join(paths.reportsDir, 'askfiona.ford.com', 'REPORT-TEMPLATE.md');
+  const src = path.join(REPORTING_TEMPLATE_ROOT, 'REPORT-TEMPLATE.md');
+  const dst = path.join(paths.reportsDir, 'REPORT-TEMPLATE.md');
   if (!fs.existsSync(src) || fs.existsSync(dst)) return;
   ensureDir(path.dirname(dst));
   fs.copyFileSync(src, dst);
