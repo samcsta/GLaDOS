@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <title>GLaDOS Ops Dashboard</title>
-  <link rel="stylesheet" href="/styles.css?v=20260425-chatstream3" />
+  <link rel="stylesheet" href="/styles.css?v=20260428-sidebar-clean" />
 </head>
 <body>
   <header class="topbar">
@@ -33,10 +33,6 @@
 
   <main class="layout">
     <aside class="sidebar">
-      <h2 class="collapsible-heading" id="agents-heading" data-section="agents" title="Click to collapse/expand">
-        <span class="collapsible-chevron">▾</span> Agents
-      </h2>
-      <ul id="agent-list"></ul>
       <h2 class="collapsible-heading" id="workspace-heading" data-section="workspace" title="Click to collapse/expand">
         <span class="collapsible-chevron">▾</span> Workspace
       </h2>
@@ -47,6 +43,10 @@
         <a href="#" id="open-terminal">Terminal</a>
         <a href="#" id="open-proxy">Proxy</a>
       </div>
+      <h2 class="collapsible-heading" id="agents-heading" data-section="agents" title="Click to collapse/expand">
+        <span class="collapsible-chevron">▾</span> Agents
+      </h2>
+      <ul id="agent-list"></ul>
       <h2 class="collapsible-heading" id="indicators-heading" data-section="indicators" title="Click to collapse/expand">
         <span class="collapsible-chevron">▾</span> Indicators
       </h2>
