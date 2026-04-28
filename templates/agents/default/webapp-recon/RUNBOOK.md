@@ -92,6 +92,8 @@ an in-scope target host. At that point:
    `glados-ops__adfs_active_directory_login` exactly once with the current
    browser `targetId` or `wsUrl`. Do not manually click past the auth choice
    page. Do not print, request, or handle raw credential values yourself.
+   Do not ask the operator for credentials or which IdP to use; the configured
+   Ford default is Active Directory with the local `ford-sso` profile.
    - If the helper returns `ok:false`, `requires_operator:true`,
      `active_directory_selected_no_form`, or any other
      non-credential-submitted status: **stop and ask the operator**. Do not

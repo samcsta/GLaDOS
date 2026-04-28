@@ -125,9 +125,14 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
 - Do not ask the operator to paste credentials during assessment kickoff. Use
   the configured local secret profiles when an approved workflow requires auth.
 - If login is required, identify the needed credential profile by name
-  (`ford-sso`, `dradis`, etc.), explain the host and purpose, and ask the
-  operator for approval before using it. Auth/runtime dependency use does not
-  make that host an exploitation/fuzzing target.
+  (`ford-sso`, `dradis`, etc.) and explain the host and purpose. For Ford
+  webapp Phase 1 recon that redirects to `corp.sts.ford.com`, the operator
+  context already approves the normal Active Directory auth dependency path
+  when the local `ford-sso` profile exists; do **not** ask the operator for
+  credentials, IdP choice, or a fresh approval to use that profile. Use the
+  redacted `glados-ops__adfs_active_directory_login` helper through
+  `webapp-recon`. Auth/runtime dependency use does not make that host an
+  exploitation/fuzzing target.
 - Prioritize directly observed app behavior and prior local reports over OSINT.
   OSINT is supporting context and may be stale or wrong.
 - Do not dispatch OSINT in parallel with direct Phase 1 app/net recon unless the
@@ -142,6 +147,20 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
   `runtime: "acp"`.
 - Use the minimal prompt needed, include the engagement id and exact scope, and
   tell the subagent to write concise results to chat/blackboard.
+- Every `webapp-recon` or `webapp-vuln` dispatch for a Ford ADFS-backed target
+  must include this block verbatim:
+
+  ```text
+  AUTHENTICATION BOUNDARY — HARD RULE
+  corp.sts.ford.com is Ford ADFS/SSO and is OUT OF SCOPE for testing.
+  Do not investigate, fuzz, enumerate, exploit, or report findings on the SSO host.
+  If redirected there, select Active Directory and call
+  glados-ops__adfs_active_directory_login with profile_id=ford-sso exactly once.
+  After the browser lands back on the approved target host, screenshot the
+  landing page immediately and begin recon there.
+  If the helper fails or MFA appears, stop and report to GLaDOS; do not inspect
+  the SSO page as if it were the application.
+  ```
 - Maintain the exact `childSessionKey` values returned by `sessions_spawn` for
   the current engagement. If an internal subagent completion event arrives with
   a session key or engagement id that is not in that current expected set, treat

@@ -115,6 +115,13 @@ function transcriptEvent(agentId, kind, text, extra = {}) {
   return ev;
 }
 
+function recordUserTranscript(agentId, text, extra = {}) {
+  return transcriptEvent(agentId, 'user-message', text, {
+    id: `dashboard-user:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+    ...extra,
+  });
+}
+
 function normalizeTarget(value) {
   return String(value || '')
     .trim()
@@ -240,6 +247,14 @@ function buildApprovedKickoffMessage(pending, operatorReply) {
     '- If Dradis or Dradis Tab is skipped, do not read the dradis-workflow skill and do not browse dradistab.redteamstuff.com or dradis.redteamstuff.com.',
     '- For DomainsAI use exactly https://domainsai.redteamstuff.com; do not guess public lookalike domains.',
     '- When Dradis has a matching project, summarize whether it appears associated with the local operator profile and list existing CWE/finding coverage if available.',
+    '- For Ford webapp targets that redirect to corp.sts.ford.com, treat corp.sts.ford.com only as an authentication dependency. Do not investigate, fuzz, enumerate, or report findings on that host.',
+    '- Do not ask the operator for Ford ADFS credentials or IdP choice during this run. Use operator context: IdP = Active Directory, local auth profile = ford-sso, helper = glados-ops__adfs_active_directory_login.',
+    '- Every webapp-recon or webapp-vuln dispatch must include this exact AUTHENTICATION BOUNDARY block:',
+    '  AUTHENTICATION BOUNDARY — HARD RULE:',
+    '  corp.sts.ford.com is Ford ADFS/SSO and is OUT OF SCOPE for testing.',
+    '  If redirected there, select Active Directory and call glados-ops__adfs_active_directory_login with profile_id=ford-sso exactly once.',
+    '  After the browser lands back on the approved target host, screenshot the landing page immediately and begin recon there.',
+    '  If auth helper fails or MFA appears, stop and report to GLaDOS; do not investigate the SSO page.',
     '- First send one concise message: "Will do, starting with <target>..."',
     '- Then perform only the approved resource checks.',
     '- Consolidate resource-check results into one concise message.',
@@ -833,6 +848,7 @@ app.get('/api/agents/:id/transcript', (req, res) => {
 app.post('/api/chat/glados', async (req, res) => {
   const message = (req.body && req.body.message) || '';
   if (!message.trim()) return res.status(400).json({ error: 'message required' });
+  recordUserTranscript('glados', message);
 
   if (pendingGladosKickoff) {
     if (isKickoffCancel(message)) {
