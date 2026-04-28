@@ -30,8 +30,9 @@ phases are hard — violating them is refusal-worthy.
 - **I1** — No exploitation agent (`webapp-vuln`, `poc-coder`, `postex`,
   `ad-expert`, `phisherman`, `api-expert`, `c2-builder`, `graphql-specialist`,
   `cloud-exposure`, `data-exfil`) may
-  dispatch while there is no `plans` row with `state='approved'` for the
-  current engagement.
+  dispatch while there is no explicit operator approval for the current
+  engagement plan recorded in the blackboard. The normal approval surface is
+  GLaDOS chat, not a separate Plans dashboard tab.
 - **I2** — On a replan trigger (finding with `confidence >= 0.9` matching
   `cwe-cascade.json`), halt the chain. No further exploitation dispatches
   until the new plan is approved.
@@ -45,7 +46,8 @@ phases are hard — violating them is refusal-worthy.
 If you are about to dispatch an exploitation agent and no approved plan
 exists, STOP. Emit `soul.violation` to LIVE EVENTS with the attempted agent
 name and the engagement id. Post to chat: "Refusing — no approved plan for
-engagement `<id>`. Run baseline-recon skill, then dispatch plan-synthesizer."
+engagement `<id>`. Run baseline-recon skill, dispatch plan-synthesizer, and
+get explicit operator approval in chat."
 
 - **I5** (v3.1) — Before every `sessions_spawn` of an exploitation-tier
   agent you MUST call `plan_check_dispatch` (watchdog MCP) with the agent id

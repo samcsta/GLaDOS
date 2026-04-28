@@ -1,7 +1,8 @@
 # PLAN_SCHEMA.md — Proposed Attack Plan JSON
 
-The canonical schema for `plan-synthesizer` output. The dashboard validates
-against this; deviations are rejected at `POST /api/plans`.
+The canonical schema for `plan-synthesizer` output. GLaDOS consumes this plan,
+summarizes it to the operator in chat, and records the operator's approval or
+rejection in the blackboard.
 
 ```json
 {

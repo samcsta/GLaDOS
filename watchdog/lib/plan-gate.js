@@ -3,8 +3,9 @@
 // Before v3.1, the "no exploitation before plan approval" rule lived only in
 // SOUL.md as a prompt-enforced invariant (I1-I4). This module turns the rule
 // into a deterministic tool: plan_check_dispatch(agent_id, engagement_id?)
-// returns whether the agent is allowed to dispatch right now, based on the
-// approved plan row in the blackboard.
+// returns whether the agent is allowed to dispatch right now, based on either
+// an approved plan row or an operator-approved ATTACK PLAN finding in the
+// blackboard.
 //
 // Classification:
 //   - PHASE1_AGENTS: always allowed (they only produce the summary card + plan).
@@ -49,7 +50,6 @@ function getDb() {
   if (!fs.existsSync(BLACKBOARD_DB)) return null;
   try {
     dbHandle = new Database(BLACKBOARD_DB, { readonly: true, fileMustExist: true });
-    dbHandle.pragma('journal_mode = WAL');
     return dbHandle;
   } catch {
     return null;
@@ -68,15 +68,54 @@ function currentEngagementId(db) {
   } catch { return null; }
 }
 
+function planFindingToJson(row) {
+  const text = row?.description || '';
+  const knownAgents = new Set([...PHASE1_AGENTS, ...EXPLOITATION_AGENTS, ...META_AGENTS]);
+  const agentChain = [];
+  for (const agent of knownAgents) {
+    const re = new RegExp(`(^|[^\\w-])${agent.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^\\w-]|$)`, 'i');
+    if (re.test(text)) agentChain.push(agent);
+  }
+  return JSON.stringify({
+    source: 'plan_finding',
+    finding_id: row.id,
+    title: row.title,
+    agent_chain: agentChain,
+    proposed_vectors: [],
+  });
+}
+
+function latestApprovedPlanFinding(db, engagementId) {
+  try {
+    const row = db.prepare(
+      "SELECT id, title, description, updated_at, created_at FROM findings " +
+      "WHERE engagement_id = ? " +
+      "AND discovered_by = 'plan-synthesizer' " +
+      "AND title LIKE 'ATTACK PLAN%' " +
+      "AND validation_status IN ('approved','operator_approved','validated') " +
+      "ORDER BY updated_at DESC, id DESC LIMIT 1"
+    ).get(engagementId);
+    if (!row) return null;
+    return {
+      id: `finding:${row.id}`,
+      plan_json: planFindingToJson(row),
+      approved_at: row.updated_at || row.created_at,
+      source: 'plan_finding',
+    };
+  } catch { return null; }
+}
+
 // Latest approved plan for an engagement.
 function latestApprovedPlan(db, engagementId) {
   try {
-    return db.prepare(
+    const row = db.prepare(
       "SELECT id, plan_json, approved_at FROM plans " +
       "WHERE engagement_id = ? AND state = 'approved' " +
       "ORDER BY approved_at DESC LIMIT 1"
     ).get(engagementId);
+    if (row) return row;
   } catch { return null; }
+  return latestApprovedPlanFinding(db, engagementId);
 }
 
 // agent_chain format:  [{ agent: 'webapp-vuln', ... }, ...]  or  ['webapp-vuln', ...]

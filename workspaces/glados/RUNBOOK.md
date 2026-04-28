@@ -173,6 +173,11 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
 - operator progress updates
 - approved dispatches
 - audit-ready decisions
+- when the operator approves a plan in chat, record that approval on the
+  corresponding `ATTACK PLAN` blackboard finding from `plan-synthesizer`
+  (`validation_status=approved` or `operator_approved`) before dispatching
+  exploitation agents. The watchdog gate accepts approved plan findings; the
+  separate Plans dashboard tab is not part of the operator workflow.
 
 ## Chat Discipline
 

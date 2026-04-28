@@ -44,18 +44,20 @@ and `agent_chain` (ordered dispatch plan). The plan-synthesizer must weight
 evidence in this order: operator scope + Dradis history, direct webapp recon,
 DNS/TLS facts, then OSINT as corroborating context only.
 
-Plan lands in blackboard `plans` table with `state='pending_approval'`.
+Plan is written to the blackboard and summarized by GLaDOS in chat. The chat
+summary is the operator approval surface; the separate Plans dashboard tab is
+not used.
 
-GLaDOS **HALTS** and posts to chat: *"Plan ready for review. Approve, modify,
-or reject."*
+GLaDOS **HALTS** and posts a single consolidated chat message: *"Plan ready
+for review. Approve all, approve selected vectors, modify, or reject."*
 
-Operator decisions (via Plans dashboard tab):
-- **Approve all** → `state='approved'`, every vector dispatches.
-- **Approve selected** → `state='approved'`, `approved_vectors` subset only.
-- **Modify** → operator diff-edits, then approves → new row linked via
-  `parent_plan_id`.
-- **Reject** → `state='rejected'` with reason; loops back to Phase 1 for
-  a re-run or prompts for operator guidance.
+Operator decisions (via GLaDOS chat):
+- **Approve all** → GLaDOS records approval and dispatches every vector.
+- **Approve selected** → GLaDOS records only the selected vectors as approved.
+- **Modify** → operator states edits in chat; GLaDOS records the modified plan
+  before dispatch.
+- **Reject** → GLaDOS records the rejection reason and loops back to Phase 1
+  for a re-run or prompts for operator guidance.
 
 Approval writes a per-engagement fetch ACL derived from the plan (ties into
 HMAC/ACL layer in the proxy patch).
@@ -79,16 +81,16 @@ satisfies `confidence >= replan_threshold AND cwe ∈ cwe-cascade.json`, GLaDOS:
 2. Halts the remaining chain.
 3. Dispatches `plan-synthesizer` with `parent_plan_id` = current plan, reading
    `cwe-cascade.json` to bias toward `enables_vectors` and away from `skips`.
-4. New plan lands `state='pending_approval'`; chat post: *"High-confidence
-   finding unlocks new vectors. Proposed replan: […]. Continue original /
-   approve replan / reject?"*
+4. New plan is posted to chat: *"High-confidence finding unlocks new vectors.
+   Proposed replan: […]. Continue original / approve replan / reject?"*
 5. Blocks until operator decision.
 
 ## Invariants (enforced in SOUL.md)
 
 - **I1**: No exploitation agent (`webapp-vuln`, `api-expert`,
   `graphql-specialist`, `cloud-exposure`, `poc-coder`, `postex`, etc.) may
-  dispatch before `plans.state='approved'` for the current engagement.
+  dispatch before the operator approves the current engagement plan in chat and
+  GLaDOS records that approval in the blackboard.
 - **I2**: On replan trigger, no further exploitation dispatches until the new
   plan is approved.
 - **I3**: Phase 1 agents (`osint`, `origin-ip`, `net-recon`, `webapp-recon`,

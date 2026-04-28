@@ -209,14 +209,7 @@ function renderPane() {
   else if (tab.kind === 'getting-started') renderGettingStartedPane();
   else if (tab.kind === 'terminal') renderTerminalPane();
   else if (tab.kind === 'proxy') renderProxyPane();
-  else if (tab.kind === 'plans') renderPlansPane();
   else renderAgentPane(id);
-}
-
-function openPlans() {
-  const id = 'plans';
-  if (!state.openTabs.find(t => t.id === id)) state.openTabs.push({ id, kind: 'plans', label: 'Plans' });
-  setCurrentTab(id);
 }
 
 // Ensure a transcript record exists for this tabId and is subscribed to the
@@ -1535,24 +1528,17 @@ function subscribeLobby() {
       logEvent(type === 'plan-pending' ? 'started' : (type === 'plan-rejected' ? 'ended' : 'ok'),
         `${type} ${data.id || data.new_id || data.old_id || ''}`);
       refreshPlansBadge();
-      if (state.currentTab === 'plans') {
-        loadPlansList();
-        if (plansState.selected && (plansState.selected === data.id || plansState.selected === data.old_id))
-          selectPlan(plansState.selected);
-      }
     });
   }
   es.addEventListener('plan-replan-proposed', e => {
     let data = {}; try { data = JSON.parse(e.data); } catch {}
     logEvent('started', `replan proposed #${data.proposal_id || '?'} finding #${data.finding_id || '?'}`);
     refreshPlansBadge();
-    if (state.currentTab === 'plans') loadReplanProposals();
   });
   es.addEventListener('plan-replan-resolved', e => {
     let data = {}; try { data = JSON.parse(e.data); } catch {}
     logEvent(data.state === 'accepted' ? 'ok' : 'ended', `replan proposal #${data.proposal_id || '?'} -> ${data.state || '?'}`);
     refreshPlansBadge();
-    if (state.currentTab === 'plans') loadReplanProposals();
   });
   es.addEventListener('target-health', e => {
     const info = JSON.parse(e.data);
@@ -2690,7 +2676,7 @@ function hydrateGettingStarted(wrap) {
     pre.appendChild(btn);
   }
 
-  // Cross-links: data-open-tab="proxy|terminal|glados|chatbot|reports|plans".
+  // Cross-links: data-open-tab="proxy|terminal|glados|chatbot|reports".
   for (const a of wrap.querySelectorAll('a[data-open-tab]')) {
     a.addEventListener('click', ev => {
       ev.preventDefault();
@@ -2700,7 +2686,6 @@ function hydrateGettingStarted(wrap) {
       else if (tab === 'glados') openGladosChat();
       else if (tab === 'chatbot') openChatBot();
       else if (tab === 'reports') openReports();
-      else if (tab === 'plans') openPlans();
     });
   }
 
@@ -3065,6 +3050,8 @@ setInterval(refreshVisibleChatTurnStatuses, 2500);
 const plansState = { list: [], selected: null, proposals: [] };
 
 async function refreshPlansBadge() {
+  const badge = document.getElementById('plans-badge');
+  if (!badge) return;
   try {
     const [plansRes, replanRes] = await Promise.all([
       fetch('/api/plans?state=pending_approval'),
@@ -3076,8 +3063,6 @@ async function refreshPlansBadge() {
     if (replanRes && replanRes.ok) {
       try { proposals = (await replanRes.json()).proposals || []; } catch {}
     }
-    const badge = document.getElementById('plans-badge');
-    if (!badge) return;
     const count = plans.length + proposals.length;
     if (count > 0) {
       badge.textContent = String(count);
@@ -3360,7 +3345,6 @@ document.addEventListener('click', ev => {
 })();
 document.getElementById('open-terminal').addEventListener('click', ev => { ev.preventDefault(); openTerminal(); });
 document.getElementById('open-proxy').addEventListener('click', ev => { ev.preventDefault(); openProxy(); });
-document.getElementById('open-plans').addEventListener('click', ev => { ev.preventDefault(); openPlans(); });
 
 // Live-events footer: Clear wipes the on-screen feed (server keeps its own log).
 document.getElementById('events-clear').addEventListener('click', () => {

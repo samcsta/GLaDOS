@@ -46,6 +46,18 @@ const META_AGENTS = new Set([
   'evidence-curator',
   'scope-guardian',
 ]);
+const EXPLOITATION_AGENTS = new Set([
+  'webapp-vuln',
+  'poc-coder',
+  'postex',
+  'ad-expert',
+  'phisherman',
+  'api-expert',
+  'c2-builder',
+  'data-exfil',
+  'graphql-specialist',
+  'cloud-exposure',
+]);
 
 const TOOLS = [
   {
@@ -421,6 +433,36 @@ function targetHealth(targetUrl) {
   return watchdog.prepare('SELECT * FROM target_health WHERE target_url = ?').get(targetUrl) || { state: 'unknown', reason: 'no target health row' };
 }
 
+function planFindingAgents(row) {
+  const text = row?.description || '';
+  const knownAgents = new Set([...PHASE1_AGENTS, ...META_AGENTS, ...EXPLOITATION_AGENTS]);
+  const agents = new Set();
+  for (const agent of knownAgents) {
+    const re = new RegExp(`(^|[^\\w-])${agent.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^\\w-]|$)`, 'i');
+    if (re.test(text)) agents.add(agent);
+  }
+  return agents;
+}
+
+function latestApprovedPlanFinding(agentId, engagementId) {
+  if (!blackboard || !engagementId) return null;
+  const rows = blackboard.prepare(
+    "SELECT id, engagement_id, title, description FROM findings " +
+    "WHERE engagement_id = ? " +
+    "AND discovered_by = 'plan-synthesizer' " +
+    "AND title LIKE 'ATTACK PLAN%' " +
+    "AND validation_status IN ('approved','operator_approved','validated') " +
+    "ORDER BY updated_at DESC, id DESC LIMIT 5"
+  ).all(engagementId);
+  for (const row of rows) {
+    const agents = planFindingAgents(row);
+    if (agents.has(agentId)) {
+      return { id: `finding:${row.id}`, engagement_id: row.engagement_id, plan: { source: 'plan_finding', agent_chain: [...agents] } };
+    }
+  }
+  return null;
+}
+
 function latestApprovedPlan(agentId, engagementId) {
   if (!blackboard) return null;
   const rows = engagementId
@@ -434,7 +476,7 @@ function latestApprovedPlan(agentId, engagementId) {
       if (chain.has(agentId) || vectorAgents.has(agentId)) return { id: row.id, engagement_id: row.engagement_id, plan };
     } catch {}
   }
-  return null;
+  return latestApprovedPlanFinding(agentId, engagementId);
 }
 
 function inScope(targetUrl, scope) {

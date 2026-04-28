@@ -62,7 +62,7 @@ Burp is accessed through the local proxy and the GLaDOS Burp extension, not thro
    - OSINT as a supporting signal. OSINT is useful, but it is less reliable than direct app observations and should not dominate plan selection.
 3. Write the baseline summary to the blackboard.
 4. Dispatch `plan-synthesizer`.
-5. Present the proposed plan in chat and the Plans tab.
+5. Present the proposed plan in chat.
 6. Wait for operator approval, modification, or rejection.
 7. Only dispatch exploitation-class agents after approval and `watchdog.plan_check_dispatch` permits the agent.
 8. If a validated finding unlocks new vectors, halt and replan.
