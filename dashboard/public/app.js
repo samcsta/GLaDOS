@@ -289,6 +289,11 @@ function ensureTranscript(tabId, agentId) {
 	    if (ev.kind === 'meta' && ev.sub === 'thinking-level') {
 	      rec.thinkingLevel = ev.level || null;
 	    }
+    if (ev.kind === 'thinking' && normalizeTranscriptText(ev.text || '').length < 80) {
+      rec.firstTokenSeenAt ||= Date.now();
+      if (rec.sending) markTranscriptActivity(rec, tabId, 'thinking');
+      return;
+    }
 
 	    rec.events.push(ev);
     if (rec.el && rec.el.isConnected) appendEntry(rec.el, ev, rec);
@@ -522,6 +527,26 @@ function handleStreamDelta(rec, ev) {
   const isStart = ev.evtType === 'thinking_start' || ev.evtType === 'text_start';
   const isEnd = ev.evtType === 'thinking_end' || ev.evtType === 'text_end';
   let entry = rec.streamEntries.get(streamKey);
+  const nextContent = ev.content || `${entry?.content || ''}${ev.delta || ''}`;
+  const meaningfulThinking = normalizeTranscriptText(nextContent).length >= 80;
+
+  // Raw thinking can arrive as one-token scratch fragments, especially when the
+  // gateway replays/compacts a turn. Those fragments are status signal, not
+  // useful transcript. Hold them in memory; only render/persist a thinking
+  // bubble once it becomes a real paragraph.
+  if (isThinking && !meaningfulThinking) {
+    if (entry) {
+      entry.content = nextContent;
+      if (entry.textNode) entry.textNode.data = nextContent;
+      if (isEnd) {
+        entry.el?.remove();
+        rec.streamEntries.delete(streamKey);
+      }
+    } else if (!isEnd) {
+      rec.streamEntries.set(streamKey, { el: null, textNode: null, content: nextContent });
+    }
+    return;
+  }
 
   if (!entry) {
     // First delta we see — create the live entry. We skip the 'start' event if
@@ -538,16 +563,28 @@ function handleStreamDelta(rec, ev) {
     rec.el.appendChild(el);
     entry = { el, textNode, content: '' };
     rec.streamEntries.set(streamKey, entry);
+  } else if (!entry.el && isThinking && meaningfulThinking) {
+    const el = document.createElement('div');
+    el.className = `entry ${entryKind} streaming`;
+    el.dataset.streamKey = streamKey;
+    if (rec?.agentId) el.dataset.agent = rec.agentId;
+    const ts = ev.ts ? new Date(ev.ts).toLocaleTimeString() : '';
+    el.innerHTML = `<span class="ts">${ts}</span><span class="stream-cursor"> ▍</span>`;
+    const textNode = document.createTextNode('');
+    el.insertBefore(textNode, el.querySelector('.stream-cursor'));
+    rec.el.appendChild(el);
+    entry.el = el;
+    entry.textNode = textNode;
   }
 
   // Prefer `content` when present (full accumulated) — avoids drift if we
   // missed a delta. Fall back to appending `delta`.
   if (ev.content) {
     entry.content = ev.content;
-    entry.textNode.data = ev.content;
+    if (entry.textNode) entry.textNode.data = ev.content;
   } else if (ev.delta) {
     entry.content += ev.delta;
-    entry.textNode.data = entry.content;
+    if (entry.textNode) entry.textNode.data = entry.content;
   }
 
   if (isEnd) {
@@ -556,13 +593,13 @@ function handleStreamDelta(rec, ev) {
       // JSONL can occasionally win the race against raw text_end. In that
       // case the durable bubble already exists, so remove the transient live
       // stream bubble instead of showing the same answer twice.
-      entry.el.remove();
+      entry.el?.remove();
       rec.streamEntries.delete(streamKey);
       if (rec.autoScroll !== false) scheduleStickyScroll(rec.el, rec);
       return;
     }
-    entry.el.classList.remove('streaming');
-    const cursor = entry.el.querySelector('.stream-cursor');
+    entry.el?.classList.remove('streaming');
+    const cursor = entry.el?.querySelector('.stream-cursor');
     if (cursor) cursor.remove();
     // v3.1: upgrade finalized assistant-text from plain text to rendered markdown.
     // Thinking blocks stay plain (they're notes, not formatted output).

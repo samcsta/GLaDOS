@@ -4,33 +4,113 @@
 
 Produce a direct, machine-readable map of the web application before any exploitation plan is proposed.
 
+## Authentication Boundary (READ FIRST)
+
+The web application under test is **never** the SSO/IdP host. The two
+authentication vectors you will encounter are:
+
+- **`corp.sts.ford.com`** — Ford ADFS. If the page presents an
+  **Active Directory** sign-on option, this is the path to authenticate
+  through to the web application landing page (see step 2 of the workflow).
+- **`login.microsoftonline.com`** (and any `*.microsoftonline.com` host) —
+  **Microsoft MFA. Do not interact with this surface.** If the redirect
+  chain hits it, stop, screenshot the chain so far, and ask the operator
+  via GLaDOS. Do not click, submit credentials, retry, or open a new
+  browser. Treat MFA as out-of-scope unless the operator explicitly
+  authorizes interaction for this specific engagement.
+
+Application scope unless the operator says otherwise: **`*.ford.com`** and
+**`*.dealerconnection.com`**. Any other host is out of scope as a recon
+target until explicitly authorized.
+
+Authentication is **complete** the moment the browser's final URL is back on
+an in-scope target host. At that point:
+
+- **Whatever page renders is the application.** That is your starting surface.
+  Work with it. The landing page may be a dashboard, a "user not provisioned"
+  error, a 403, an empty shell, a partial render, or a generic branded page —
+  all of those are valid recon starting points and several of them are
+  finding leads in their own right.
+- ADFS credentials may or may not authorize the test account for any given
+  application. **An app-level "user not found", "not authorized", "no profile",
+  403, or access-denied page after SSO success is a recon observation, not an
+  authentication failure.** Capture it, screenshot it, and continue mapping
+  the surface that *is* reachable (static assets, JS bundles, public API
+  routes, error-page footers, framework markers, error-page links, embedded
+  config).
+
+### Hard rules
+
+1. **One ADFS login attempt per session, maximum.** If the helper completes
+   and the browser lands back on an in-scope target host, authentication is
+   done — do not retry, do not open a new browser, do not re-run the helper.
+2. **Never open a fresh browser to "try again."** If the helper reports
+   credential submission and the URL is no longer on `corp.sts.ford.com`,
+   authentication succeeded regardless of what the app body says.
+3. **Do not interpret app-side error pages as auth failure.** If you are
+   unsure whether you are past the auth wall, **stop and ask the operator
+   via GLaDOS**. Do not guess. Do not retry. The cost of a wrong guess is
+   a multi-attempt re-auth loop that burns time and tokens.
+4. **Microsoft MFA is off-limits.** If the redirect chain ever hits
+   `login.microsoftonline.com` or any `*.microsoftonline.com` host, stop
+   immediately, screenshot the chain, and ask the operator. Do not click,
+   type, or submit anything on that surface unless the operator explicitly
+   authorizes it for this engagement.
+5. **Stay in scope.** Only `*.ford.com` and `*.dealerconnection.com` are
+   recon targets. Other hosts surfaced through redirects, JS config, OIDC
+   metadata, or app bootstrapping are dependency context, not targets — do
+   not probe them unless the operator explicitly adds them to scope.
+6. **Screenshots are mandatory** for: the landing page after auth, any
+   "user not found" / authorization-error page, any unusual or surprising
+   response, every form, every error state, every page that becomes a
+   finding lead.
+
 ## Operating Workflow
 
-1. Use the MCP browser plus Burp-visible traffic so navigation, requests, and screenshots are attributable.
-2. Walk the application like a careful user: menus, links, unauthenticated forms, static pages, client-rendered routes, and obvious workflow branches.
-3. Map routes, forms, parameters, auth flow, client-side JS endpoints, cookies, headers, framework hints, and quick wins.
-4. Capture screenshots for meaningful states: landing page, auth boundaries, forms, error states, exposed admin-looking panels, unusual responses, and suspected finding leads.
-5. If a Ford ADFS / `corp.sts.ford.com` page appears with an **Active
-   Directory** option, treat it as an approved auth dependency for Ford web app
-   recon when `glados-ops__local_auth_status` shows the `ford-sso` profile is
-   configured. Use `glados-ops__adfs_active_directory_login` with the current
-   browser `targetId` or `wsUrl`; the helper is responsible for selecting Active
-   Directory and submitting the local secret profile when a credential form is
-   available. Do not manually click past the auth choice page after helper
-   failure, and do not print, request, or handle raw credential values yourself.
-   Continue only when the helper reports credential submission and navigation
-   away from the auth wall. If the helper returns `ok:false`,
-   `requires_operator:true`, `active_directory_selected_no_form`, or any other
-   non-credential-submitted status, stop immediately and ask the operator. Do
-   not retry the helper unless the operator explicitly instructs you to.
-6. After successful authentication, continue browsing the authenticated
-   application at low rate: menus, routes, forms, search/filter pages, object ID
-   patterns, client-side endpoints, and workflow branches. Record SQLi, XSS,
-   IDOR, authz, upload, and exposed-admin leads as hypotheses only.
-7. Stop before state-changing actions, uploads, destructive buttons, form
-   submissions beyond login, or anything that would affect external users/data.
-8. Capture evidence references: URL, method, status, proxy id, screenshot path if relevant.
-9. Write structured JSON to baseline.webapp_recon; avoid prose-only summaries.
+1. Use the MCP browser plus Burp-visible traffic so navigation, requests, and
+   screenshots are attributable. Use any Dradis/DomainsAI context GLaDOS
+   provides in your task prompt, but do not independently browse Dradis,
+   DradisTab, or DomainsAI unless the operator has explicitly approved that
+   resource use for this investigation.
+2. If the target redirects to `corp.sts.ford.com` and the page presents an
+   **Active Directory** option, and `glados-ops__local_auth_status` shows
+   the `ford-sso` profile is configured, call
+   `glados-ops__adfs_active_directory_login` exactly once with the current
+   browser `targetId` or `wsUrl`. Do not manually click past the auth choice
+   page. Do not print, request, or handle raw credential values yourself.
+   - If the helper returns `ok:false`, `requires_operator:true`,
+     `active_directory_selected_no_form`, or any other
+     non-credential-submitted status: **stop and ask the operator**. Do not
+     retry the helper. Do not switch browsers.
+   - If the redirect chain hits `login.microsoftonline.com` (or any
+     `*.microsoftonline.com` host): **stop and ask the operator** — that is
+     MFA, not an authentication you may complete on your own.
+   - If the helper succeeds and the browser lands back on an in-scope
+     target host: authentication is **done** — proceed to step 3 even if
+     the landing page shows an application-level error.
+3. **Screenshot the landing page immediately**, before any further navigation.
+   Save under the investigation evidence directory and record the path.
+4. Walk the application like a careful user: menus, links, unauthenticated
+   forms, static pages, client-rendered routes, and obvious workflow
+   branches. Treat any app-side error page as one node in the map, not as a
+   reason to re-auth.
+5. Map routes, forms, parameters, auth flow, client-side JS endpoints,
+   cookies, headers, framework hints, and quick wins.
+6. Capture screenshots for meaningful states: landing page (mandatory),
+   auth boundaries, forms, error states, "user not found" / authorization
+   pages, exposed admin-looking panels, unusual responses, and suspected
+   finding leads.
+7. Keep requests low-rate. Stop before state-changing actions, uploads,
+   destructive buttons, form submissions beyond login, or anything that
+   would affect external users/data.
+8. Record SQLi, XSS, IDOR, authz, upload, exposed-admin, and similar issues
+   as **hypotheses only** in `attack_vector_leads[]`. Validation is the
+   webapp-validator / vuln-specialist agents' job, not yours — hand off,
+   do not confirm.
+9. Capture evidence references: URL, method, status, proxy id, screenshot
+   path.
+10. Write structured JSON to `baseline.webapp_recon`; avoid prose-only
+    summaries.
 
 ## Output Contract
 

@@ -16,6 +16,8 @@ const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+let rawStreamFloorMs = Date.now();
+
 try {
   require('../scripts/lib/glados-local').ensureBlackboardDb({ blackboardDb: BLACKBOARD_DB });
 } catch (e) {
@@ -37,6 +39,11 @@ try {
   const sync = syncAgentDirIdentities();
   if (sync.synced > 0) console.log(`[startup] synced ${sync.synced} agentDir IDENTITY.md from workspace`);
 } catch (e) { console.warn('[startup] agentDir sync failed:', e.message); }
+try {
+  const raw = truncateRawStream();
+  rawStreamFloorMs = Date.now();
+  if (raw.bytesBefore > 0) console.log(`[startup] truncated raw-stream.jsonl (${raw.bytesBefore} bytes)`);
+} catch (e) { console.warn('[startup] raw-stream truncate failed:', e.message); }
 
 const watcher = new AgentWatcher().start();
 
@@ -47,6 +54,7 @@ const sseClients = new Map(); // agentId -> Set<res>
 const lobbyClients = new Set(); // /api/agents SSE subscribers
 const activeChatTurns = new Map(); // agentId -> { turnId, startedAt, messagePreview }
 const recentChatTurns = new Map(); // agentId -> { turnId, expiresAt } short grace for late raw-stream fs events
+let pendingGladosKickoff = null;
 
 function pushBuffer(agentId, ev) {
   let buf = buffers.get(agentId);
@@ -70,6 +78,10 @@ function broadcastLobby(type, data) {
 function startChatTurn(agentId, message) {
   const turnId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const startedAt = Date.now();
+  // Raw-stream can replay compaction/safeguard tokens with historical `ts`
+  // values. A new direct chat turn should never render raw tokens older than
+  // the user message that triggered it.
+  rawStreamFloorMs = Math.max(rawStreamFloorMs, startedAt - 1000);
   activeChatTurns.set(agentId, {
     turnId,
     startedAt,
@@ -86,6 +98,119 @@ function finishChatTurn(agentId, turnId) {
   activeChatTurns.delete(agentId);
   recentChatTurns.set(agentId, { turnId, expiresAt: Date.now() + 15_000 });
   broadcastLobby('chat-turn-ended', { agentId, turnId });
+}
+
+function transcriptEvent(agentId, kind, text, extra = {}) {
+  const ev = {
+    agentId,
+    kind,
+    text,
+    ts: new Date().toISOString(),
+    id: `dashboard:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+    ...extra,
+  };
+  pushBuffer(agentId, ev);
+  broadcastTranscript(agentId, ev);
+  return ev;
+}
+
+function normalizeTarget(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^["'`]+|["'`.,!?;:]+$/g, '')
+    .replace(/\/+$/g, '');
+}
+
+function extractInvestigationTarget(message) {
+  const text = String(message || '').trim();
+  const patterns = [
+    /\b(?:begin|start|launch|run|perform|open)\s+(?:an?\s+)?(?:fresh\s+)?(?:investigation|assessment|web\s*app\s*assessment|test(?:-|\s*)run)\s+(?:on|for|against)\s+["'`]?([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'`<>]+|[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,})/i,
+    /\b(?:investigate|assess|test)\s+["'`]?([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'`<>]+|[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,})/i,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m?.[1]) return normalizeTarget(m[1]);
+  }
+  return null;
+}
+
+function isKickoffApproval(message) {
+  return /\b(continue|proceed|go ahead|approved?|yes|start|do it|looks good)\b/i.test(String(message || ''));
+}
+
+function isKickoffCancel(message) {
+  return /\b(cancel|stop|halt|no|never mind|nevermind|do not proceed)\b/i.test(String(message || ''));
+}
+
+function resolveKickoffResources(message) {
+  const text = String(message || '').toLowerCase();
+  let resources = [
+    { id: 'dradistab', label: 'Dradis Tab', url: 'https://dradistab.redteamstuff.com' },
+    { id: 'dradis', label: 'Dradis', url: 'https://dradis.redteamstuff.com' },
+    { id: 'domainsai', label: 'DomainsAI', url: 'https://domainsai.redteamstuff.com' },
+  ];
+
+  if (/\bonly\s+domainsai\b/.test(text)) {
+    resources = resources.filter(r => r.id === 'domainsai');
+  }
+  const skipDradisPair = /\bskip\b[^.?!\n]*(dradistab\s*\/\s*dradis|dradis\s*\/\s*dradistab|dradistab\s+(?:and|&)\s+dradis|dradis\s+(?:and|&)\s+dradistab)/.test(text)
+    || /\bskip\s+(?:the\s+)?dradis(?:tab)?\s+checks?\b/.test(text);
+  if (skipDradisPair) {
+    resources = resources.filter(r => r.id !== 'dradis' && r.id !== 'dradistab');
+  } else {
+    if (/\bskip\s+(?:the\s+)?dradistab\b/.test(text)) {
+      resources = resources.filter(r => r.id !== 'dradistab');
+    }
+    if (/\bskip\s+(?:the\s+)?dradis\b/.test(text)) {
+      resources = resources.filter(r => r.id !== 'dradis');
+    }
+  }
+  if (/\bskip\s+(?:all\s+)?(?:internal\s+)?(?:resource|resources|lookups|checks)\b/.test(text)) {
+    resources = [];
+  }
+  if (/\bdomainsai\s+first\b/.test(text)) {
+    resources.sort((a, b) => (a.id === 'domainsai' ? -1 : b.id === 'domainsai' ? 1 : 0));
+  }
+
+  return resources;
+}
+
+function kickoffApprovalPrompt(target) {
+  return `Ok, I am going to proceed with checking DradisTab, Dradis, and DomainsAI for \`${target}\` before I dispatch any agents. Would you like any changes before I proceed?`;
+}
+
+function buildApprovedKickoffMessage(pending, operatorReply) {
+  const resources = resolveKickoffResources(operatorReply);
+  const resourceText = resources.length ? resources.map(r => `${r.label} (${r.url})`).join(', ') : 'none';
+  const approvedIds = new Set(resources.map(r => r.id));
+  const skipped = [
+    { id: 'dradistab', label: 'Dradis Tab', url: 'https://dradistab.redteamstuff.com' },
+    { id: 'dradis', label: 'Dradis', url: 'https://dradis.redteamstuff.com' },
+    { id: 'domainsai', label: 'DomainsAI', url: 'https://domainsai.redteamstuff.com' },
+  ].filter(r => !approvedIds.has(r.id));
+  const skippedText = skipped.length ? skipped.map(r => `${r.label} (${r.url})`).join(', ') : 'none';
+  const target = pending.target;
+  return [
+    `Begin the approved investigation kickoff for ${target}.`,
+    '',
+    'Operator approval gate has already completed in the dashboard.',
+    `Approved pre-agent resources, in order: ${resourceText}.`,
+    `Explicitly skipped resources: ${skippedText}.`,
+    '',
+    'Hard workflow rules:',
+    '- Do not consult any unapproved resource.',
+    '- If Dradis or Dradis Tab is skipped, do not read the dradis-workflow skill and do not browse dradistab.redteamstuff.com or dradis.redteamstuff.com.',
+    '- For DomainsAI use exactly https://domainsai.redteamstuff.com; do not guess public lookalike domains.',
+    '- First send one concise message: "Will do, starting with <target>..."',
+    '- Then perform only the approved resource checks.',
+    '- Consolidate resource-check results into one concise message.',
+    '- Then announce one dispatch message: "Deploying OSINT and WEBAPP RECON agents to do <specific tasks>..."',
+    '- Do not send separate chat bubbles for every internal tool call.',
+    '- Do not dispatch exploitation agents before plan approval.',
+    '',
+    `Original operator request: ${pending.originalMessage}`,
+    `Operator approval reply: ${operatorReply}`,
+  ].join('\n');
 }
 
 function openclawResultError(result) {
@@ -328,6 +453,30 @@ function wipeAgentMemories() {
   };
 }
 
+// Truncates ~/.openclaw/logs/raw-stream.jsonl so the dashboard's RawStreamTail
+// starts fresh on the next turn. The gateway's per-token thinking/text stream
+// accumulates in this file unboundedly between rotations (50 MB threshold —
+// took a week to fill 7 MB, never rotated). When `compaction.mode: "safeguard"`
+// is active in openclaw.json, the gateway can replay old thinking tokens with
+// their original `ts` field during compaction, producing transient SSE events
+// that render in the GLaDOS pane with stale timestamps and disappear on page
+// refresh (because they're never written to the durable session JSONL). This
+// is the source of "old thinking content leaks during a fresh response" —
+// truncating clears the gateway's replay buffer.
+function truncateRawStream() {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const os = require('node:os');
+  const file = process.env.OPENCLAW_RAW_STREAM_PATH
+    || path.join(os.homedir(), '.openclaw', 'logs', 'raw-stream.jsonl');
+  let bytesBefore = 0;
+  try { bytesBefore = fs.statSync(file).size; } catch {}
+  try { fs.writeFileSync(file, ''); }
+  catch (e) { return { ok: false, error: e.message }; }
+  rawStreamFloorMs = Date.now();
+  return { ok: true, bytesBefore, truncatedAt: rawStreamFloorMs };
+}
+
 // Syncs every agent's openclaw.json `agentDir` IDENTITY.md (if present) from
 // the canonical workspace IDENTITY.md so the model never gets two competing
 // system prompts. The two-location issue exists historically because some
@@ -503,6 +652,20 @@ function agentFromRunId(runId, knownAgentIds) {
   return knownAgentIds.has(id) ? id : null;
 }
 
+function rawEventMs(ev) {
+  const parsed = Date.parse(ev?.ts || '');
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function staleRawStreamEvent(ev, agentId) {
+  const evMs = rawEventMs(ev);
+  if (evMs < rawStreamFloorMs - 1000) return true;
+  const snap = agentId ? currentSessionForAgent(agentId) : null;
+  if (snap?.sessionId && ev.sessionId && ev.sessionId !== snap.sessionId) return true;
+  if (snap?.startedAt && evMs < snap.startedAt - 1000) return true;
+  return false;
+}
+
 const rawStream = new RawStreamTail().start();
 rawStream.on('raw', ev => {
   // Suppress subagent heartbeat traffic ("NO_REPLY" replies and the like).
@@ -533,6 +696,7 @@ rawStream.on('raw', ev => {
     if (ev.sessionId) bufferOrphanRawDelta(ev);
     return;
   }
+  if (staleRawStreamEvent(ev, agentId)) return;
   const enriched = { agentId, ...ev };
   // DO NOT push to the per-agent ring buffer — the buffer is for backfill
   // on reconnect and a 2000-token-per-turn flood would blow it out instantly.
@@ -630,6 +794,56 @@ app.get('/api/agents/:id/transcript', (req, res) => {
 app.post('/api/chat/glados', async (req, res) => {
   const message = (req.body && req.body.message) || '';
   if (!message.trim()) return res.status(400).json({ error: 'message required' });
+
+  if (pendingGladosKickoff) {
+    if (isKickoffCancel(message)) {
+      const cancelled = pendingGladosKickoff;
+      pendingGladosKickoff = null;
+      const ev = transcriptEvent('glados', 'assistant-text', `Cancelled the pending investigation kickoff for \`${cancelled.target}\`. No resources were checked and no agents were dispatched.`);
+      return res.json({ ok: true, gated: true, cancelled: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
+    }
+
+    if (!isKickoffApproval(message) && !/\b(skip|only|domainsai|dradis|dradistab)\b/i.test(message)) {
+      const ev = transcriptEvent(
+        'glados',
+        'assistant-text',
+        `I am still paused before starting \`${pendingGladosKickoff.target}\`. Reply with "continue", "skip DradisTab/Dradis and proceed with DomainsAI", or another explicit change before I check resources or dispatch agents.`
+      );
+      return res.json({ ok: true, gated: true, waiting: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
+    }
+
+    const approved = pendingGladosKickoff;
+    pendingGladosKickoff = null;
+    const approvedMessage = buildApprovedKickoffMessage(approved, message);
+    const turnId = startChatTurn('glados', approvedMessage);
+    try {
+      const result = await sendMessageToAgent('glados', approvedMessage);
+      const resultError = openclawResultError(result);
+      if (resultError) return res.status(502).json({ ok: false, error: resultError, result });
+      return res.json({ ok: true, gated: true, approved: true, result });
+    } catch (e) {
+      return res.status(500).json({
+        ok: false,
+        error: e.message,
+        stderr: e.stderr,
+        stdout: e.stdout,
+      });
+    } finally {
+      finishChatTurn('glados', turnId);
+    }
+  }
+
+  const kickoffTarget = extractInvestigationTarget(message);
+  if (kickoffTarget) {
+    pendingGladosKickoff = {
+      target: kickoffTarget,
+      originalMessage: message,
+      createdAt: Date.now(),
+    };
+    const ev = transcriptEvent('glados', 'assistant-text', kickoffApprovalPrompt(kickoffTarget), { gated: true });
+    return res.json({ ok: true, gated: true, pending: pendingGladosKickoff, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
+  }
+
   const turnId = startChatTurn('glados', message);
   try {
     const result = await sendMessageToAgent('glados', message);
@@ -929,8 +1143,9 @@ app.post('/api/gateway/restart', (req, res) => {
   const { OPENCLAW_BIN } = require('./lib/config');
   execFile(OPENCLAW_BIN, ['daemon', 'restart'], { timeout: 30_000 }, (err, stdout, stderr) => {
     if (err) return res.status(500).json({ ok: false, error: err.message, stderr: stderr?.toString() });
-    broadcastLobby('gateway-restart', { ok: true });
-    res.json({ ok: true, stdout: stdout?.toString(), stderr: stderr?.toString() });
+    const rawStream = truncateRawStream();
+    broadcastLobby('gateway-restart', { ok: true, rawStream });
+    res.json({ ok: true, stdout: stdout?.toString(), stderr: stderr?.toString(), rawStream });
   });
 });
 
@@ -956,14 +1171,18 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
     let memories = null;
     let archivePrune = null;
     let agentDirSync = null;
+    let rawStream = null;
     if (agentId === 'glados') {
+      pendingGladosKickoff = null;
       blackboard = wipeBlackboard();
       memories = wipeAgentMemories();
       archivePrune = pruneArchivedSessions();
       agentDirSync = syncAgentDirIdentities();
+      rawStream = truncateRawStream();
       broadcastLobby('blackboard-wiped', blackboard);
       broadcastLobby('memories-wiped', memories);
       broadcastLobby('archives-pruned', archivePrune);
+      broadcastLobby('raw-stream-truncated', rawStream);
     }
 
     const primary = results.find(r => r.agentId === agentId) || results[0];
@@ -978,6 +1197,7 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
       memories,
       archivePrune,
       agentDirSync,
+      rawStream,
     });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });

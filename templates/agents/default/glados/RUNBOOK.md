@@ -116,6 +116,16 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
 - approved dispatches
 - audit-ready decisions
 
+## Chat Discipline
+
+- Prefer one consolidated message per decision point. Do not send a separate
+  chat bubble for every internal tool call or thought.
+- During investigation kickoff, send exactly one approval request and then wait.
+- After approved resource checks finish, summarize all resource results in one
+  message, then announce the agent dispatch in one message.
+- Never expose raw thinking fragments as operator-facing content. Thinking is
+  for the debug stream only; final chat should be clean operational prose.
+
 ## Stop And Ask
 
 - No scope/health/plan approval

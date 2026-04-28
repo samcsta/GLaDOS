@@ -68,12 +68,10 @@ an in-scope target host. At that point:
 ## Operating Workflow
 
 1. Use the MCP browser plus Burp-visible traffic so navigation, requests, and
-   screenshots are attributable. **Before browsing the target, consult
-   internal red-team intelligence resources** (see operator context
-   `intelligence_resources`): pull domain/asset context for the target host
-   from **DomainsAI** (`domainsai.redteamstuff.com`) and check
-   **Dradis Tab** (`dradistab.redteamstuff.com`) for any prior or in-flight
-   assessment on the same target. Treat these as required first stops.
+   screenshots are attributable. Use any Dradis/DomainsAI context GLaDOS
+   provides in your task prompt, but do not independently browse Dradis,
+   DradisTab, or DomainsAI unless the operator has explicitly approved that
+   resource use for this investigation.
 2. If the target redirects to `corp.sts.ford.com` and the page presents an
    **Active Directory** option, and `glados-ops__local_auth_status` shows
    the `ford-sso` profile is configured, call
