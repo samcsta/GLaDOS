@@ -22,7 +22,37 @@ Updates never overwrite local agents, reports, investigations, blackboards, watc
 
 ## First Install
 
+### 1. Install Prerequisites
+
+On a fresh MacBook:
+
 ```bash
+# Xcode command line tools
+xcode-select --install
+
+# Homebrew packages used by GLaDOS, OpenClaw, Burp extension builds, and local tooling
+brew install node git openjdk@21 openjdk@17 gradle jq ripgrep sqlite ollama ffuf nmap
+
+# Optional but recommended: make Java 21 available in shells
+echo 'export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home' >> ~/.zshrc
+echo 'export PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Install OpenClaw if it is not already installed:
+
+```bash
+npm install -g openclaw
+```
+
+Install Burp Suite Professional separately, then launch it at least once so the
+extensions UI and user-level configuration exist.
+
+### 2. Clone And Bootstrap
+
+```bash
+git clone <private-github-url> GLaDOS
+cd GLaDOS
 cp .env.example .env
 # edit .env and add your own local LLM API key
 scripts/bootstrap-macos.sh
@@ -36,6 +66,86 @@ Bootstrap copies the default agent seeds once into `~/.glados/workspaces/agents`
 Bootstrap also installs a non-secret starter operator context from `templates/operator-context/ford-redteam.json` into `~/.glados/operator-context.json`. That file can contain background knowledge such as Ford-owned domain indicators, ADFS/SSO hosts, Dradis hosts, and reporting paths. It does not grant active testing scope by itself.
 
 Credentials are local-only. Use `scripts/setup-local-secrets.sh` to create `~/.glados/secrets/local-auth.json` with workstation-specific credential profiles. GLaDOS can check which profiles exist, but the MCP status tool intentionally never returns usernames, passwords, tokens, or secret values.
+
+Bootstrap also installs the report-writing template to:
+
+```text
+~/.glados/reports/askfiona.ford.com/REPORT-TEMPLATE.md
+```
+
+The seed copy lives in Git at:
+
+```text
+templates/reporting/askfiona.ford.com/REPORT-TEMPLATE.md
+```
+
+Report-writing agents use that local runtime path as the canonical CWE report
+format and writing-style guide.
+
+### 3. Ollama Setup
+
+GLaDOS can use local Ollama models for agents configured with the
+`ollama-local` provider. Start Ollama and pull the default local model:
+
+```bash
+brew services start ollama
+ollama pull glm-4.7-flash:latest
+curl -s http://localhost:11434/api/tags | jq .
+```
+
+The default local provider is configured in `~/.openclaw/openclaw.json` during
+bootstrap with:
+
+```text
+OLLAMA_BASE_URL=http://localhost:11434/v1/
+GLADOS_LOCAL_MODEL=glm-4.7-flash:latest
+```
+
+Change those in `.env`, then run `scripts/update-macos.sh` if a workstation
+uses a different local model.
+
+### 4. Burp Suite Integration
+
+GLaDOS expects Burp to be listening as the operator HTTP workbench:
+
+```text
+Burp Proxy:            127.0.0.1:8080
+GLaDOS Burp extension: 127.0.0.1:1338
+Optional Burp API:     127.0.0.1:1337
+```
+
+Build the GLaDOS Montoya extension:
+
+```bash
+cd tools/burp-ext-glados-proxy-api
+./gradlew shadowJar
+```
+
+Load the extension in Burp:
+
+1. Burp Suite → Extensions → Installed → Add.
+2. Extension type: Java.
+3. Extension file:
+   `tools/burp-ext-glados-proxy-api/build/libs/glados-proxy-api-1.0.0-all.jar`
+4. Confirm Burp output says the extension is listening on
+   `http://127.0.0.1:1338`.
+
+Verify:
+
+```bash
+curl -s http://127.0.0.1:1338/health | jq .
+```
+
+Then patch OpenClaw's runtime bundle so agent HTTP traffic is attributed and
+routed through Burp:
+
+```bash
+tools/patch-openclaw-bundle.sh
+openclaw daemon restart
+```
+
+If OpenClaw is upgraded with `npm install -g openclaw`, re-run the patch script.
+The dashboard health banner will warn when the patch markers are missing.
 
 ## Updating
 
@@ -116,7 +226,7 @@ flowchart TD
 
 Core pieces:
 
-- Dashboard: chat, live transcripts, Plans tab, Proxy tab, Reports tab, health banners, halt/resume controls.
+- Dashboard: chat, live transcripts, Proxy tab, Reports tab, health banners, halt/resume controls.
 - OpenClaw: runs GLaDOS and subagents, stores local sessions, streams JSONL and raw token events.
 - Agents: editable local workspaces that define identity, runbook, tools, and skills.
 - Blackboard MCP: shared local SQLite state for findings, tasks, baseline recon, plans, approvals, and replans.
@@ -142,7 +252,7 @@ flowchart TD
   DnsTls --> Summary
   Osint --> Summary
   Summary --> Plan["plan-synthesizer proposes attack plan"]
-  Plan --> Review["Operator reviews in chat and Plans tab"]
+  Plan --> Review["Operator reviews in GLaDOS chat"]
   Review --> Approved{"Approved?"}
   Approved -- "No" --> Revise["Modify, reject, or gather more recon"]
   Revise --> Plan
@@ -168,7 +278,7 @@ flowchart TD
    - Test object IDs for IDOR, CWE-639.
    - Review JavaScript endpoints for API exposure.
    - Keep testing low-rate and route active traffic through Burp.
-7. GLaDOS tells the operator the plan in chat. The same plan appears in the Plans tab for approve, selected approve, modify, or reject.
+7. GLaDOS tells the operator the plan in chat and waits for approve, selected approve, modify, or reject.
 8. The operator approves the SQL injection validation vector.
 9. The approved plan generates a fetch ACL so only the selected agents can touch the scoped hosts.
 10. `webapp-vuln` tests the approved parameter and observes SQL error behavior. It reports evidence, confidence, endpoint, request/response summary, and risk.

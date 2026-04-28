@@ -11,6 +11,7 @@ const TEMPLATE_ROOT = path.join(REPO_ROOT, 'templates', 'agents', 'default');
 const REGISTRY_PATH = path.join(REPO_ROOT, 'templates', 'agent-registry.json');
 const DOTENV_PATH = path.join(REPO_ROOT, '.env');
 const DEFAULT_OPERATOR_CONTEXT = path.join(REPO_ROOT, 'templates', 'operator-context', 'ford-redteam.json');
+const REPORTING_TEMPLATE_ROOT = path.join(REPO_ROOT, 'templates', 'reporting');
 
 function log(msg) { process.stdout.write(`${msg}\n`); }
 function warn(msg) { process.stderr.write(`WARN: ${msg}\n`); }
@@ -167,6 +168,16 @@ function ensureRuntimeDirs(paths) {
     fs.copyFileSync(DEFAULT_OPERATOR_CONTEXT, paths.operatorContextPath);
     fs.chmodSync(paths.operatorContextPath, 0o600);
   }
+  installReportTemplates(paths);
+}
+
+function installReportTemplates(paths) {
+  const src = path.join(REPORTING_TEMPLATE_ROOT, 'askfiona.ford.com', 'REPORT-TEMPLATE.md');
+  const dst = path.join(paths.reportsDir, 'askfiona.ford.com', 'REPORT-TEMPLATE.md');
+  if (!fs.existsSync(src) || fs.existsSync(dst)) return;
+  ensureDir(path.dirname(dst));
+  fs.copyFileSync(src, dst);
+  fs.chmodSync(dst, 0o600);
 }
 
 function bootstrapAgents(paths) {

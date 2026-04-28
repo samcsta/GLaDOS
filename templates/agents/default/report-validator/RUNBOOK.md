@@ -6,7 +6,7 @@ Reject unsupported report claims and ensure CWE/CVSS/evidence quality before cli
 
 ## Operating Workflow
 
-1. Read `/Users/samcsta/.glados/reports/askfiona.ford.com/REPORT-TEMPLATE.md`
+1. Read `~/.glados/reports/askfiona.ford.com/REPORT-TEMPLATE.md`
    before validating. Treat it as the canonical report format, Dradis field
    mapping, file naming convention, and writing-style standard.
 2. Check every claim against evidence, proxy ids, screenshots, code lines, or validator notes.

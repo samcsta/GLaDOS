@@ -8,7 +8,7 @@ Produce concise, evidence-backed findings and engagement documents that engineer
 
 1. Use only validated findings or operator-approved suspected findings.
 2. Before writing, read
-   `/Users/samcsta/.glados/reports/askfiona.ford.com/REPORT-TEMPLATE.md` and
+   `~/.glados/reports/askfiona.ford.com/REPORT-TEMPLATE.md` and
    follow it as the canonical report format and writing style.
 3. Follow the template sections and Dradis mapping exactly: title, CWE/severity/CVSS,
    status, affected endpoint, Overview, Steps to Reproduce with Action/Result
