@@ -3355,7 +3355,7 @@ document.getElementById('reset-session').addEventListener('click', async () => {
     : (tab?.kind === 'agent' ? tab.id : null);
   if (!agentId) { alert('Select an agent or GLaDOS chat tab first.'); return; }
   const resetMsg = agentId === 'glados'
-    ? 'Archive the current GLaDOS session and every assessment agent session, AND wipe the blackboard (engagements, findings, tasks, plans, recon state)? Evidence files and exported reports are kept. Atlas is left alone. The next message starts a fresh investigation.'
+    ? 'Archive the current GLaDOS session and every assessment agent session, wipe the blackboard (engagements, findings, tasks, plans, recon state), AND clear short-term memory caches (memory/.dreams/) for every agent? Curated MEMORY.md, evidence files, and exported reports are kept. Atlas is left alone. The next message starts a fresh investigation.'
     : `Archive the current session for "${agentId}"? The next message starts a fresh session.`;
   if (!confirm(resetMsg)) return;
   try {

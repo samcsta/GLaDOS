@@ -192,6 +192,40 @@ function wipeBlackboard() {
   }
 }
 
+// Clears the agents' short-term memory caches so a fresh GLaDOS session does
+// not surface "memories" from a prior investigation. Each agent's startup
+// procedure (per workspaces/agents/<id>/AGENTS.md) reads memory/.dreams/* for
+// recent context — those caches are what cause prior chat history to bleed
+// through into a new session even after the JSONL is archived. The curated
+// long-term MEMORY.md is intentionally preserved.
+function wipeAgentMemories() {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const os = require('node:os');
+  const workspaces = process.env.GLADOS_AGENT_WORKSPACES
+    || path.join(os.homedir(), '.glados', 'workspaces', 'agents');
+  let cleared = 0;
+  let agents = 0;
+  const errors = [];
+  let entries = [];
+  try { entries = fs.readdirSync(workspaces, { withFileTypes: true }); } catch (e) {
+    return { ok: false, error: `read workspaces: ${e.message}` };
+  }
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue;
+    agents++;
+    const dreamsDir = path.join(workspaces, ent.name, 'memory', '.dreams');
+    if (!fs.existsSync(dreamsDir)) continue;
+    try {
+      for (const f of fs.readdirSync(dreamsDir)) {
+        try { fs.rmSync(path.join(dreamsDir, f), { force: true, recursive: true }); cleared++; }
+        catch (e) { errors.push(`${ent.name}/${f}: ${e.message}`); }
+      }
+    } catch (e) { errors.push(`${ent.name}: ${e.message}`); }
+  }
+  return { ok: errors.length === 0, agents, dreamsCleared: cleared, errors };
+}
+
 function candidateRawStreamAgent() {
   const active = [...activeChatTurns.keys()];
   if (active.length === 1) return active[0];
@@ -262,12 +296,44 @@ watcher.on('session-started', info => {
   }
 });
 
+// Extract agentId from a runId. The gateway uses runId patterns like:
+//   <uuid>                                                — main-agent turn
+//   announce:v1:agent:<id>:subagent:<sub-uuid>:<uuid>     — subagent heartbeat
+//   ...:agent:<id>:...                                    — other agent-scoped runs
+// Returns the embedded agent id when present, else null. We only trust the
+// extracted id if it matches a known registered agent — otherwise we'd let
+// arbitrary runId text become pane labels.
+function agentFromRunId(runId, knownAgentIds) {
+  if (typeof runId !== 'string') return null;
+  const m = runId.match(/(?:^|[:/])agent:([a-zA-Z0-9_-]+)(?:[:/]|$)/);
+  if (!m) return null;
+  const id = m[1];
+  return knownAgentIds.has(id) ? id : null;
+}
+
 const rawStream = new RawStreamTail().start();
 rawStream.on('raw', ev => {
+  // Suppress subagent heartbeat traffic ("NO_REPLY" replies and the like).
+  // These are gateway-internal liveness pings — never operator-facing chat —
+  // and previously cluttered the GLaDOS pane as one-token fragments because
+  // they have no sessionId and got routed to the candidate agent.
+  if (typeof ev.runId === 'string' && ev.runId.startsWith('announce:')) return;
+
+  // Build the known-agent set fresh each event — registry is small and this
+  // saves us from staleness if a new agent was just registered.
+  const knownAgentIds = new Set(loadAgentRegistry().map(a => a.id));
+
   // Lazy-learn: if a sessionId isn't in our map yet (e.g. brand-new session we
   // haven't scanned), do a one-shot refresh before dropping the event.
   let agentId = ev.sessionId ? sessionToAgent.get(ev.sessionId) : null;
   if (!agentId && ev.sessionId) { refreshSessionMap(); agentId = sessionToAgent.get(ev.sessionId); }
+  // The raw-stream log frequently omits sessionId but always has runId, and
+  // the runId itself encodes the agent for any agent-scoped run. Prefer that
+  // over the "active chat" candidate fallback so subagent traffic lands in
+  // the subagent's pane instead of polluting whichever chat is currently up.
+  if (!agentId) {
+    agentId = agentFromRunId(ev.runId, knownAgentIds);
+  }
   if (!agentId && !ev.sessionId) {
     agentId = candidateRawStreamAgent();
   }
@@ -695,9 +761,12 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
     if (failed.length) return res.status(500).json({ ok: false, agentId, cascade: agentId === 'glados', results });
 
     let blackboard = null;
+    let memories = null;
     if (agentId === 'glados') {
       blackboard = wipeBlackboard();
+      memories = wipeAgentMemories();
       broadcastLobby('blackboard-wiped', blackboard);
+      broadcastLobby('memories-wiped', memories);
     }
 
     const primary = results.find(r => r.agentId === agentId) || results[0];
@@ -709,6 +778,7 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
       resetCount: results.length,
       results,
       blackboard,
+      memories,
     });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });

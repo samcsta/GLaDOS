@@ -10,10 +10,20 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
 2. Read `glados-ops__operator_context` and `glados-ops__local_auth_status`
    for local non-secret background knowledge and redacted credential-profile
    availability.
-3. Complete Phase 1 before plan synthesis.
-4. Require operator approval before Phase 3.
-5. Route suspected findings to validators and manual operator inspection.
-6. Use report-writer/report-validator for durable deliverables.
+3. Consult internal red-team intelligence resources before recon dispatch.
+   The canonical resources (see operator context `intelligence_resources`):
+   - **Dradis Tab** (`dradistab.redteamstuff.com`) — check whether the target
+     has prior or in-flight assessments before doing fresh recon.
+   - **Dradis** (`dradis.redteamstuff.com`) — pull prior findings if a
+     project exists.
+   - **DomainsAI** (`domainsai.redteamstuff.com`) — asset/domain
+     intelligence on the target and related infrastructure. Treat as a
+     required first stop, not optional. Surface findings to `osint` and
+     `webapp-recon` so they can use the data instead of duplicating queries.
+4. Complete Phase 1 before plan synthesis.
+5. Require operator approval before Phase 3.
+6. Route suspected findings to validators and manual operator inspection.
+7. Use report-writer/report-validator for durable deliverables.
 
 ## Fresh Run Discipline
 

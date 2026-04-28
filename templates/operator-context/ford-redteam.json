@@ -62,6 +62,35 @@
       "allowed_use": "Prior-report lookup and report workflow only. Never push findings without operator approval."
     }
   ],
+  "intelligence_resources": [
+    {
+      "id": "dradistab",
+      "name": "Dradis Tab",
+      "host": "dradistab.redteamstuff.com",
+      "purpose": "Project metadata index — what assessments have been run, what is in flight, project ownership and status.",
+      "when_to_use": "Phase 1 / planning: check whether a target has prior or in-flight assessments before starting recon.",
+      "auth": { "credential_profile": "dradis", "see_auth_flow": "dradis" },
+      "users": ["glados", "osint", "webapp-recon", "report-writer"]
+    },
+    {
+      "id": "dradis",
+      "name": "Dradis Professional",
+      "host": "dradis.redteamstuff.com",
+      "purpose": "Detailed prior findings and report content for known projects.",
+      "when_to_use": "Phase 1 / planning: pull prior findings on the target if a corresponding Dradis project exists. Reporting: only push findings with operator approval.",
+      "auth": { "credential_profile": "dradis", "see_auth_flow": "dradis" },
+      "users": ["glados", "report-writer", "report-validator"]
+    },
+    {
+      "id": "domainsai",
+      "name": "DomainsAI",
+      "host": "domainsai.redteamstuff.com",
+      "purpose": "Asset and domain intelligence for Ford-owned domains, subdomains, and related infrastructure. Reference data only — not an authorization gate.",
+      "when_to_use": "Phase 1 OSINT and webapp recon: enrich subdomain context, identify related infrastructure, validate ownership signals before treating a host as scoped. Should be consulted as a crucial step of recon, not an optional one.",
+      "auth": { "credential_profile": null, "notes": "Internal red-team tooling on the redteamstuff.com domain; access is per the operator's existing red-team session." },
+      "users": ["glados", "osint", "webapp-recon"]
+    }
+  ],
   "scope_policy": {
     "background_owned_domains": [
       "*.dealerconnection.com",
