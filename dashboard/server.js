@@ -1203,9 +1203,9 @@ app.post('/api/proxy/replay', async (req, res) => {
 });
 
 app.get('/api/proxy/stream', async (req, res) => {
-  // Pipe SSE from the extension to the browser. If the upstream drops, we
-  // emit a comment line every 20s so EventSource's auto-reconnect has a
-  // clean heartbeat to lock onto.
+  // Pipe SSE from the extension to the browser. Emit dashboard-side comments
+  // immediately and on an interval so the Proxy tab can show "live" even when
+  // Burp has no request events to forward yet.
   res.set({
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -1213,15 +1213,20 @@ app.get('/api/proxy/stream', async (req, res) => {
     'X-Accel-Buffering': 'no',
   });
   res.flushHeaders?.();
+  res.write(`: dashboard proxy stream open\n\n`);
   let upstream, aborted = false;
   const controller = new AbortController();
-  req.on('close', () => { aborted = true; controller.abort(); });
+  const heartbeat = setInterval(() => {
+    if (!aborted && !res.destroyed) res.write(`: dashboard heartbeat ${Date.now()}\n\n`);
+  }, 15000);
+  req.on('close', () => { aborted = true; controller.abort(); clearInterval(heartbeat); });
   try {
     upstream = await fetch(`${BURP_EXT_API}/proxy/stream`, { signal: controller.signal });
     if (!upstream.ok || !upstream.body) {
       res.write(`: upstream unreachable\n\n`);
       return res.end();
     }
+    res.write(`: upstream connected\n\n`);
     const reader = upstream.body.getReader();
     const decoder = new TextDecoder();
     while (!aborted) {
@@ -1231,6 +1236,8 @@ app.get('/api/proxy/stream', async (req, res) => {
     }
   } catch {
     if (!aborted) res.write(`: upstream error\n\n`);
+  } finally {
+    clearInterval(heartbeat);
   }
   res.end();
 });
