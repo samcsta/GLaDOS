@@ -55,6 +55,7 @@ const lobbyClients = new Set(); // /api/agents SSE subscribers
 const activeChatTurns = new Map(); // agentId -> { turnId, startedAt, messagePreview }
 const recentChatTurns = new Map(); // agentId -> { turnId, expiresAt } short grace for late raw-stream fs events
 let pendingGladosKickoff = null;
+let pendingGladosTargetRequest = null;
 
 function pushBuffer(agentId, ev) {
   let buf = buffers.get(agentId);
@@ -134,6 +135,19 @@ function extractInvestigationTarget(message) {
   return null;
 }
 
+function extractBareTarget(message) {
+  const text = String(message || '').trim();
+  if (!text || /\s/.test(text.replace(/^https?:\/\//i, ''))) return null;
+  const m = text.match(/^["'`]?(https?:\/\/[^\s"'`<>]+|[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,})(?:\/[^"'`\s<>]*)?["'`.,!?;:]*$/i);
+  return m?.[1] ? normalizeTarget(m[1]) : null;
+}
+
+function isAssessmentReadinessIntent(message) {
+  const text = String(message || '').toLowerCase();
+  return /\b(ready|start|begin|run|launch|kick\s*off|spin\s*up)\b/.test(text)
+    && /\b(assessment|investigation|engagement|web\s*app|team)\b/.test(text);
+}
+
 function isKickoffApproval(message) {
   return /\b(continue|proceed|go ahead|approved?|yes|start|do it|looks good)\b/i.test(String(message || ''));
 }
@@ -176,7 +190,31 @@ function resolveKickoffResources(message) {
 }
 
 function kickoffApprovalPrompt(target) {
-  return `Ok, I am going to proceed with checking DradisTab, Dradis, and DomainsAI for \`${target}\` before I dispatch any agents. Would you like any changes before I proceed?`;
+  return [
+    `Ok, I am going to proceed with the pre-assessment checks for \`${target}\` in this order:`,
+    '',
+    '1. DradisTab — check whether a prior or in-flight assessment exists.',
+    '2. Dradis — if a matching project exists and belongs to the local operator profile, summarize the existing CWE coverage/findings.',
+    '3. DomainsAI — search the target domain at https://domainsai.redteamstuff.com for asset/domain context.',
+    '',
+    'Would you like any changes before I proceed?'
+  ].join('\n');
+}
+
+function createPendingGladosKickoff(target, originalMessage) {
+  pendingGladosTargetRequest = null;
+  pendingGladosKickoff = {
+    target,
+    originalMessage,
+    createdAt: Date.now(),
+  };
+  const ev = transcriptEvent('glados', 'assistant-text', kickoffApprovalPrompt(target), { gated: true });
+  return {
+    ok: true,
+    gated: true,
+    pending: pendingGladosKickoff,
+    result: { payloads: [{ text: ev.text, mediaUrl: null }] },
+  };
 }
 
 function buildApprovedKickoffMessage(pending, operatorReply) {
@@ -201,6 +239,7 @@ function buildApprovedKickoffMessage(pending, operatorReply) {
     '- Do not consult any unapproved resource.',
     '- If Dradis or Dradis Tab is skipped, do not read the dradis-workflow skill and do not browse dradistab.redteamstuff.com or dradis.redteamstuff.com.',
     '- For DomainsAI use exactly https://domainsai.redteamstuff.com; do not guess public lookalike domains.',
+    '- When Dradis has a matching project, summarize whether it appears associated with the local operator profile and list existing CWE/finding coverage if available.',
     '- First send one concise message: "Will do, starting with <target>..."',
     '- Then perform only the approved resource checks.',
     '- Consolidate resource-check results into one concise message.',
@@ -833,15 +872,42 @@ app.post('/api/chat/glados', async (req, res) => {
     }
   }
 
+  if (pendingGladosTargetRequest) {
+    if (isKickoffCancel(message)) {
+      pendingGladosTargetRequest = null;
+      const ev = transcriptEvent('glados', 'assistant-text', 'Cancelled assessment startup. No resources were checked and no agents were dispatched.');
+      return res.json({ ok: true, gated: true, cancelled: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
+    }
+
+    const target = extractInvestigationTarget(message) || extractBareTarget(message);
+    if (target) {
+      return res.json(createPendingGladosKickoff(target, message));
+    }
+
+    const ev = transcriptEvent(
+      'glados',
+      'assistant-text',
+      'I am ready and still only need the target. Send a domain or URL, and I will ask before checking DradisTab, Dradis, or DomainsAI.'
+    );
+    return res.json({ ok: true, gated: true, waitingForTarget: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
+  }
+
   const kickoffTarget = extractInvestigationTarget(message);
   if (kickoffTarget) {
-    pendingGladosKickoff = {
-      target: kickoffTarget,
-      originalMessage: message,
+    return res.json(createPendingGladosKickoff(kickoffTarget, message));
+  }
+
+  if (isAssessmentReadinessIntent(message)) {
+    pendingGladosTargetRequest = {
       createdAt: Date.now(),
+      originalMessage: message,
     };
-    const ev = transcriptEvent('glados', 'assistant-text', kickoffApprovalPrompt(kickoffTarget), { gated: true });
-    return res.json({ ok: true, gated: true, pending: pendingGladosKickoff, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
+    const ev = transcriptEvent(
+      'glados',
+      'assistant-text',
+      'Ready. The local ROE, operator context, and local secret profiles are already configured. What target should we assess?'
+    );
+    return res.json({ ok: true, gated: true, waitingForTarget: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
   }
 
   const turnId = startChatTurn('glados', message);
@@ -1174,6 +1240,7 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
     let rawStream = null;
     if (agentId === 'glados') {
       pendingGladosKickoff = null;
+      pendingGladosTargetRequest = null;
       blackboard = wipeBlackboard();
       memories = wipeAgentMemories();
       archivePrune = pruneArchivedSessions();

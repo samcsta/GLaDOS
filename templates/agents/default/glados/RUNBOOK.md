@@ -6,21 +6,33 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
 
 ## Operating Workflow
 
-1. Run preflight: VPN/model, Burp, patches, target health, scope.
-2. Read `glados-ops__operator_context` and `glados-ops__local_auth_status`
+1. If the operator asks whether you and the team are ready to start an
+   assessment but does not provide a target, do **not** ask for ROE,
+   engagement type, credentials, or engagement id. Those are supplied by the
+   local operator context and local secret profiles. Reply once:
+
+   > "Ready. The local ROE, operator context, and local secret profiles are
+   > already configured. What target should we assess?"
+
+   Then wait for the target.
+2. Run preflight: VPN/model, Burp, patches, target health, scope.
+3. Read `glados-ops__operator_context` and `glados-ops__local_auth_status`
    for local non-secret background knowledge and redacted credential-profile
    availability.
-3. **Investigation kickoff — announce and confirm before any external
+4. **Investigation kickoff — announce and confirm before any external
    query.** When the operator opens a new investigation on a target (e.g.
    "begin an investigation on X", "start an assessment on X.com", or any
    first message naming a previously-unscoped target in this session),
    STOP before reading any intelligence resource and post a single message
    listing exactly what you intend to consult, in order:
 
-   > "I'm going to consult the following before dispatching agents: (1)
-   > Dradis Tab — prior/in-flight assessments on `<target>`, (2) Dradis —
-   > prior findings, (3) DomainsAI — asset/domain context on `<target>`.
-   > Approve, skip any, or modify before I proceed."
+   > "Ok, I am going to proceed with the pre-assessment checks for
+   > `<target>` in this order: (1) DradisTab — check whether a prior or
+   > in-flight assessment exists, (2) Dradis — if a matching project exists
+   > and belongs to the local operator profile, summarize the existing CWE
+   > coverage/findings, (3) DomainsAI — search the target domain at
+   > `https://domainsai.redteamstuff.com` for asset/domain context. Would
+   > you like any changes before I proceed?"
 
    Then **wait for an explicit operator response.** Do not call
    `glados-ops__*` resource browsers, DradisTab, Dradis, DomainsAI, or
@@ -41,7 +53,7 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
    After confirmation, summarize what you actually consulted and the key
    facts learned in one message, then dispatch agents per step 4.
 
-4. Consult internal red-team intelligence resources per the operator's
+5. Consult internal red-team intelligence resources per the operator's
    confirmed plan from step 3. The canonical resources (see operator
    context `intelligence_resources`):
    - **Dradis Tab** (`dradistab.redteamstuff.com`) — check whether the
@@ -52,14 +64,14 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
      intelligence on the target and related infrastructure. Surface
      findings to `osint` and `webapp-recon` so they can use the data
      instead of duplicating queries.
-5. Dispatch Phase 1 agents (osint, webapp-recon, net-recon, etc.) only
+6. Dispatch Phase 1 agents (osint, webapp-recon, net-recon, etc.) only
    after step 4. Announce the dispatch in chat: "Deploying <agents> to do
    <task>…" so the operator can intercept if a chosen agent or scope is
    wrong.
-6. Complete Phase 1 before plan synthesis.
-7. Require operator approval before Phase 3.
-8. Route suspected findings to validators and manual operator inspection.
-9. Use report-writer/report-validator for durable deliverables.
+7. Complete Phase 1 before plan synthesis.
+8. Require operator approval before Phase 3.
+9. Route suspected findings to validators and manual operator inspection.
+10. Use report-writer/report-validator for durable deliverables.
 
 ## Fresh Run Discipline
 
@@ -85,6 +97,8 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
   with `glados-ops__local_auth_status`, but you must not request, print, store,
   summarize, or paste raw credential values into chat, blackboard, reports, or
   tool arguments.
+- Do not ask the operator to paste credentials during assessment kickoff. Use
+  the configured local secret profiles when an approved workflow requires auth.
 - If login is required, identify the needed credential profile by name
   (`ford-sso`, `dradis`, etc.), explain the host and purpose, and ask the
   operator for approval before using it. Auth/runtime dependency use does not
