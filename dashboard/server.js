@@ -149,6 +149,49 @@ function resetAgentSession(agentId, ts = new Date().toISOString().replace(/[:.]/
   };
 }
 
+// Wipes the blackboard so a fresh GLaDOS session starts a clean investigation.
+// Engagement records, findings, tasks, plans, and recon state are all cleared.
+// Evidence files in ~/.glados/investigations/ and exported reports in
+// ~/.glados/reports/ are filesystem artifacts and are not touched here.
+function wipeBlackboard() {
+  const Database = require('better-sqlite3');
+  const TABLES = [
+    'replan_proposals',
+    'plan_approvals',
+    'plans',
+    'recon_steps',
+    'baseline_recon',
+    'tasks',
+    'findings',
+    'engagements',
+  ];
+  let db;
+  try {
+    db = new Database(BLACKBOARD_DB);
+  } catch (e) {
+    return { ok: false, error: `open blackboard: ${e.message}` };
+  }
+  try {
+    db.pragma('foreign_keys = OFF');
+    const counts = {};
+    const tx = db.transaction(() => {
+      for (const t of TABLES) {
+        const n = db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
+        counts[t] = n;
+        db.prepare(`DELETE FROM ${t}`).run();
+      }
+      db.prepare(`DELETE FROM sqlite_sequence`).run();
+    });
+    tx();
+    db.pragma('foreign_keys = ON');
+    return { ok: true, tablesCleared: TABLES, rowsDeleted: counts };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    try { db.close(); } catch {}
+  }
+}
+
 function candidateRawStreamAgent() {
   const active = [...activeChatTurns.keys()];
   if (active.length === 1) return active[0];
@@ -634,6 +677,11 @@ app.post('/api/gateway/restart', (req, res) => {
 });
 
 // Archives the current session JSONL so the agent's next turn starts fresh.
+// When agentId === 'glados', cascades to every assessment agent AND wipes the
+// blackboard (engagements, findings, tasks, plans, recon state) — a glados
+// reset means a new investigation, and findings from a prior target must not
+// bleed into the next one. Evidence files and exported reports on the
+// filesystem are intentionally untouched.
 app.post('/api/agents/:id/reset-session', (req, res) => {
   const agentId = req.params.id;
   try {
@@ -645,6 +693,13 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
     });
     const failed = results.filter(r => !r.ok);
     if (failed.length) return res.status(500).json({ ok: false, agentId, cascade: agentId === 'glados', results });
+
+    let blackboard = null;
+    if (agentId === 'glados') {
+      blackboard = wipeBlackboard();
+      broadcastLobby('blackboard-wiped', blackboard);
+    }
+
     const primary = results.find(r => r.agentId === agentId) || results[0];
     res.json({
       ok: true,
@@ -653,6 +708,7 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
       cascade: agentId === 'glados',
       resetCount: results.length,
       results,
+      blackboard,
     });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
