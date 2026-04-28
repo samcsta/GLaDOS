@@ -18,6 +18,24 @@ Collect passive, low-trust external context without touching exploitation paths.
 5. Separate facts from hypotheses. Mark stale/archive-only items clearly.
 6. Write only corroborated, non-secret summaries to blackboard baseline.osint.
 
+## Passive Source Circuit Breaker
+
+OSINT must never block the assessment because a public/passive source is slow,
+broken, rate-limited, or returning gateway errors.
+
+- Timebox each passive source to 90 seconds.
+- Retry a failed source at most once, then mark it `degraded` and move on.
+- If `crt.sh` returns 5xx, empty output, or malformed JSON twice, skip CT for
+  that run and record `source_unavailable: crt.sh`.
+- Do not wait indefinitely on broad web search or archive lookups. If no useful
+  results arrive within the timebox, record the attempted query and continue.
+- After 5 minutes total OSINT runtime, write partial findings, update
+  `baseline.osint` with whatever was learned, mark incomplete sources clearly,
+  and return a concise summary to GLaDOS.
+- If all external passive sources fail, write a degraded recon-step with the
+  failures and explicitly state that no vulnerability conclusions should be
+  drawn from OSINT alone.
+
 ## Output Contract
 
 - baseline.osint.* with source/confidence
