@@ -22,6 +22,22 @@ try {
   console.warn('[startup] could not initialize blackboard db:', e.message);
 }
 
+// Boot-time hygiene: keep the sessions/ tree from accumulating archived
+// JSONLs (we hit 7.4 MB / 57 files in a few days under the prior keep-forever
+// behavior; the agent-watcher's chokidar can in some failure modes re-tail a
+// stale file and bleed prior chat into a fresh pane). Also keep the
+// agentDir IDENTITY.md files in sync with the workspace canonical so the
+// model never gets two competing system prompts. Both run cheaply once on
+// boot; the same helpers run again on glados session reset.
+try {
+  const prune = pruneArchivedSessions();
+  if (prune.deleted > 0) console.log(`[startup] pruned ${prune.deleted} archived session(s) (retention=${prune.retention})`);
+} catch (e) { console.warn('[startup] archive prune failed:', e.message); }
+try {
+  const sync = syncAgentDirIdentities();
+  if (sync.synced > 0) console.log(`[startup] synced ${sync.synced} agentDir IDENTITY.md from workspace`);
+} catch (e) { console.warn('[startup] agentDir sync failed:', e.message); }
+
 const watcher = new AgentWatcher().start();
 
 // Per-agent ring buffer of recent events (for new SSE subscribers to backfill).
@@ -235,21 +251,32 @@ function wipeBlackboard() {
   }
 }
 
-// Clears the agents' short-term memory caches so a fresh GLaDOS session does
-// not surface "memories" from a prior investigation. Each agent's startup
-// procedure (per workspaces/agents/<id>/AGENTS.md) reads memory/.dreams/* for
-// recent context — those caches are what cause prior chat history to bleed
-// through into a new session even after the JSONL is archived. The curated
-// long-term MEMORY.md is intentionally preserved.
+// Clears every state source that can leak prior-investigation context into a
+// fresh GLaDOS session. There are three sources, all independent:
+//   1. memory/.dreams/* in each agent workspace — short-term recall snippets
+//      indexed across past memory files. The agent startup procedure
+//      (workspaces/agents/<id>/AGENTS.md) reads these; if not cleared, snippets
+//      from prior assessments resurface as "remembered context".
+//   2. ~/.openclaw/memory/<id>.sqlite — OpenClaw's per-agent vector embedding
+//      store. Holds chunks, file index, and embedding cache. Empty on most
+//      agents but accumulates on glados/atlas if the operator interacts.
+//   3. Stray .archived-* JSONLs older than the retention budget — see
+//      pruneArchivedSessions(). Not handled here; called separately on reset.
+// The curated long-term MEMORY.md is intentionally preserved.
 function wipeAgentMemories() {
   const fs = require('node:fs');
   const path = require('node:path');
   const os = require('node:os');
+  const Database = require('better-sqlite3');
   const workspaces = process.env.GLADOS_AGENT_WORKSPACES
     || path.join(os.homedir(), '.glados', 'workspaces', 'agents');
-  let cleared = 0;
+  const openclawMemDir = path.join(os.homedir(), '.openclaw', 'memory');
+  let dreamsCleared = 0;
+  let sqliteCleared = 0;
   let agents = 0;
   const errors = [];
+
+  // 1. Workspace .dreams short-term recall.
   let entries = [];
   try { entries = fs.readdirSync(workspaces, { withFileTypes: true }); } catch (e) {
     return { ok: false, error: `read workspaces: ${e.message}` };
@@ -261,12 +288,134 @@ function wipeAgentMemories() {
     if (!fs.existsSync(dreamsDir)) continue;
     try {
       for (const f of fs.readdirSync(dreamsDir)) {
-        try { fs.rmSync(path.join(dreamsDir, f), { force: true, recursive: true }); cleared++; }
-        catch (e) { errors.push(`${ent.name}/${f}: ${e.message}`); }
+        try { fs.rmSync(path.join(dreamsDir, f), { force: true, recursive: true }); dreamsCleared++; }
+        catch (e) { errors.push(`dreams ${ent.name}/${f}: ${e.message}`); }
       }
-    } catch (e) { errors.push(`${ent.name}: ${e.message}`); }
+    } catch (e) { errors.push(`dreams ${ent.name}: ${e.message}`); }
   }
-  return { ok: errors.length === 0, agents, dreamsCleared: cleared, errors };
+
+  // 2. OpenClaw per-agent memory SQLite (vector embedding store). Clear data
+  // tables but leave schema intact so OpenClaw doesn't have to recreate it.
+  // Schema: chunks, chunks_fts*, files, embedding_cache, meta.
+  if (fs.existsSync(openclawMemDir)) {
+    for (const f of fs.readdirSync(openclawMemDir)) {
+      if (!f.endsWith('.sqlite')) continue;
+      const dbPath = path.join(openclawMemDir, f);
+      let db;
+      try {
+        db = new Database(dbPath);
+        db.exec(`
+          DELETE FROM chunks;
+          DELETE FROM files;
+          DELETE FROM chunks_fts;
+          DELETE FROM embedding_cache;
+        `);
+        sqliteCleared++;
+      } catch (e) {
+        errors.push(`openclaw-mem ${f}: ${e.message}`);
+      } finally {
+        try { db?.close(); } catch {}
+      }
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    agents,
+    dreamsCleared,
+    openclawMemoryCleared: sqliteCleared,
+    errors,
+  };
+}
+
+// Syncs every agent's openclaw.json `agentDir` IDENTITY.md (if present) from
+// the canonical workspace IDENTITY.md so the model never gets two competing
+// system prompts. The two-location issue exists historically because some
+// agents have both `workspace` and `agentDir` configured in openclaw.json
+// (e.g. glados), and OpenClaw loads files from both paths. If they drift,
+// the older file can dominate or contradict the workspace version. This
+// helper makes them identical, with the workspace as the source of truth.
+function syncAgentDirIdentities() {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const os = require('node:os');
+  const workspaces = process.env.GLADOS_AGENT_WORKSPACES
+    || path.join(os.homedir(), '.glados', 'workspaces', 'agents');
+  const openclawAgents = path.join(os.homedir(), '.openclaw', 'agents');
+  let synced = 0;
+  let skipped = 0;
+  const errors = [];
+  if (!fs.existsSync(workspaces) || !fs.existsSync(openclawAgents)) {
+    return { ok: true, synced, skipped, errors };
+  }
+  for (const ent of fs.readdirSync(openclawAgents, { withFileTypes: true })) {
+    if (!ent.isDirectory()) continue;
+    const agentDirIdentity = path.join(openclawAgents, ent.name, 'agent', 'IDENTITY.md');
+    const workspaceIdentity = path.join(workspaces, ent.name, 'IDENTITY.md');
+    if (!fs.existsSync(agentDirIdentity) || !fs.existsSync(workspaceIdentity)) {
+      skipped++;
+      continue;
+    }
+    try {
+      const ws = fs.readFileSync(workspaceIdentity, 'utf8');
+      const ad = fs.readFileSync(agentDirIdentity, 'utf8');
+      if (ws === ad) { skipped++; continue; }
+      fs.writeFileSync(agentDirIdentity, ws);
+      synced++;
+    } catch (e) {
+      errors.push(`${ent.name}: ${e.message}`);
+    }
+  }
+  return { ok: errors.length === 0, synced, skipped, errors };
+}
+
+// Deletes archived session JSONLs older than the retention budget across every
+// agent's sessions/ directory. Default retention is 0 — every reset garbage
+// collects all archives, since the operator explicitly does not use the
+// forensic trail. Override with env var GLADOS_ARCHIVE_RETENTION=N to keep
+// the most-recent N archive files per agent.
+//
+// Without this prune, archived JSONLs accumulated unboundedly (we hit 7.4 MB
+// across 57 files in a few days), and the agent-watcher's chokidar instance
+// could in some failure modes re-tail a stale file and bleed prior chat into
+// a fresh pane. Garbage collecting on reset keeps the sessions/ directory at
+// most one-archive-per-agent immediately after each reset.
+function pruneArchivedSessions() {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const os = require('node:os');
+  const retention = Math.max(0, Number(process.env.GLADOS_ARCHIVE_RETENTION) || 0);
+  const agentsRoot = path.join(os.homedir(), '.openclaw', 'agents');
+  let deleted = 0;
+  let kept = 0;
+  const errors = [];
+  if (!fs.existsSync(agentsRoot)) return { ok: true, deleted, kept, retention, errors };
+  for (const agentEnt of fs.readdirSync(agentsRoot, { withFileTypes: true })) {
+    if (!agentEnt.isDirectory()) continue;
+    const sessDir = path.join(agentsRoot, agentEnt.name, 'sessions');
+    if (!fs.existsSync(sessDir)) continue;
+    let archives;
+    try {
+      archives = fs.readdirSync(sessDir)
+        .filter(f => f.includes('.jsonl.archived'))
+        .map(f => {
+          const full = path.join(sessDir, f);
+          let mtime = 0;
+          try { mtime = fs.statSync(full).mtimeMs; } catch {}
+          return { full, mtime };
+        })
+        .sort((a, b) => b.mtime - a.mtime); // newest first
+    } catch (e) {
+      errors.push(`${agentEnt.name}: ${e.message}`);
+      continue;
+    }
+    archives.forEach((a, i) => {
+      if (i < retention) { kept++; return; }
+      try { fs.rmSync(a.full, { force: true }); deleted++; }
+      catch (e) { errors.push(`${agentEnt.name}/${path.basename(a.full)}: ${e.message}`); }
+    });
+  }
+  return { ok: errors.length === 0, deleted, kept, retention, errors };
 }
 
 function candidateRawStreamAgent() {
@@ -805,11 +954,16 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
 
     let blackboard = null;
     let memories = null;
+    let archivePrune = null;
+    let agentDirSync = null;
     if (agentId === 'glados') {
       blackboard = wipeBlackboard();
       memories = wipeAgentMemories();
+      archivePrune = pruneArchivedSessions();
+      agentDirSync = syncAgentDirIdentities();
       broadcastLobby('blackboard-wiped', blackboard);
       broadcastLobby('memories-wiped', memories);
+      broadcastLobby('archives-pruned', archivePrune);
     }
 
     const primary = results.find(r => r.agentId === agentId) || results[0];
@@ -822,6 +976,8 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
       results,
       blackboard,
       memories,
+      archivePrune,
+      agentDirSync,
     });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
