@@ -135,17 +135,60 @@ function resetAgentSession(agentId, ts = new Date().toISOString().replace(/[:.]/
     fs.writeFileSync(sessionsIdxPath, JSON.stringify(idx, null, 2));
   }
 
+  // Sweep loose orphan JSONLs that the index-driven pass above missed.
+  // Orphans accumulate when an OpenClaw process is killed between writing a
+  // session JSONL and updating sessions.json — the file exists but no index
+  // entry names it, so prior resets couldn't see it. Without this sweep,
+  // the agent-watcher's chokidar scan can later replay an orphan's content
+  // into the live pane and bleed prior-investigation chat into a fresh
+  // session. We rename rather than delete (recoverable on disk).
+  const sessionsDirPath = path.dirname(sessionsIdxPath);
+  const orphanArchivedPaths = [];
+  try {
+    const justArchived = new Set(archivedPaths);
+    for (const name of fs.readdirSync(sessionsDirPath)) {
+      if (!name.endsWith('.jsonl')) continue;       // skip already-archived (.jsonl.archived-*)
+      const full = path.join(sessionsDirPath, name);
+      if (justArchived.has(full)) continue;          // we just touched this one
+      // If the index still references this file, it's a live session for a
+      // different key (subagent we missed, etc.) — leave it alone.
+      let referencedInIndex = false;
+      try {
+        const raw = fs.readFileSync(sessionsIdxPath, 'utf8');
+        if (raw.includes(name)) referencedInIndex = true;
+      } catch {}
+      if (referencedInIndex) continue;
+      const orphanArchived = `${full}.archived-orphan-${ts}`;
+      try {
+        fs.renameSync(full, orphanArchived);
+        orphanArchivedPaths.push(orphanArchived);
+      } catch (e) {
+        // Best-effort — log but don't fail the reset.
+        console.warn(`[reset:${agentId}] could not archive orphan ${name}: ${e.message}`);
+      }
+    }
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.warn(`[reset:${agentId}] orphan sweep failed: ${e.message}`);
+  }
+
   buffers.delete(agentId);
-  broadcastLobby('session-reset', { agentId, archivedPath: archivedPaths[0] || null, archivedPaths, removedIndexEntry });
+  broadcastLobby('session-reset', {
+    agentId,
+    archivedPath: archivedPaths[0] || null,
+    archivedPaths,
+    orphanArchivedPaths,
+    removedIndexEntry,
+  });
   return {
     ok: true,
     agentId,
     archivedPath: archivedPaths[0] || null,
     archivedPaths,
+    orphanArchivedPaths,
     removedLockPath: removedLockPaths[0] || null,
     removedLockPaths,
     removedIndexEntry,
-    hadSession: entries.length > 0 || removedIndexEntry,
+    hadSession: entries.length > 0 || removedIndexEntry || orphanArchivedPaths.length > 0,
   };
 }
 
