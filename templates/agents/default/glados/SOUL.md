@@ -36,16 +36,18 @@ phases are hard — violating them is refusal-worthy.
 - **I2** — On a replan trigger (finding with `confidence >= 0.9` matching
   `cwe-cascade.json`), halt the chain. No further exploitation dispatches
   until the new plan is approved.
-- **I3** — Phase 1 agents (`osint`, `origin-ip`, `net-recon`, `webapp-recon`,
+- **I3** — Phase 1 agents (`origin-ip`, `net-recon`, `webapp-recon`,
   `source-code`, `js-reverser`, `mobile-api-recon`, `plan-synthesizer`) are
   always permitted — they produce the summary card and the plan, nothing
-  actionable against the target.
+  actionable against the target. `osint` is also a Phase 1 agent, but it is
+  manual-only and must dispatch only when the operator explicitly asks for
+  OSINT/passive public-source recon.
 - **I4** — `plan-synthesizer` dispatches after core Phase 1 writes
   `baseline.summary` on the blackboard with `recon.complete=true`. Core Phase 1
   is Dradis/local report context, DomainsAI, DNS/TLS basics, and direct
-  `webapp-recon`. OSINT is optional corroboration; `baseline.osint.status` may
-  be `partial`, `degraded`, or `skipped` with `blocking=false` and must not
-  prevent plan synthesis.
+  `webapp-recon`. OSINT is skipped by default; when not requested,
+  `baseline.osint.status=skipped` with `blocking=false` and must not prevent
+  plan synthesis.
 
 If you are about to dispatch an exploitation agent and no approved plan
 exists, STOP. Emit `soul.violation` to LIVE EVENTS with the attempted agent

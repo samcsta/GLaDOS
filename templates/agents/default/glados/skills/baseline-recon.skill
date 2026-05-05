@@ -7,8 +7,8 @@ description: Phase 1 baseline recon checklist. Runs core recon at the start of e
 
 Fixed ordered checklist for core recon. Do not exploit. All output lands on
 the blackboard under `baseline.*` keys; the summary card is written under
-`baseline.summary` with `recon.complete=true`. OSINT is a non-blocking
-supporting pass, not a required blocker for the summary card.
+`baseline.summary` with `recon.complete=true`. OSINT is manual-only and is not
+part of the default baseline checklist.
 
 ## Steps
 
@@ -30,23 +30,26 @@ supporting pass, not a required blocker for the summary card.
      store metadata, or approved mobile artifacts are in scope.
    - Output lands at `baseline.js_recon.*` and/or `baseline.mobile_api.*`.
 
-5. **OSINT (passive, 3-min hard cap, low-trust planning signal, last-pass)** —
-   dispatch `osint` only after direct webapp/browser recon and low-impact
-   net/DNS/TLS recon have produced their baseline, unless the operator
-   explicitly asks for parallel OSINT. Remit: ASN, CDN, WAF header signatures,
-   MX/TXT, GitHub/GitLab mentions, archive.org.
+5. **Manual-only OSINT (skip by default)** — do not dispatch `osint` during the
+   normal baseline flow. Dispatch it only if the operator explicitly asks for
+   OSINT, passive public-source recon, CT-log review, Google dorking, archive
+   review, GitHub leak search, or similar public-source work. Remit when
+   requested: ASN, CDN, WAF header signatures, MX/TXT, GitHub/GitLab mentions,
+   archive.org.
    - Timebox: 180s via watchdog.
    - osint writes `baseline.osint.*` with per-fact confidence, source,
      `status`, and `blocking=false`.
-   - If OSINT is failing, still running, or noisy after core recon completes,
-     write `baseline.osint.status=degraded|partial|skipped` and continue.
+   - If OSINT was not requested, write `baseline.osint.status=skipped`,
+     `blocking=false`, `reason=operator_not_requested`, and continue.
+   - If requested OSINT is failing, still running, or noisy after core recon
+     completes, write `baseline.osint.status=degraded|partial` and continue.
    - Treat OSINT as corroborating context, not primary evidence. It must not
      outrank direct app observations, Dradis history, DNS/TLS facts, or
      operator-provided scope when synthesizing a plan.
 
 6. **Origin-IP / net-recon gated branch:**
-   - If `baseline.osint.cdn` OR `baseline.osint.waf` present with confidence
-     >= 0.7 → dispatch `origin-ip`.
+   - If DomainsAI, DNS/TLS, direct headers, or operator-requested OSINT show
+     CDN/WAF with confidence >= 0.7 → dispatch `origin-ip`.
    - If `baseline.origin_ip.confidence < 0.7` after that → dispatch `net-recon`.
    - Else skip both.
 
@@ -57,6 +60,6 @@ supporting pass, not a required blocker for the summary card.
 ## Gate to Phase 2
 
 After core steps 1-4 and any required low-impact DNS/NET baseline are complete,
-write `baseline.summary` and dispatch `plan-synthesizer`. Do not wait on OSINT
-beyond its 180s budget, and do not block on unavailable public sources. Do NOT
-dispatch any exploitation agent (see SOUL.md invariant I1).
+write `baseline.summary` and dispatch `plan-synthesizer`. Do not dispatch or
+wait on OSINT unless the operator explicitly requested it. Do NOT dispatch any
+exploitation agent (see SOUL.md invariant I1).

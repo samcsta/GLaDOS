@@ -292,7 +292,7 @@ function buildApprovedKickoffMessage(pending, operatorReply) {
     '- Then perform only the approved resource checks.',
     '- Consolidate resource-check results into one concise message.',
     '- Then announce one dispatch message for the core Phase 1 agents: "Deploying WEBAPP RECON and low-impact DNS/NET recon agents to do <specific tasks>..."',
-    '- Do not dispatch OSINT in parallel unless the operator explicitly asks for parallel OSINT. OSINT is a best-effort final corroboration pass and must never block plan-synthesizer after webapp-recon has finished.',
+    '- Do not dispatch OSINT unless the operator explicitly asks for OSINT/passive public-source recon. OSINT is manual-only and must never block plan-synthesizer after webapp-recon has finished.',
     '- Do not send separate chat bubbles for every internal tool call.',
     '- Do not dispatch exploitation agents before plan approval.',
     '',

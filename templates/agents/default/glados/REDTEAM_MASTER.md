@@ -32,7 +32,8 @@ High-level groups:
 
 - Supervisor: `glados`
 - General local assistant: `atlas`
-- Phase 1 recon: `osint`, `origin-ip`, `net-recon`, `webapp-recon`, `source-code`, `js-reverser`, `mobile-api-recon`
+- Phase 1 recon: `origin-ip`, `net-recon`, `webapp-recon`, `source-code`, `js-reverser`, `mobile-api-recon`
+- Manual-only Phase 1 support: `osint` (dispatch only when the operator explicitly asks for OSINT/passive public-source recon)
 - Planning and guardrails: `plan-synthesizer`, `scope-guardian`, `evidence-curator`
 - Web/API specialists: `webapp-vuln`, `webapp-validator`, `api-expert`, `api-validator`, `graphql-specialist`, `cloud-exposure`
 - Exploit/report chain: `poc-coder`, `poc-validator`, `postex`, `postex-validator`, `report-writer`, `report-validator`
@@ -59,7 +60,7 @@ Burp is accessed through the local proxy and the GLaDOS Burp extension, not thro
    - DNS/TLS/CDN/WAF fingerprint.
    - Structured browser recon and direct application mapping.
    - Source/client artifact review.
-   - OSINT as a supporting signal. OSINT is useful, but it is less reliable than direct app observations and should not dominate plan selection.
+   - OSINT only when the operator explicitly asks for it. OSINT is useful, but it is less reliable than direct app observations and should not dominate or delay plan selection.
 3. Write the baseline summary to the blackboard.
 4. Dispatch `plan-synthesizer`.
 5. Present the proposed plan in chat.

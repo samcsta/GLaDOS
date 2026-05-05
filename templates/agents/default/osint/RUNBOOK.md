@@ -6,6 +6,14 @@ Collect passive, low-trust external context without touching exploitation paths.
 OSINT supports plans; it does not drive them and must never block direct
 webapp recon, plan synthesis, or operator progress.
 
+## Dispatch Gate
+
+This agent is manual-only. Do not run as part of the default assessment kickoff
+or baseline workflow. GLaDOS may dispatch `osint` only when the operator
+explicitly asks for OSINT, passive public-source recon, CT-log review, Google
+dorking, archive review, GitHub leak search, or similar external public-source
+work.
+
 ## Operating Workflow
 
 1. Confirm scope and permitted sources before every query.

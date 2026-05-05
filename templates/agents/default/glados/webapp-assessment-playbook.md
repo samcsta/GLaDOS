@@ -22,21 +22,25 @@ the blackboard under `baseline.*`. No exploitation permitted in Phase 1.
    client-side route/API discovery needs. Dispatch `mobile-api-recon` only when
    mobile artifacts, mobile API hosts, app-store metadata, or deep links are in
    scope.
-5. **OSINT (passive, 3-min hard cap, lower planning weight, last-pass,
-   non-blocking)** —
-   dispatch `osint` only after direct browser/app recon and low-impact net recon
-   have produced their baseline, unless the operator explicitly asks for OSINT
-   in parallel. ASN, CDN, WAF, MX/TXT, GitHub/GitLab mentions, archive.org.
+5. **OSINT (manual-only, skipped by default)** —
+   do not dispatch `osint` during the normal baseline flow. Dispatch it only
+   when the operator explicitly asks for OSINT, passive public-source recon,
+   CT-log review, Google dorking, archive review, GitHub leak search, or
+   similar public-source work. ASN, CDN, WAF, MX/TXT, GitHub/GitLab mentions,
+   archive.org.
    Each fact gets a confidence score and source. OSINT supports and
    corroborates the plan; it does not outrank direct app recon, Dradis history,
    DNS/TLS facts, or operator-provided scope. If public sources fail, time out,
    or return only stale/noisy results, record `baseline.osint.status=degraded`
-   and `blocking=false`; do not hold the plan.
-6. **Origin-IP / net-recon (gated)** — if OSINT finds CDN or WAF, dispatch
-   `origin-ip` first. Only fall through to `net-recon` if origin-IP confidence
-   < 70%. Replaces the old binary LB Gate.
+   and `blocking=false`; do not hold the plan. If OSINT was not requested,
+   record `baseline.osint.status=skipped`, `blocking=false`, and
+   `reason=operator_not_requested`.
+6. **Origin-IP / net-recon (gated)** — if DomainsAI, DNS/TLS, direct headers,
+   or operator-requested OSINT show CDN/WAF, dispatch `origin-ip` first. Only
+   fall through to `net-recon` if origin-IP confidence < 70%. Replaces the old
+   binary LB Gate.
 7. **Baseline summary card** — single JSON blob merging core steps 1–4 plus
-   any available OSINT/origin data, written to blackboard with
+   any operator-requested OSINT/origin data, written to blackboard with
    `recon.complete=true` timestamp. Missing or degraded OSINT is an explicit
    field in the summary, not a reason to delay Phase 2.
 
@@ -44,7 +48,8 @@ the blackboard under `baseline.*`. No exploitation permitted in Phase 1.
 
 After core Phase 1 completes, dispatch `plan-synthesizer`. Core Phase 1 means
 Dradis/local report context, DomainsAI, DNS/TLS basics, and direct
-`webapp-recon`; OSINT is included when available but is not required. The
+`webapp-recon`; OSINT is included only when the operator explicitly requested
+it and is not required. The
 plan-synthesizer reads the baseline summary card and emits a Proposed Attack
 Plan JSON with `proposed_vectors`
 (CWE + rationale + confidence_pre + agents + est_duration + risk_to_target)
@@ -101,9 +106,10 @@ satisfies `confidence >= replan_threshold AND cwe ∈ cwe-cascade.json`, GLaDOS:
   GLaDOS records that approval in the blackboard.
 - **I2**: On replan trigger, no further exploitation dispatches until the new
   plan is approved.
-- **I3**: Phase 1 agents (`osint`, `origin-ip`, `net-recon`, `webapp-recon`,
+- **I3**: Core Phase 1 agents (`origin-ip`, `net-recon`, `webapp-recon`,
   `source-code`, `js-reverser`, `mobile-api-recon`, `plan-synthesizer`) are
-  always permitted.
+  always permitted. `osint` is Phase 1 but manual-only; dispatch it only when
+  the operator explicitly asks for OSINT/passive public-source recon.
 - **I6**: Suspected vulnerabilities require operator manual inspection or
   explicit validation approval before confirmation, scope expansion, follow-on
   exploitation, or final reporting.
