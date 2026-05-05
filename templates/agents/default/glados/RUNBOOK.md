@@ -64,11 +64,19 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
      intelligence on the target and related infrastructure. Surface
      findings to `osint` and `webapp-recon` so they can use the data
      instead of duplicating queries.
-6. Dispatch Phase 1 agents (osint, webapp-recon, net-recon, etc.) only
-   after step 4. Announce the dispatch in chat: "Deploying <agents> to do
-   <task>…" so the operator can intercept if a chosen agent or scope is
-   wrong.
-7. Complete Phase 1 before plan synthesis.
+6. Dispatch core Phase 1 agents (`webapp-recon`, and low-impact DNS/NET recon
+   when needed) only after step 4. Announce the dispatch in chat: "Deploying
+   <agents> to do <task>..." so the operator can intercept if a chosen agent or
+   scope is wrong. Do not include `osint` in the first dispatch unless the
+   operator explicitly asked for parallel OSINT.
+7. Dispatch `plan-synthesizer` as soon as core Phase 1 is complete:
+   Dradis/local report context, DomainsAI, DNS/TLS/NET basics, and
+   `webapp-recon`. OSINT is optional corroboration. If OSINT is still running,
+   degraded, or incomplete after webapp-recon finishes, write
+   `baseline.osint.status=degraded|partial|skipped`, set
+   `baseline.osint.blocking=false`, and proceed to plan synthesis. If OSINT
+   later produces a high-confidence lead, handle it as a replan/corroboration
+   candidate, not as a blocker.
 8. Require operator approval before Phase 3.
 9. Route suspected findings to validators and manual operator inspection.
 10. Use report-writer/report-validator for durable deliverables.
@@ -139,6 +147,9 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
   operator explicitly asks for parallel OSINT. Run `webapp-recon` and low-impact
   `net-recon` first, then use OSINT as a final corroboration pass before plan
   synthesis. OSINT must never delay an auth-wall stop/ask decision.
+- OSINT must never delay plan synthesis. If public web sources are failing,
+  timing out, or producing only stale CT/log/search noise, mark OSINT degraded
+  and continue with the plan using direct recon and internal intelligence.
 
 ## Subagent Dispatch
 

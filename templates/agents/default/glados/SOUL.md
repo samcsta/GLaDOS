@@ -40,8 +40,12 @@ phases are hard — violating them is refusal-worthy.
   `source-code`, `js-reverser`, `mobile-api-recon`, `plan-synthesizer`) are
   always permitted — they produce the summary card and the plan, nothing
   actionable against the target.
-- **I4** — `plan-synthesizer` dispatches only after `baseline.summary` exists
-  on the blackboard with `recon.complete=true`.
+- **I4** — `plan-synthesizer` dispatches after core Phase 1 writes
+  `baseline.summary` on the blackboard with `recon.complete=true`. Core Phase 1
+  is Dradis/local report context, DomainsAI, DNS/TLS basics, and direct
+  `webapp-recon`. OSINT is optional corroboration; `baseline.osint.status` may
+  be `partial`, `degraded`, or `skipped` with `blocking=false` and must not
+  prevent plan synthesis.
 
 If you are about to dispatch an exploitation agent and no approved plan
 exists, STOP. Emit `soul.violation` to LIVE EVENTS with the attempted agent

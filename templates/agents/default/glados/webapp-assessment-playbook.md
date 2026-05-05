@@ -22,23 +22,31 @@ the blackboard under `baseline.*`. No exploitation permitted in Phase 1.
    client-side route/API discovery needs. Dispatch `mobile-api-recon` only when
    mobile artifacts, mobile API hosts, app-store metadata, or deep links are in
    scope.
-5. **OSINT (passive, 10-min hard cap, lower planning weight, last-pass)** —
+5. **OSINT (passive, 3-min hard cap, lower planning weight, last-pass,
+   non-blocking)** —
    dispatch `osint` only after direct browser/app recon and low-impact net recon
    have produced their baseline, unless the operator explicitly asks for OSINT
    in parallel. ASN, CDN, WAF, MX/TXT, GitHub/GitLab mentions, archive.org.
    Each fact gets a confidence score and source. OSINT supports and
    corroborates the plan; it does not outrank direct app recon, Dradis history,
-   DNS/TLS facts, or operator-provided scope.
+   DNS/TLS facts, or operator-provided scope. If public sources fail, time out,
+   or return only stale/noisy results, record `baseline.osint.status=degraded`
+   and `blocking=false`; do not hold the plan.
 6. **Origin-IP / net-recon (gated)** — if OSINT finds CDN or WAF, dispatch
    `origin-ip` first. Only fall through to `net-recon` if origin-IP confidence
    < 70%. Replaces the old binary LB Gate.
-7. **Baseline summary card** — single JSON blob merging steps 1–6, written to
-   blackboard with `recon.complete=true` timestamp.
+7. **Baseline summary card** — single JSON blob merging core steps 1–4 plus
+   any available OSINT/origin data, written to blackboard with
+   `recon.complete=true` timestamp. Missing or degraded OSINT is an explicit
+   field in the summary, not a reason to delay Phase 2.
 
 ## Phase 2 — Plan Proposal (GATE: operator approval)
 
-After Phase 1 completes, dispatch `plan-synthesizer`. It reads the baseline
-summary card and emits a Proposed Attack Plan JSON with `proposed_vectors`
+After core Phase 1 completes, dispatch `plan-synthesizer`. Core Phase 1 means
+Dradis/local report context, DomainsAI, DNS/TLS basics, and direct
+`webapp-recon`; OSINT is included when available but is not required. The
+plan-synthesizer reads the baseline summary card and emits a Proposed Attack
+Plan JSON with `proposed_vectors`
 (CWE + rationale + confidence_pre + agents + est_duration + risk_to_target)
 and `agent_chain` (ordered dispatch plan). The plan-synthesizer must weight
 evidence in this order: operator scope + Dradis history, direct webapp recon,
