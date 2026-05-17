@@ -660,11 +660,19 @@ function installDeps() {
     'watchdog/watchdog-mcp',
     'tools/glados-ops-mcp',
   ];
+  const npmEnv = { ...process.env };
+  if (process.platform === 'darwin' && fs.existsSync('/usr/bin/python3')) {
+    // Homebrew's latest Python can lag native-module build expectations on
+    // fresh macOS installs. Xcode's system Python is the most stable node-gyp
+    // choice for GLaDOS' native deps (better-sqlite3, node-pty).
+    npmEnv.PYTHON = npmEnv.PYTHON || '/usr/bin/python3';
+    npmEnv.npm_config_python = npmEnv.npm_config_python || '/usr/bin/python3';
+  }
   for (const rel of dirs) {
     const dir = path.join(REPO_ROOT, rel);
     if (!fs.existsSync(path.join(dir, 'package.json'))) continue;
     log(`npm install --prefix ${rel}`);
-    const r = cp.spawnSync('npm', ['install', '--prefix', dir], { stdio: 'inherit' });
+    const r = cp.spawnSync('npm', ['install', '--prefix', dir], { stdio: 'inherit', env: npmEnv });
     if (r.status !== 0) fail(`npm install failed in ${rel}`);
   }
 }
@@ -790,6 +798,7 @@ function secretScan({ quiet = false } = {}) {
   ];
   for (const rel of files) {
     const normalized = rel.replace(/\\/g, '/');
+    if (!staged && (normalized === '.env' || normalized.startsWith('.env.'))) continue;
     for (const rx of pathBlockers) {
       if (rx.test(normalized)) issues.push({ file: normalized, reason: 'runtime-or-secret path is not distributable' });
     }
