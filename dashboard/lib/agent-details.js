@@ -93,9 +93,23 @@ async function listKnownModels() {
   const registry = loadAgentRegistry();
   const models = new Set(registry.map(a => a.model).filter(Boolean));
   for (const m of [
-    'custom-llmapi-redteamstuff-com/claude-sonnet-4-6',
+    'custom-llmapi-redteamstuff-com/gemini-2.5-flash',
+    'custom-llmapi-redteamstuff-com/gemini-3.1-flash-lite-preview',
+    'custom-llmapi-redteamstuff-com/gemini-2.5-flash-lite',
+    'custom-llmapi-redteamstuff-com/gemini-3.1-pro-preview',
+    'custom-llmapi-redteamstuff-com/gpt-5.3-codex',
+    'custom-llmapi-redteamstuff-com/gpt-5.5-pro',
+    'custom-llmapi-redteamstuff-com/gpt-5.5',
+    'custom-llmapi-redteamstuff-com/claude-opus-4-6',
+    'custom-llmapi-redteamstuff-com/gemini-3.5-flash',
     'custom-llmapi-redteamstuff-com/claude-opus-4-7',
-    'custom-llmapi-redteamstuff-com/claude-haiku-4-5',
+    'custom-llmapi-redteamstuff-com/claude-opus-4-8',
+    'custom-llmapi-redteamstuff-com/gemini-3-flash-preview',
+    'custom-llmapi-redteamstuff-com/claude-sonnet-4-6',
+    'custom-llmapi-redteamstuff-com/qwen3.6-27b-fp8',
+    'custom-llmapi-redteamstuff-com/qwen3.6-35b-a3b-fp8',
+    'custom-llmapi-redteamstuff-com/minimax-m2.7',
+    'custom-llmapi-redteamstuff-com/gemma-4-31b-it-fp8',
   ]) models.add(m);
   for (const m of await fetchOllamaModels()) models.add(m);
   return [...models].sort();

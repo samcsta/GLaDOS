@@ -10,7 +10,7 @@ const { EventEmitter } = require('node:events');
  * Emits:
  *   "event" -> { kind, ts, raw, ...fields }
  *     kinds: "session-start" | "thinking" | "assistant-text" | "tool-call" |
- *            "tool-result" | "user-message" | "meta"
+ *            "tool-result" | "user-message" | "meta" | "prompt-error"
  *   "end"
  *   "error" -> Error
  */
@@ -166,6 +166,19 @@ function convertToEvents(obj) {
       exitCode: m.details?.exitCode,
       status: m.details?.status,
       durationMs: m.details?.durationMs,
+    });
+    return out;
+  }
+
+  if (role === 'assistant' && m.stopReason === 'error') {
+    out.push({
+      kind: 'prompt-error',
+      ts,
+      id,
+      error: m.errorMessage || 'assistant stopped with an unknown model error',
+      provider: m.provider,
+      model: m.model,
+      api: m.api,
     });
     return out;
   }

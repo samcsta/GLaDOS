@@ -306,6 +306,26 @@ function providerModel(id) {
   return { id, name: id.split('/').slice(1).join('/') || id };
 }
 
+const LLMAPI_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-3.1-flash-lite-preview',
+  'gemini-2.5-flash-lite',
+  'gemini-3.1-pro-preview',
+  'gpt-5.3-codex',
+  'gpt-5.5-pro',
+  'gpt-5.5',
+  'claude-opus-4-6',
+  'gemini-3.5-flash',
+  'claude-opus-4-7',
+  'claude-opus-4-8',
+  'gemini-3-flash-preview',
+  'claude-sonnet-4-6',
+  'qwen3.6-27b-fp8',
+  'qwen3.6-35b-a3b-fp8',
+  'minimax-m2.7',
+  'gemma-4-31b-it-fp8',
+];
+
 function generateOpenClawConfig(paths) {
   const existing = readJson(paths.openclawJson, {});
   const agents = localAgentEntries(paths);
@@ -379,11 +399,7 @@ function generateOpenClawConfig(paths) {
           baseUrl: llmBaseUrl,
           ['api' + 'Key']: llmApiKey,
           api: 'openai-completions',
-          models: [
-            providerModel('claude-sonnet-4-6'),
-            providerModel('claude-opus-4-7'),
-            providerModel('claude-haiku-4-5'),
-          ],
+          models: LLMAPI_MODELS.map(providerModel),
         },
         'ollama-local': {
           ...(existing.models?.providers?.['ollama-local'] || {}),

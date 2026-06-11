@@ -922,7 +922,7 @@ function renderChatBotPane() {
   header.innerHTML = `
     <div class="chatbot-title">
       <span class="chatbot-name">Atlas</span>
-      <span class="chatbot-hint">local assistant · <span id="chatbot-model-label">—</span></span>
+      <span class="chatbot-hint">assistant · <span id="chatbot-model-label">—</span></span>
     </div>
     <div class="chatbot-controls">
       <select id="chatbot-model" title="Switch model (restarts the gateway — takes ~3s)"></select>
@@ -966,7 +966,7 @@ function renderChatBotPane() {
   updateChatBotSendingIndicator();
   refreshChatTurnStatus(tabId, 'atlas');
 
-  // --- Model selector: fetch installed ollama models + current atlas model ---
+  // --- Model selector: fetch known models + current atlas model ---
   const modelSel = document.getElementById('chatbot-model');
   const modelLabel = document.getElementById('chatbot-model-label');
   async function populateModels() {
@@ -975,13 +975,15 @@ function renderChatBotPane() {
         fetch('/api/models').then(r => r.json()),
         fetch('/api/agents/atlas/details').then(r => r.json()),
       ]);
-      const ollamaOnly = (models.models || []).filter(m => m.startsWith('ollama-local/'));
-      modelSel.innerHTML = ollamaOnly
-        .map(m => `<option value="${m}">${m.replace('ollama-local/', '')}</option>`)
+      const displayModel = m => String(m || '')
+        .replace(/^ollama-local\//, '')
+        .replace(/^custom-llmapi-redteamstuff-com\//, '');
+      modelSel.innerHTML = (models.models || [])
+        .map(m => `<option value="${escapeHtml(m)}">${escapeHtml(displayModel(m))}</option>`)
         .join('');
       const current = details?.model || 'ollama-local/glm-4.7-flash:latest';
       modelSel.value = current;
-      modelLabel.textContent = current.replace('ollama-local/', '');
+      modelLabel.textContent = displayModel(current);
     } catch (e) { modelLabel.textContent = '(model list unavailable)'; }
   }
   populateModels();
@@ -1006,7 +1008,9 @@ function renderChatBotPane() {
       const rr = await fetch('/api/gateway/restart', { method: 'POST' });
       const rj = await rr.json();
       if (!rj.ok) throw new Error(rj.error || 'gateway restart failed');
-      modelLabel.textContent = newModel.replace('ollama-local/', '');
+      modelLabel.textContent = newModel
+        .replace(/^ollama-local\//, '')
+        .replace(/^custom-llmapi-redteamstuff-com\//, '');
     } catch (e) {
       alert('Model switch failed: ' + e.message);
       modelLabel.textContent = origLabel;
