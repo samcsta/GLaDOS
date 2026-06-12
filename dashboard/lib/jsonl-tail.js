@@ -15,9 +15,10 @@ const { EventEmitter } = require('node:events');
  *   "error" -> Error
  */
 class JsonlTail extends EventEmitter {
-  constructor(filePath) {
+  constructor(filePath, opts = {}) {
     super();
     this.filePath = filePath;
+    this.fromEnd = !!opts.fromEnd;
     this.closed = false;
     this.position = 0;
     this.buffer = '';
@@ -32,7 +33,7 @@ class JsonlTail extends EventEmitter {
         else this._emitError(err);
         return;
       }
-      this.position = 0;
+      this.position = this.fromEnd ? st.size : 0;
       this._readNewBytes(() => {
         try {
           this._watcher = fs.watch(this.filePath, { persistent: true }, () => {

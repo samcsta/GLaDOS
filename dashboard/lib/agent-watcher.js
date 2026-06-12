@@ -87,7 +87,7 @@ class AgentWatcher extends EventEmitter {
 
   _attachTail(agentId, sessionFile) {
     const sessionId = path.basename(sessionFile, '.jsonl');
-    const tail = new JsonlTail(sessionFile);
+    const tail = new JsonlTail(sessionFile, { fromEnd: true });
     const entry = { tail, agentId, sessionId };
     this.tails.set(sessionFile, entry);
     tail.on('event', ev => {

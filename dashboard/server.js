@@ -6,7 +6,7 @@ const { AgentWatcher } = require('./lib/agent-watcher');
 const { loadAgentRegistry, listAgentIds, currentSessionForAgent, sendMessageToAgent } = require('./lib/openclaw');
 const reports = require('./lib/reports');
 const agentDetails = require('./lib/agent-details');
-const { JsonlTail } = require('./lib/jsonl-tail');
+const { JsonlTail, convertToEvents } = require('./lib/jsonl-tail');
 const { RawStreamTail } = require('./lib/raw-stream-tail');
 const watchdogHealth = require('glados-watchdog/lib/health');
 const watchdogHalt = require('glados-watchdog/lib/halt');
@@ -744,6 +744,30 @@ function staleRawStreamEvent(ev, agentId) {
   return false;
 }
 
+function readSessionBackfillEvents(sessionFile, agentId, sessionId) {
+  let raw = '';
+  try { raw = fs.readFileSync(sessionFile, 'utf8'); } catch { return null; }
+  const events = [];
+  for (const line of raw.split(/\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let obj;
+    try { obj = JSON.parse(trimmed); } catch { continue; }
+    for (const ev of convertToEvents(obj)) {
+      events.push({ agentId, sessionId, ...ev });
+    }
+  }
+  return suppressSupersededPromptErrors(events);
+}
+
+function suppressSupersededPromptErrors(events) {
+  if (!Array.isArray(events) || events.length === 0) return events || [];
+  return events.filter((ev, i) => {
+    if (ev.kind !== 'prompt-error') return true;
+    return !events.slice(i + 1).some(later => later.kind === 'assistant-text');
+  });
+}
+
 const rawStream = new RawStreamTail().start();
 rawStream.on('raw', ev => {
   // Suppress subagent heartbeat traffic ("NO_REPLY" replies and the like).
@@ -844,21 +868,29 @@ app.get('/api/agents/:id/transcript', (req, res) => {
   if (buf.length === 0) {
     const snap = currentSessionForAgent(agentId);
     if (snap && snap.sessionFile && fs.existsSync(snap.sessionFile)) {
-      const backfill = new JsonlTail(snap.sessionFile);
-      backfill.on('event', ev => {
-        const enriched = { agentId, sessionId: snap.sessionId, ...ev };
-        pushBuffer(agentId, enriched);
-        res.write(`data: ${JSON.stringify(enriched)}\n\n`);
-      });
-      backfill.on('missing', () => {
-        res.write(`event: transcript-warning\ndata: ${JSON.stringify({ agentId, warning: 'session file is no longer present; waiting for the next live session' })}\n\n`);
-      });
-      backfill.on('error', e => {
-        console.warn(`[transcript:${agentId}] backfill error:`, e.message);
-      });
-      backfill.start();
-      // Close the backfill tail after one pass; live updates arrive via watcher.
-      setTimeout(() => backfill.close(), 500);
+      const backfill = readSessionBackfillEvents(snap.sessionFile, agentId, snap.sessionId);
+      if (backfill) {
+        for (const enriched of backfill) {
+          pushBuffer(agentId, enriched);
+          res.write(`data: ${JSON.stringify(enriched)}\n\n`);
+        }
+      } else {
+        const backfillTail = new JsonlTail(snap.sessionFile);
+        backfillTail.on('event', ev => {
+          const enriched = { agentId, sessionId: snap.sessionId, ...ev };
+          pushBuffer(agentId, enriched);
+          res.write(`data: ${JSON.stringify(enriched)}\n\n`);
+        });
+        backfillTail.on('missing', () => {
+          res.write(`event: transcript-warning\ndata: ${JSON.stringify({ agentId, warning: 'session file is no longer present; waiting for the next live session' })}\n\n`);
+        });
+        backfillTail.on('error', e => {
+          console.warn(`[transcript:${agentId}] backfill error:`, e.message);
+        });
+        backfillTail.start();
+        // Close the backfill tail after one pass; live updates arrive via watcher.
+        setTimeout(() => backfillTail.close(), 500);
+      }
     }
   }
 
