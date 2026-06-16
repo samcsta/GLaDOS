@@ -6,6 +6,7 @@ const { AgentWatcher } = require('./lib/agent-watcher');
 const { loadAgentRegistry, listAgentIds, currentSessionForAgent, sendMessageToAgent } = require('./lib/openclaw');
 const reports = require('./lib/reports');
 const agentDetails = require('./lib/agent-details');
+const { getVersionInfo } = require('./lib/version');
 const { JsonlTail, convertToEvents } = require('./lib/jsonl-tail');
 const { RawStreamTail } = require('./lib/raw-stream-tail');
 const watchdogHealth = require('glados-watchdog/lib/health');
@@ -46,6 +47,10 @@ try {
 } catch (e) { console.warn('[startup] raw-stream truncate failed:', e.message); }
 
 const watcher = new AgentWatcher().start();
+
+app.get('/api/version', (req, res) => {
+  res.json(getVersionInfo());
+});
 
 // Per-agent ring buffer of recent events (for new SSE subscribers to backfill).
 const BUFFER_LIMIT = 500;

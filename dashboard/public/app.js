@@ -2953,11 +2953,20 @@ function renderAboutPane() {
 async function renderSettingsPane() {
   const wrap = document.createElement('div');
   wrap.className = 'settings-pane';
-  wrap.innerHTML = '<h1>Agent Settings</h1><p style="color:var(--fg-dim);">Click an agent to expand. Model changes edit <code>~/.openclaw/openclaw.json</code> atomically with a backup.</p><div id="settings-list">loading…</div>';
+  wrap.innerHTML = `
+    <h1>Agent Settings</h1>
+    <div id="settings-version" class="settings-version">Version loading…</div>
+    <p style="color:var(--fg-dim);">Click an agent to expand. Model changes are saved to durable GLaDOS overrides and patched into <code>~/.openclaw/openclaw.json</code> atomically with a backup.</p>
+    <div id="settings-list">loading…</div>`;
   paneEl.appendChild(wrap);
 
   try {
-    const models = (await fetch('/api/models').then(r => r.json())).models || [];
+    const [versionInfo, modelsResp] = await Promise.all([
+      fetch('/api/version').then(r => r.json()).catch(e => ({ error: e.message })),
+      fetch('/api/models').then(r => r.json()),
+    ]);
+    renderSettingsVersion(versionInfo);
+    const models = modelsResp.models || [];
     const listEl = document.getElementById('settings-list');
     listEl.innerHTML = '';
     for (const agent of state.agents) {
@@ -2984,6 +2993,24 @@ async function renderSettingsPane() {
   } catch (e) {
     document.getElementById('settings-list').textContent = 'error: ' + e.message;
   }
+}
+
+function renderSettingsVersion(info) {
+  const el = document.getElementById('settings-version');
+  if (!el) return;
+  if (!info || info.error) {
+    el.innerHTML = `<span class="settings-version-label">GLaDOS Version</span><code>unknown</code>`;
+    return;
+  }
+  const bits = [];
+  if (info.major) bits.push(`major ${escapeHtml(info.major)}`);
+  if (info.isoDate) bits.push(escapeHtml(info.isoDate));
+  if (Number.isFinite(info.sequence)) bits.push(`update ${info.sequence}`);
+  el.innerHTML = `
+    <span class="settings-version-label">GLaDOS Version</span>
+    <code>${escapeHtml(info.version || 'unknown')}</code>
+    ${bits.length ? `<span class="settings-version-meta">${bits.join(' · ')}</span>` : ''}
+    ${info.valid === false ? '<span class="settings-version-warn">invalid format</span>' : ''}`;
 }
 
 async function hydrateAgentCard(agentId, body, models) {
