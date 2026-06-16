@@ -23,6 +23,8 @@ class JsonlTail extends EventEmitter {
     this.position = 0;
     this.buffer = '';
     this._pending = false;
+    this._reading = false;
+    this._needsRead = false;
     this._watcher = null;
   }
 
@@ -39,6 +41,9 @@ class JsonlTail extends EventEmitter {
           this._watcher = fs.watch(this.filePath, { persistent: true }, () => {
             this._scheduleRead();
           });
+          // Catch bytes appended between the initial stat/read and watcher
+          // attachment. Subagent prompts often land in exactly that tiny gap.
+          this._scheduleRead();
         } catch (e) {
           if (e.code === 'ENOENT') this.emit('missing', { filePath: this.filePath, error: e });
           else this._emitError(e);
@@ -49,7 +54,11 @@ class JsonlTail extends EventEmitter {
   }
 
   _scheduleRead() {
-    if (this._pending || this.closed) return;
+    if (this.closed) return;
+    if (this._pending || this._reading) {
+      this._needsRead = true;
+      return;
+    }
     this._pending = true;
     setImmediate(() => {
       this._pending = false;
@@ -59,12 +68,32 @@ class JsonlTail extends EventEmitter {
 
   _readNewBytes(done) {
     if (this.closed) return done?.();
+    if (this._reading) {
+      this._needsRead = true;
+      return done?.();
+    }
+    this._reading = true;
     fs.stat(this.filePath, (err, st) => {
-      if (err || this.closed) return done?.();
-      if (st.size < this.position) this.position = 0;
-      if (st.size === this.position) return done?.();
+      if (err || this.closed) {
+        this._reading = false;
+        return done?.();
+      }
+      if (st.size < this.position) {
+        this.position = 0;
+        this.buffer = '';
+      }
+      const start = this.position;
+      if (st.size === start) {
+        this._reading = false;
+        done?.();
+        if (this._needsRead) {
+          this._needsRead = false;
+          this._scheduleRead();
+        }
+        return;
+      }
       const stream = fs.createReadStream(this.filePath, {
-        start: this.position,
+        start,
         end: st.size - 1,
       });
       let readBytes = 0;
@@ -79,12 +108,23 @@ class JsonlTail extends EventEmitter {
         }
       });
       stream.on('end', () => {
-        this.position += readBytes;
+        this.position = Math.max(this.position, start + readBytes);
+        this._reading = false;
         done?.();
+        if (this._needsRead) {
+          this._needsRead = false;
+          this._scheduleRead();
+        }
       });
       stream.on('error', e => {
+        this._reading = false;
         if (e.code === 'ENOENT') this.emit('missing', { filePath: this.filePath, error: e });
         else this._emitError(e);
+        done?.();
+        if (this._needsRead) {
+          this._needsRead = false;
+          this._scheduleRead();
+        }
       });
     });
   }

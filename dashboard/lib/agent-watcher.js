@@ -20,11 +20,11 @@ class AgentWatcher extends EventEmitter {
     this.tails = new Map(); // sessionFile -> { tail, agentId, sessionId }
     this.sessionState = new Map(); // agentId -> current session snapshot
     this._watcher = null;
+    this._rescanTimer = null;
   }
 
   start() {
-    const initial = listAgentIds();
-    for (const agentId of initial) this._rescanAgent(agentId);
+    this._rescanAll();
 
     this._watcher = chokidar.watch(AGENTS_DIR, {
       depth: 3,
@@ -35,6 +35,11 @@ class AgentWatcher extends EventEmitter {
     this._watcher.on('add', p => this._onPath(p));
     this._watcher.on('change', p => this._onPath(p));
     this._watcher.on('unlink', p => this._onUnlink(p));
+    // Chokidar can miss the exact sessions.json transition when OpenClaw
+    // creates a subagent and writes the prompt immediately. Polling the small
+    // sessions indexes makes live transcript attachment deterministic.
+    this._rescanTimer = setInterval(() => this._rescanAll(), 2_000);
+    this._rescanTimer.unref?.();
     return this;
   }
 
@@ -75,6 +80,11 @@ class AgentWatcher extends EventEmitter {
     if (!this.tails.has(snap.sessionFile)) this._attachTail(agentId, snap.sessionFile);
   }
 
+  _rescanAll() {
+    const agents = listAgentIds();
+    for (const agentId of agents) this._rescanAgent(agentId);
+  }
+
   _detachAgent(agentId, sessionFile = null) {
     for (const [p, entry] of this.tails.entries()) {
       if (entry.agentId !== agentId) continue;
@@ -87,7 +97,7 @@ class AgentWatcher extends EventEmitter {
 
   _attachTail(agentId, sessionFile) {
     const sessionId = path.basename(sessionFile, '.jsonl');
-    const tail = new JsonlTail(sessionFile, { fromEnd: true });
+    const tail = new JsonlTail(sessionFile, { fromEnd: false });
     const entry = { tail, agentId, sessionId };
     this.tails.set(sessionFile, entry);
     tail.on('event', ev => {
@@ -117,6 +127,7 @@ class AgentWatcher extends EventEmitter {
     for (const { tail } of this.tails.values()) tail.close();
     this.tails.clear();
     if (this._watcher) this._watcher.close();
+    if (this._rescanTimer) clearInterval(this._rescanTimer);
   }
 }
 

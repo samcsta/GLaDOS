@@ -70,6 +70,7 @@ const BLACKBOARD_STATE_TABLES = [
 function pushBuffer(agentId, ev) {
   let buf = buffers.get(agentId);
   if (!buf) { buf = []; buffers.set(agentId, buf); }
+  if (ev?.id && buf.some(existing => existing?.id === ev.id)) return;
   buf.push(ev);
   if (buf.length > BUFFER_LIMIT) buf.shift();
 }
@@ -760,6 +761,33 @@ function readSessionBackfillEvents(sessionFile, agentId, sessionId) {
   return suppressSupersededPromptErrors(events);
 }
 
+function eventSortMs(ev) {
+  const ms = Date.parse(ev?.ts || '');
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function bufferedTranscriptEvents(agentId) {
+  let backfill = [];
+  const snap = currentSessionForAgent(agentId);
+  if (snap && snap.sessionFile && fs.existsSync(snap.sessionFile)) {
+    backfill = readSessionBackfillEvents(snap.sessionFile, agentId, snap.sessionId) || [];
+    for (const ev of backfill) pushBuffer(agentId, ev);
+  }
+  const seen = new Set();
+  const combined = [];
+  for (const ev of [...backfill, ...(buffers.get(agentId) || [])]) {
+    const key = ev?.id ? `id:${ev.id}` : `${ev?.kind || ''}:${ev?.ts || ''}:${ev?.text || ev?.toolCallId || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    combined.push(ev);
+  }
+  return combined.sort((a, b) => {
+    const d = eventSortMs(a) - eventSortMs(b);
+    if (d) return d;
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  });
+}
+
 function suppressSupersededPromptErrors(events) {
   if (!Array.isArray(events) || events.length === 0) return events || [];
   return events.filter((ev, i) => {
@@ -859,39 +887,12 @@ app.get('/api/agents/:id/transcript', (req, res) => {
   });
   res.write(': connected\n\n');
 
-  // Backfill from in-memory ring first.
-  const buf = buffers.get(agentId) || [];
-  for (const ev of buf) res.write(`data: ${JSON.stringify(ev)}\n\n`);
-
-  // If we haven't tailed any events yet (e.g. agent opened before dashboard started),
-  // read the current session file from disk and emit its history before going live.
-  if (buf.length === 0) {
-    const snap = currentSessionForAgent(agentId);
-    if (snap && snap.sessionFile && fs.existsSync(snap.sessionFile)) {
-      const backfill = readSessionBackfillEvents(snap.sessionFile, agentId, snap.sessionId);
-      if (backfill) {
-        for (const enriched of backfill) {
-          pushBuffer(agentId, enriched);
-          res.write(`data: ${JSON.stringify(enriched)}\n\n`);
-        }
-      } else {
-        const backfillTail = new JsonlTail(snap.sessionFile);
-        backfillTail.on('event', ev => {
-          const enriched = { agentId, sessionId: snap.sessionId, ...ev };
-          pushBuffer(agentId, enriched);
-          res.write(`data: ${JSON.stringify(enriched)}\n\n`);
-        });
-        backfillTail.on('missing', () => {
-          res.write(`event: transcript-warning\ndata: ${JSON.stringify({ agentId, warning: 'session file is no longer present; waiting for the next live session' })}\n\n`);
-        });
-        backfillTail.on('error', e => {
-          console.warn(`[transcript:${agentId}] backfill error:`, e.message);
-        });
-        backfillTail.start();
-        // Close the backfill tail after one pass; live updates arrive via watcher.
-        setTimeout(() => backfillTail.close(), 500);
-      }
-    }
+  // Backfill from the durable session JSONL plus the in-memory ring. This is
+  // intentionally done on every connect, not only when the ring is empty:
+  // subagent prompts can be written before the watcher attaches, while later
+  // live events still populate the ring.
+  for (const ev of bufferedTranscriptEvents(agentId)) {
+    res.write(`data: ${JSON.stringify(ev)}\n\n`);
   }
 
   let set = sseClients.get(agentId);

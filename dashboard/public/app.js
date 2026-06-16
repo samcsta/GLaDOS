@@ -4,6 +4,7 @@ const state = {
   openTabs: [],        // [{ id: 'glados-chat' | agentId, kind: 'chat'|'agent', label }]
   currentTab: null,
   transcripts: new Map(), // tabId -> { es, el, events[], sending }
+  agentsLoadedOnce: false,
 };
 
 const tabsEl = document.getElementById('tabs');
@@ -52,11 +53,21 @@ haltOneBtn.addEventListener('click', async () => {
 async function loadAgents() {
   const res = await fetch('/api/agents');
   const j = await res.json();
+  const previouslyActive = new Set(state.active.keys());
   state.agents = j.agents || [];
   state.active.clear();
   for (const a of state.agents) {
     if (a.active) state.active.set(a.id, { sessionId: a.session?.sessionId });
   }
+  for (const a of state.agents) {
+    if (!a.active || a.id === 'glados' || a.id === 'atlas') continue;
+    if (state.openTabs.find(t => t.id === a.id)) continue;
+    // If the lobby SSE missed session-started, polling still notices the live
+    // agent and opens/subscribes to its transcript. First load also subscribes
+    // to any already-running agents before GLaDOS becomes the active tab.
+    if (!state.agentsLoadedOnce || !previouslyActive.has(a.id)) openAgentTab(a.id);
+  }
+  state.agentsLoadedOnce = true;
   renderAgentList();
 }
 
@@ -526,8 +537,16 @@ async function refreshChatTurnStatus(tabId, agentId) {
         rec.activity = rec.firstTokenSeenAt ? 'working' : 'waiting';
       }
       updateSendingIndicator(tabId);
-    } else if (rec.sending && rec.activity === 'finalizing') {
-      finishTranscriptTurn(rec, tabId);
+    } else if (rec.sending) {
+      // Defensive recovery: lobby SSE can miss chat-turn-ended during a tab
+      // reconnect, while the durable transcript has already been written.
+      // If the server says the turn is no longer active, clear the spinner
+      // even if we never entered the "finalizing" state.
+      rec.activity = 'finalizing';
+      updateSendingIndicator(tabId);
+      setTimeout(() => {
+        if (rec.sending && rec.activity === 'finalizing') finishTranscriptTurn(rec, tabId);
+      }, 1000);
     }
   } catch {}
 }
@@ -1448,7 +1467,12 @@ function subscribeLobby() {
   const es = new EventSource('/api/agents/stream');
   es.addEventListener('snapshot', e => {
     const arr = JSON.parse(e.data);
-    for (const a of arr) state.active.set(a.agentId, { sessionId: a.sessionId });
+    for (const a of arr) {
+      state.active.set(a.agentId, { sessionId: a.sessionId });
+      if (a.agentId !== 'glados' && a.agentId !== 'atlas' && !state.openTabs.find(t => t.id === a.agentId)) {
+        openAgentTab(a.agentId);
+      }
+    }
     renderAgentList();
   });
   es.addEventListener('session-started', e => {
