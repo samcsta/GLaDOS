@@ -299,18 +299,15 @@ This file lives outside the repo (gitignored), is read on every config regen, an
 over the registry default (it is applied verbatim and is not affected by `GLADOS_DISABLE_OLLAMA`).
 Do **not** hand-edit `~/.openclaw/openclaw.json` — it is generated and will be overwritten.
 
-#### Response speed on reasoning models
+#### Response speed: pick the right model
 
-Some cheap HPC models (e.g. `minimax-m2.7`) are reasoning-heavy and will "think" for 20-30s even on
-trivial replies. The Atlas ChatBot page has a **reasoning dropdown** next to the model picker —
-choose `off` / `minimal` / `low` / `medium` / `high` (default **`minimal`**). The choice is saved to
-`~/.glados/thinking-overrides.json` (a gitignored `{"<agent-id>": "<level>"}` map), so it **persists
-across updates**, and the gateway restarts to apply it (~3s).
-
-The level is applied only to a model used **exclusively** by the agent (and never the shared Sonnet
-primary), so the red-team fleet keeps its full reasoning budget. Sonnet agents like GLaDOS already
-reason **adaptively** (the model scales effort per message); a fixed level is mainly useful for
-non-adaptive cheap models. See [docs/model-customization.md](docs/model-customization.md).
+Some cheap HPC reasoning models (e.g. `minimax-m2.7`) are slow on the LiteLLM gateway and **always**
+emit reasoning regardless of any thinking/level setting — so they make a poor conversational
+assistant (20s+ for a trivial reply). For a snappy agent like Atlas, switch it (via the model
+picker) to a fast **non-reasoning** model such as `gemini-2.5-flash-lite`, `gemini-3.1-flash-lite-preview`,
+or `gemma-4-31b-it-fp8`. For smart **and** fast, `claude-sonnet-4-6` reasons *adaptively* (it scales
+effort per message). Sonnet agents like GLaDOS already get adaptive reasoning by default. See
+[docs/model-customization.md](docs/model-customization.md).
 
 ## Architecture
 

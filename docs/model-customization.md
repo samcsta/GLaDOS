@@ -56,29 +56,31 @@ scripts/update.sh                        # or: node scripts/lib/glados-local.js 
 > Do **not** hand-edit `~/.openclaw/openclaw.json`. It is generated; the next update overwrites it.
 > Put per-agent models in `model-overrides.json` instead.
 
-## Response speed on reasoning models
+## Response speed: choose the right model (don't fight reasoning)
 
-Cheap HPC models vary a lot in latency. Reasoning models like `minimax-m2.7` generate hidden
-reasoning tokens before answering — fine for heavy exploitation agents, but it makes a chatty
-assistant feel broken (e.g. ~30s to say "No problem, anytime").
+Cheap HPC models vary a lot in latency, and this is best solved by **model choice**, not a thinking
+knob. We tried exposing a per-agent reasoning level and removed it after testing, because:
 
-OpenClaw resolves a model's thinking level from `agents.defaults.models[<ref>].params.thinking`
-(`off` / `minimal` / `low` / `medium` / `high`). Set it per agent two ways:
+- **minimax-m2.7 ignores it.** With `thinking: "off"` set and confirmed applied (the session logs a
+  `thinking_level_change → off`), minimax still returns a `reasoning_content` block. Over the LiteLLM
+  `openai-completions` path, OpenClaw cannot disable minimax's reasoning.
+- **The latency is mostly the endpoint, not the reasoning.** Even with reasoning reduced to one
+  short sentence, a trivial Atlas reply took ~20s — that's minimax's TTFT/throughput on the gateway,
+  which no thinking level changes.
 
-- **Atlas ChatBot page** — the **reasoning dropdown** next to the model picker. Default `minimal`.
-  Changing it restarts the gateway (~3s) so it applies immediately.
-- **By hand** — edit `~/.glados/thinking-overrides.json`, a gitignored `{"<agent-id>": "<level>"}`
-  map (seeded with `{"atlas": "minimal"}`). Apply with `scripts/update.sh`.
+So for a snappy conversational agent, **switch the model**, don't tune thinking:
 
-This file lives outside the repo and is read on every regen, so the level **survives updates**. To
-avoid hurting the red-team fleet, a level is applied **only to a model whose every agent agrees on
-it**, and **never to the shared Sonnet primary**. Practically: give your fast assistant its own cheap
-model (as Atlas has `minimax-m2.7`) so its dropdown choice applies cleanly.
+- Fast + cheap, non-reasoning: `gemini-2.5-flash-lite`, `gemini-3.1-flash-lite-preview`,
+  `gemma-4-31b-it-fp8`.
+- Fast + smart, with real per-message *adaptive* reasoning: `claude-sonnet-4-6` (native Anthropic
+  feature; Sonnet agents like GLaDOS already use it by default).
 
-> True per-message *adaptive* reasoning (the model decides how hard to think) is a native Anthropic
-> 4.6 feature — Sonnet agents like GLaDOS already use it. Through the LiteLLM proxy, non-Anthropic
-> models can't do real adaptive (OpenClaw maps `adaptive` → a fixed `medium`), which is why the
-> dropdown offers fixed levels for cheap models like minimax.
+Use the model picker on the Atlas page (persisted via `model-overrides.json`, above) to switch.
+
+> Note: OpenClaw's `thinking` level (`off`/`minimal`/`low`/`medium`/`high`/`adaptive`) *is* honored
+> by models that support it (e.g. Anthropic), via `agents.defaults.models[<ref>].params.thinking`.
+> It just doesn't help for non-adaptive proxy models like minimax, which is why GLaDOS doesn't expose
+> a per-agent reasoning control.
 
 ### Guidance: which cheap model for what
 

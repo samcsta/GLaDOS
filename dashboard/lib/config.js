@@ -25,7 +25,6 @@ module.exports = {
   AGENTS_DIR: path.join(OPENCLAW_HOME, 'agents'),
   OPENCLAW_JSON: path.join(OPENCLAW_HOME, 'openclaw.json'),
   MODEL_OVERRIDES_JSON: path.join(GLADOS_RUNTIME_DIR, 'model-overrides.json'),
-  THINKING_OVERRIDES_JSON: path.join(GLADOS_RUNTIME_DIR, 'thinking-overrides.json'),
   GLADOS_AGENT_ID: process.env.GLADOS_AGENT_ID || 'glados',
   OPENCLAW_BIN: process.env.OPENCLAW_BIN || 'openclaw',
 };

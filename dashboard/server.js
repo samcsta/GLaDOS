@@ -1399,13 +1399,6 @@ app.post('/api/agents/:id/model', (req, res) => {
     res.json({ ok: true, ...result });
   } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 });
-app.post('/api/agents/:id/thinking', (req, res) => {
-  try {
-    const result = agentDetails.updateAgentThinking(req.params.id, String(req.body?.level || ''));
-    broadcastLobby('agent-thinking-changed', result);
-    res.json({ ok: true, ...result });
-  } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
-});
 
 // --- Slash commands metadata for the chat autocomplete ---
 app.get('/api/slash-commands', (req, res) => {
