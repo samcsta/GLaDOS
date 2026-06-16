@@ -218,6 +218,10 @@ gateway, and run the doctor:
 scripts/update.sh
 ```
 
+On macOS the updater prefers `/usr/bin/git` to avoid Homebrew Git/libcurl
+linkage issues seen on fresh Intel Macs. If you need a different Git binary,
+run with `GLADOS_GIT=/path/to/git scripts/update.sh`.
+
 Flags:
 
 - `--dry-run` — show the incoming commits and what would change, then exit (no changes).
