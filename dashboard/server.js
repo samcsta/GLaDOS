@@ -112,6 +112,12 @@ function finishChatTurn(agentId, turnId) {
   broadcastLobby('chat-turn-ended', { agentId, turnId });
 }
 
+function finishActiveChatTurn(agentId) {
+  const current = activeChatTurns.get(agentId);
+  if (!current) return;
+  finishChatTurn(agentId, current.turnId);
+}
+
 function transcriptEvent(agentId, kind, text, extra = {}) {
   const ev = {
     agentId,
@@ -660,6 +666,9 @@ function candidateRawStreamAgent() {
 watcher.on('event', ev => {
   pushBuffer(ev.agentId, ev);
   broadcastTranscript(ev.agentId, ev);
+  if (ev.kind === 'assistant-text' || ev.kind === 'prompt-error') {
+    finishActiveChatTurn(ev.agentId);
+  }
 });
 watcher.on('session-started', info => {
   broadcastLobby('session-started', info);

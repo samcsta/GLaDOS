@@ -249,6 +249,7 @@ function ensureTranscript(tabId, agentId) {
 	    turnStartedAt: null,
 	    turnAgeMs: null,
 	    firstTokenSeenAt: null,
+	    completedAt: null,
 	  };
   state.transcripts.set(tabId, rec);
   const es = new EventSource(`/api/agents/${encodeURIComponent(agentId)}/transcript`);
@@ -273,6 +274,10 @@ function ensureTranscript(tabId, agentId) {
       const matchKind = ev.kind === 'thinking' ? 'thinking' : 'text';
       if (wasRecentlyStreamed(rec, matchKind, ev.text)) {
         reconcileStreamedEvent(rec, ev);
+        if (ev.kind === 'assistant-text' && rec.sending) {
+          rec.firstTokenSeenAt ||= Date.now();
+          finishTranscriptTurn(rec, tabId);
+        }
         return;
       }
     }
@@ -326,8 +331,20 @@ function stripSessionTimestampPrefix(value) {
   );
 }
 
+function stripOpenClawControlTags(value) {
+  return String(value || '')
+    .replace(/\[\[\s*\/?reply_to_current\s*\]\]\s*/gi, '')
+    .replace(/\[\s*\/?reply_to_current\s*\]\s*/gi, '')
+    .replace(/\[\[?\s*\/?reply_to_current\b\s*/gi, '')
+    .replace(/\b\/?reply_to_current\]?\]?\s*/gi, '');
+}
+
+function displayTranscriptText(value) {
+  return stripOpenClawControlTags(value);
+}
+
 function normalizeTranscriptText(value) {
-  return stripSessionTimestampPrefix(value)
+  return stripOpenClawControlTags(stripSessionTimestampPrefix(value))
     .replace(/\r\n/g, '\n')
     .replace(/[ \t]+$/gm, '')
     .trim();
@@ -461,6 +478,7 @@ function finishTranscriptTurn(rec, tabId) {
   rec.activity = null;
   rec.lastActivityTs = Date.now();
   rec.turnAgeMs = null;
+  rec.completedAt = Date.now();
   updateSendingIndicator(tabId);
 }
 
@@ -528,6 +546,7 @@ async function refreshChatTurnStatus(tabId, agentId) {
     if (!r.ok) return;
     const status = await r.json();
     if (status.active) {
+      if (rec.completedAt && status.startedAt && status.startedAt <= rec.completedAt) return;
       rec.turnStartedAt = status.startedAt || rec.turnStartedAt || Date.now();
       rec.turnAgeMs = status.ageMs;
       if (!rec.sending) {
@@ -564,7 +583,8 @@ function handleStreamDelta(rec, ev) {
   const isStart = ev.evtType === 'thinking_start' || ev.evtType === 'text_start';
   const isEnd = ev.evtType === 'thinking_end' || ev.evtType === 'text_end';
   let entry = rec.streamEntries.get(streamKey);
-  const nextContent = ev.content || `${entry?.content || ''}${ev.delta || ''}`;
+  const nextRawContent = ev.content || `${entry?.rawContent || entry?.content || ''}${ev.delta || ''}`;
+  const nextContent = displayTranscriptText(nextRawContent);
   const meaningfulThinking = normalizeTranscriptText(nextContent).length >= 80;
 
   // Raw thinking can arrive as one-token scratch fragments, especially when the
@@ -573,6 +593,7 @@ function handleStreamDelta(rec, ev) {
   // bubble once it becomes a real paragraph.
   if (isThinking && !meaningfulThinking) {
     if (entry) {
+      entry.rawContent = nextRawContent;
       entry.content = nextContent;
       if (entry.textNode) entry.textNode.data = nextContent;
       if (isEnd) {
@@ -580,7 +601,7 @@ function handleStreamDelta(rec, ev) {
         rec.streamEntries.delete(streamKey);
       }
     } else if (!isEnd) {
-      rec.streamEntries.set(streamKey, { el: null, textNode: null, content: nextContent });
+      rec.streamEntries.set(streamKey, { el: null, textNode: null, rawContent: nextRawContent, content: nextContent });
     }
     return;
   }
@@ -599,7 +620,7 @@ function handleStreamDelta(rec, ev) {
     // Insert text before the cursor span so the cursor always trails.
     el.insertBefore(textNode, el.querySelector('.stream-cursor'));
     rec.el.appendChild(el);
-    entry = { el, textNode, content: '' };
+    entry = { el, textNode, rawContent: '', content: '' };
     rec.streamEntries.set(streamKey, entry);
   } else if (!entry.el && isThinking && meaningfulThinking) {
     const el = document.createElement('div');
@@ -619,10 +640,12 @@ function handleStreamDelta(rec, ev) {
   // Prefer `content` when present (full accumulated) — avoids drift if we
   // missed a delta. Fall back to appending `delta`.
   if (ev.content) {
-    entry.content = ev.content;
-    if (entry.textNode) entry.textNode.data = ev.content;
+    entry.rawContent = ev.content;
+    entry.content = displayTranscriptText(entry.rawContent);
+    if (entry.textNode) entry.textNode.data = entry.content;
   } else if (ev.delta) {
-    entry.content += ev.delta;
+    entry.rawContent = `${entry.rawContent || entry.content || ''}${ev.delta}`;
+    entry.content = displayTranscriptText(entry.rawContent);
     if (entry.textNode) entry.textNode.data = entry.content;
   }
 
@@ -892,6 +915,7 @@ function renderChatPane() {
     rec.turnStartedAt = Date.now();
     rec.turnAgeMs = 0;
     rec.firstTokenSeenAt = null;
+    rec.completedAt = null;
     updateSendingIndicator(tabId);
 
     // Fire-and-forget. The assistant's response streams back via SSE as soon
@@ -1126,6 +1150,7 @@ function renderChatBotPane() {
     rec.turnStartedAt = Date.now();
     rec.turnAgeMs = 0;
     rec.firstTokenSeenAt = null;
+    rec.completedAt = null;
     updateChatBotSendingIndicator();
 
     fetch('/api/chat/atlas', {
@@ -1268,10 +1293,11 @@ function appendEntry(container, ev, rec) {
 
   if (kind === 'assistant-text') {
     // v3.1: markdown for assistant output (bold, code, links, lists, headers).
-    el.innerHTML = `<span class="ts">${ts}</span>${renderMarkdown(ev.text || '')}`;
+    el.innerHTML = `<span class="ts">${ts}</span>${renderMarkdown(displayTranscriptText(ev.text || ''))}`;
     enhanceMarkdownContent(el);
   } else if (kind === 'thinking' || kind === 'user-message') {
-    el.innerHTML = `<span class="ts">${ts}</span>${renderCollapsible(ev.text || '')}`;
+    const displayText = kind === 'thinking' ? displayTranscriptText(ev.text || '') : (ev.text || '');
+    el.innerHTML = `<span class="ts">${ts}</span>${renderCollapsible(displayText)}`;
     if (kind === 'user-message') {
       el.dataset.messageText = ev.text || '';
       if (ev.clientId) el.dataset.clientId = ev.clientId;
@@ -1529,6 +1555,7 @@ function subscribeLobby() {
       rec.activity = rec.activity || 'waiting';
       rec.turnStartedAt = data.startedAt || rec.turnStartedAt || Date.now();
       rec.turnAgeMs = null;
+      rec.completedAt = null;
       updateSendingIndicator(tabId);
     }
     logEvent('started', `${data.agentId || 'agent'} turn started`);
