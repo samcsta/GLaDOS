@@ -547,8 +547,7 @@ body.debug-off .entry.tool-result.error { display: block; }
 .settings-version { display: flex; align-items: center; gap: 8px; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 10px 0 12px; }
 .settings-version-label { color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
 .settings-version code { color: var(--accent-hi); font-size: 13px; }
-.settings-version-meta { color: var(--fg-dim); }
-.settings-version-warn { color: var(--warn); margin-left: auto; }
+.settings-version-hint { color: var(--warn); margin-left: auto; }
 .agent-card { background: var(--bg-alt); border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-bottom: 12px; }
 .agent-card-head { display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
 .agent-card-head .title { font-weight: 600; color: var(--fg); font-size: 14px; }

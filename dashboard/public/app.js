@@ -2999,18 +2999,12 @@ function renderSettingsVersion(info) {
   const el = document.getElementById('settings-version');
   if (!el) return;
   if (!info || info.error) {
-    el.innerHTML = `<span class="settings-version-label">GLaDOS Version</span><code>unknown</code>`;
+    el.innerHTML = `<span class="settings-version-label">GLaDOS Version</span><code>unknown</code><span class="settings-version-hint">restart dashboard after update</span>`;
     return;
   }
-  const bits = [];
-  if (info.major) bits.push(`major ${escapeHtml(info.major)}`);
-  if (info.isoDate) bits.push(escapeHtml(info.isoDate));
-  if (Number.isFinite(info.sequence)) bits.push(`update ${info.sequence}`);
   el.innerHTML = `
     <span class="settings-version-label">GLaDOS Version</span>
-    <code>${escapeHtml(info.version || 'unknown')}</code>
-    ${bits.length ? `<span class="settings-version-meta">${bits.join(' · ')}</span>` : ''}
-    ${info.valid === false ? '<span class="settings-version-warn">invalid format</span>' : ''}`;
+    <code>${escapeHtml(info.version || 'unknown')}</code>`;
 }
 
 async function hydrateAgentCard(agentId, body, models) {
