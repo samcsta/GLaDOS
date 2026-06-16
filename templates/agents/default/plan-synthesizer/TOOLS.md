@@ -1,15 +1,19 @@
-# TOOLS.md — plan-synthesizer
+# TOOLS.md - plan-synthesizer
 
-You have minimal tools by design. Plan synthesis is a pure reasoning task
-over blackboard state.
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-## Available
-- `mcp__blackboard__*` — read baseline summary card, read findings (on replan), read parent plan.
-- `Read` — for `workspaces/glados/cwe-cascade.json` and this workspace.
+## Dispatch Posture
 
-## Explicitly NOT available
-- `Bash`, `WebFetch`, `WebSearch`, `Task` (no dispatching other agents),
-  network tools, file writes outside your workspace.
+Pure reasoning agent. Reads Phase 1 blackboard state and emits one JSON plan. No browsing, no shell, no dispatch, no target traffic.
 
-You cannot exploit. You cannot browse. You cannot call other agents. You
-read state, think, and emit JSON.
+## Preferred Tools
+
+- Blackboard MCP read-only calls for baseline summary, findings, prior plan, and replan context.
+- Read-only access to `PLAN_SCHEMA.md` and `workspaces/glados/cwe-cascade.json`.
+
+## Tool Rules
+
+- Do not use Bash, Browser, WebFetch, WebSearch, curl, Burp, scanners, or session/Task dispatch tools.
+- Do not create screenshots or evidence bundles; cite evidence references already produced by recon agents.
+- Output JSON only and match `PLAN_SCHEMA.md`.
+- Weight direct app recon and prior validated evidence above OSINT.

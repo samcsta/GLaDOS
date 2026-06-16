@@ -34,6 +34,7 @@
     "name": "atlas",
     "model": "ollama-local/glm-4.7-flash:latest",
     "enabled": true,
+    "subagent": false,
     "identity": {
       "name": "Atlas",
       "theme": "Sam personal assistant — not part of GLaDOS",
@@ -44,19 +45,20 @@
     "id": "c2-builder",
     "name": "c2-builder",
     "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "c2-validator",
     "name": "c2-validator",
     "model": "ollama-local/glm-4.7-flash:latest",
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "cloud-exposure",
     "name": "cloud-exposure",
     "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
-    "enabled": true
+    "enabled": true,
+    "dispatch": "conditional"
   },
   {
     "id": "evidence-curator",
@@ -79,19 +81,22 @@
     "id": "graphql-specialist",
     "name": "graphql-specialist",
     "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
-    "enabled": true
+    "enabled": true,
+    "dispatch": "conditional"
   },
   {
     "id": "js-reverser",
     "name": "js-reverser",
     "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
-    "enabled": true
+    "enabled": true,
+    "dispatch": "conditional"
   },
   {
     "id": "mobile-api-recon",
     "name": "mobile-api-recon",
     "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
-    "enabled": true
+    "enabled": true,
+    "dispatch": "conditional"
   },
   {
     "id": "net-recon",
@@ -103,7 +108,8 @@
     "id": "origin-ip",
     "name": "origin-ip",
     "model": "ollama-local/glm-4.7-flash:latest",
-    "enabled": true
+    "enabled": true,
+    "dispatch": "conditional"
   },
   {
     "id": "osint",
@@ -115,13 +121,13 @@
     "id": "phish-validator",
     "name": "phish-validator",
     "model": "ollama-local/glm-4.7-flash:latest",
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "phisherman",
     "name": "phisherman",
     "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "plan-synthesizer",
@@ -150,13 +156,13 @@
     "id": "postex",
     "name": "postex",
     "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "postex-validator",
     "name": "postex-validator",
     "model": "ollama-local/glm-4.7-flash:latest",
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "report-validator",

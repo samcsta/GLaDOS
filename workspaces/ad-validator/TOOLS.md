@@ -1,40 +1,25 @@
-# TOOLS.md - Local Notes
+# TOOLS.md - ad-validator
 
-Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup.
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-## What Goes Here
+## Dispatch Posture
 
-Things like:
+Independent validator for AD paths. Confirms edges and preconditions without expanding access.
 
-- Camera names and locations
-- SSH hosts and aliases
-- Preferred voices for TTS
-- Speaker/room names
-- Device nicknames
-- Anything environment-specific
+## Preferred Tools
 
-## Examples
+- Watchdog MCP (`target_health`, `circuit_status`, `plan_check_dispatch`) for health and phase gates.
+- glados-ops MCP (`scope_guard_check`) before target-touching actions and when scope is ambiguous.
+- Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
+- BloodHound graph data, LDAP/Kerberos read-only checks, and ADCS template evidence when approved.
 
-```markdown
-### Cameras
+## Tool Rules
 
-- living-room → Main area, 180° wide angle
-- front-door → Entrance, motion-triggered
+- Validate source principal, target object, right, inheritance, and exploit preconditions edge by edge.
+- Do not execute offensive AD actions unless separately approved.
+- Reject graph-only claims without practical/current supporting evidence.
+- Account for tiering, Protected Users, delegation, ADCS, and stale data.
 
-### SSH
+## Evidence Handling
 
-- home-server → 192.168.1.100, user: admin
-
-### TTS
-
-- Preferred voice: "Nova" (warm, slightly British)
-- Default speaker: Kitchen HomePod
-```
-
-## Why Separate?
-
-Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.
-
----
-
-Add whatever helps you do your job. This is your cheat sheet.
+- Return edge validation matrix, confidence_score, blockers, and safe next-step recommendation.

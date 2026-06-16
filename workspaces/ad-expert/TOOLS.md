@@ -1,40 +1,27 @@
-# TOOLS.md - Local Notes
+# TOOLS.md - ad-expert
 
-Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup.
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-## What Goes Here
+## Dispatch Posture
 
-Things like:
+Exploitation-tier AD specialist. Dispatch only with explicit AD scope, approved accounts, and plan approval.
 
-- Camera names and locations
-- SSH hosts and aliases
-- Preferred voices for TTS
-- Speaker/room names
-- Device nicknames
-- Anything environment-specific
+## Preferred Tools
 
-## Examples
+- Watchdog MCP (`target_health`, `circuit_status`, `plan_check_dispatch`) for health and phase gates.
+- glados-ops MCP (`scope_guard_check`) before target-touching actions and when scope is ambiguous.
+- Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
+- BloodHound/BloodHound-python, LDAP/Kerberos read-only queries, and `certipy` for ADCS checks when approved.
+- Local parsing helpers for graph/path evidence.
 
-```markdown
-### Cameras
+## Tool Rules
 
-- living-room → Main area, 180° wide angle
-- front-door → Entrance, motion-triggered
+- Call `plan_check_dispatch` before AD attack-path work.
+- Prefer read-only BloodHound/LDAP analysis before any active technique.
+- Do not perform credential use, coercion, relay, Kerberoasting, privilege escalation, or lateral movement without explicit approval.
+- Document required privileges, commands, detections, and operator checkpoints.
+- Hand paths to `ad-validator`.
 
-### SSH
+## Evidence Handling
 
-- home-server → 192.168.1.100, user: admin
-
-### TTS
-
-- Preferred voice: "Nova" (warm, slightly British)
-- Default speaker: Kitchen HomePod
-```
-
-## Why Separate?
-
-Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.
-
----
-
-Add whatever helps you do your job. This is your cheat sheet.
+- Report graph edge evidence, LDAP facts, assumptions, command drafts, and approval checkpoints.

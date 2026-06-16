@@ -169,22 +169,6 @@ function openAbout() {
   setCurrentTab(id);
 }
 
-function openGettingStarted(anchor) {
-  const id = 'getting-started';
-  if (!state.openTabs.find(t => t.id === id)) state.openTabs.push({ id, kind: 'getting-started', label: 'Getting Started' });
-  setCurrentTab(id);
-  if (anchor) {
-    // Defer one frame so the pane has rendered before we scrollIntoView.
-    requestAnimationFrame(() => {
-      const target = document.getElementById(anchor);
-      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      if (anchor === 'troubleshooting' || anchor === 'install' || anchor === 'engagement') {
-        try { history.replaceState(null, '', `#${anchor}`); } catch {}
-      }
-    });
-  }
-}
-
 function openTerminal() {
   const id = 'terminal';
   if (!state.openTabs.find(t => t.id === id)) state.openTabs.push({ id, kind: 'terminal', label: 'Terminal' });
@@ -217,7 +201,6 @@ function renderPane() {
   else if (tab.kind === 'reports') renderReportsPane();
   else if (tab.kind === 'settings') renderSettingsPane();
   else if (tab.kind === 'about') renderAboutPane();
-  else if (tab.kind === 'getting-started') renderGettingStartedPane();
   else if (tab.kind === 'terminal') renderTerminalPane();
   else if (tab.kind === 'proxy') renderProxyPane();
   else renderAgentPane(id);
@@ -2603,292 +2586,9 @@ function toCurl(r) {
   return `curl -sS${flags} '${(r.url || '').replace(/'/g, `'\\''`)}'`;
 }
 
-// --- Getting Started ---
-// Operator-facing setup + day-to-day checklists. Moved here from About so the
-// About tab can stay focused on what the system IS rather than how to run it.
-
-function renderGettingStartedPane() {
-  const wrap = document.createElement('div');
-  wrap.className = 'about-pane getting-started-pane';
-  wrap.innerHTML = `
-    <div class="about-checklist">
-      <h1>Getting Started <span class="gs-progress" id="gs-progress">0 / 0 done</span></h1>
-      <p style="color:var(--fg-dim);">Three phases: local bootstrap, start-of-engagement checklist,
-        and what to do when something gets wedged. GLaDOS code comes from Git, but every operator's
-        agents, reports, evidence, sessions, blackboard, and keys live locally under <code>~/.glados</code>
-        and <code>~/.openclaw</code>.</p>
-      <div class="gs-actions">
-        <button id="gs-run-all-validations">Run all validations</button>
-        <button id="gs-reset-progress" title="Clear checklist progress">Reset progress</button>
-        <a href="#troubleshooting" class="gs-jump" id="gs-jump-trouble">jump to troubleshooting ↓</a>
-      </div>
-
-      <h2 id="install">1 — One-time install</h2>
-      <ol class="gs-checklist" data-section="install">
-        <li data-step="install-1.1"><b>Clone GLaDOS</b> anywhere on the workstation. The repo is app code and upstream seed templates; runtime data is local-only.</li>
-        <li data-step="install-1.2"><b>Create local config</b>: copy <code>.env.example</code> to <code>.env</code> and add this operator's own LLM API key. Do not share <code>.env</code>.</li>
-        <li data-step="install-1.3"><b>Run bootstrap</b> from the repo root:
-          <pre>scripts/bootstrap-macos.sh</pre>
-          This installs deps, creates <code>~/.glados</code>, copies default agent seeds once into <code>~/.glados/workspaces/agents</code>, creates local DBs, and points OpenClaw at the user-owned agent copies.</li>
-        <li data-step="install-1.4" data-validate="burp-ca"><b>Install Burp Pro</b>. Trust Burp's CA once — from Burp: Proxy → Proxy settings →
-          Import / export CA certificate → <i>Certificate in DER format</i> → save as
-          <code>~/Desktop/burp-ca.der</code>. Then in Terminal:
-          <pre>sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/Desktop/burp-ca.der</pre>
-          Without this, every HTTPS request from an agent fails cert verification.</li>
-        <li data-step="install-1.5" data-validate="burp-rest"><b>Enable Burp REST API</b>: Settings → Suite → REST API → enabled at
-          <code>127.0.0.1:1337</code> → "Allow access without API key (loopback)".
-          Persists across temp projects.</li>
-        <li data-step="install-1.6" data-validate="burp-ext"><b>Build + install the GLaDOS Burp extension</b> — Burp's built-in REST doesn't
-          expose proxy history, so the dashboard Proxy tab and circuit breaker rely on this:
-          <pre>cd tools/burp-ext-glados-proxy-api
-./gradlew shadowJar</pre>
-          In Burp: Extensions → Installed → <b>Add</b> → Extension type: Java →
-          select <code>build/libs/glados-proxy-api-1.0.0-all.jar</code>. Output tab should
-          print <code>[glados-proxy-api] listening on http://127.0.0.1:1338</code>.
-          Verify with the <b>Validate</b> button or the <a href="#" data-open-tab="proxy">Proxy tab</a>.</li>
-        <li data-step="install-1.7" data-validate="watchdog-mcp"><b>Confirm MCP registration</b> (bootstrap writes this into <code>~/.openclaw/openclaw.json</code>):
-          <pre>openclaw mcp list</pre>
-          should include <code>watchdog</code>, <code>blackboard</code>, and <code>glados-ops</code>.</li>
-        <li data-step="install-1.8" data-validate="patches"><b>Apply the openclaw bundle patch</b> for per-agent Burp tagging:
-          <pre>bash tools/patch-openclaw-bundle.sh</pre>
-          This wraps openclaw's tool executor in AsyncLocalStorage so every red-team agent's
-          outbound HTTP request carries <code>X-GLaDOS-Agent: &lt;agent-id&gt;</code> — Burp's GLaDOS
-          extension reads that header to attribute history per-agent. Re-run this after every
-          <code>npm install -g openclaw</code> upgrade.</li>
-        <li data-step="install-1.9"><b>Run doctor</b>:
-          <pre>scripts/glados-doctor.sh</pre>
-          Doctor confirms local runtime paths are outside the repo and OpenClaw agents point at <code>~/.glados/workspaces/agents</code>.</li>
-      </ol>
-
-      <h2 id="engagement">2 — Start-of-engagement checklist</h2>
-      <ol class="gs-checklist" data-section="engagement">
-        <li data-step="eng-2.1" data-validate="burp-proxy"><b>Launch Burp Pro</b>. Temp project is fine. Proxy defaults to <code>:8080</code>.
-          Confirm <b>Proxy → Intercept</b> is <i>off</i> — otherwise agents block waiting
-          for you to click Forward.</li>
-        <li data-step="eng-2.2" data-validate="burp-ext"><b>Confirm the GLaDOS extension is loaded</b>: Extensions → Installed → check
-          <code>GLaDOS Proxy API</code> has no errors.</li>
-        <li data-step="eng-2.3"><b>Apply the resource pool</b> from <code>tools/burp-redteam-defaults.json</code>:
-          Settings → Project → Resource pools → Import. 3 concurrent per host, 500ms min interval.</li>
-        <li data-step="eng-2.4" data-validate="gateway"><b>Confirm gateway is running</b>: <code>openclaw daemon status</code> should report
-          <code>running</code>. If not, click <b>Restart gateway</b> in the top bar.</li>
-        <li data-step="eng-2.5" data-validate="tag-injector"><b>Verify tag-injector health sentinel</b> — confirms the gateway preload is active and Burp is reachable from inside the agent runtime.</li>
-        <li data-step="eng-2.6" data-validate="dashboard"><b>Start the dashboard</b>: <code>cd dashboard &amp;&amp; npm start</code>,
-          then open <a href="http://localhost:4280" target="_blank" rel="noopener">http://localhost:4280</a>.</li>
-        <li data-step="eng-2.7"><b>Proxy sanity check</b>: open the <a href="#" data-open-tab="proxy">Proxy tab</a>. Run
-          <code>curl -x http://127.0.0.1:8080 https://example.com &gt; /dev/null</code>
-          in the <a href="#" data-open-tab="terminal">Terminal</a> — the request should appear in both the dashboard Proxy tab
-          and Burp's Proxy → HTTP history within 1–2 seconds.</li>
-        <li data-step="eng-2.8"><b>Chat with GLaDOS</b>: open the <a href="#" data-open-tab="glados">GLaDOS chat</a> and send a message. Watch
-          thinking / tool calls / tool results stream in live.</li>
-        <li data-step="eng-2.9"><b>Customize local agents as needed</b>: edit <code>~/.glados/workspaces/agents/&lt;agent-id&gt;/</code>. Updates report upstream seed changes, but never overwrite local edits, deletions, custom agents, reports, evidence, or sessions.</li>
-      </ol>
-
-      <h2 id="troubleshooting">3 — If something gets wedged</h2>
-      <div class="gs-symptom-picker">
-        <label>I see…
-          <select id="gs-symptom">
-            <option value="">(pick a symptom)</option>
-            <option value="agent-stalled">Agent stopped responding</option>
-            <option value="no-agents">Dashboard shows no agents / SSE dead</option>
-            <option value="rps-dash">Burp RPS stuck at —</option>
-            <option value="none-tag">Burp history shows (none) instead of agent tag</option>
-            <option value="proxy-1338">Proxy tab: "No connection to Burp extension at :1338"</option>
-            <option value="cert-err">HTTPS requests failing with cert errors</option>
-            <option value="halt-stuck">HALT ALL doesn't stop in-flight browser tool call</option>
-            <option value="wedged">Completely wedged</option>
-          </select>
-        </label>
-      </div>
-      <ol class="gs-checklist gs-trouble" data-section="trouble">
-        <li data-step="t-agent-stalled" data-symptom="agent-stalled"><b>Agent stops responding</b>: click <b>Reset session</b> in the top bar —
-          archives the current JSONL and starts a fresh session on the next turn. If that
-          doesn't help, click <b>Restart gateway</b>.</li>
-        <li data-step="t-gw-hang" data-symptom="agent-stalled"><b>Restart gateway hangs or agents never reconnect</b>:
-          <pre>openclaw daemon stop
-openclaw daemon start
-openclaw daemon status</pre>
-          If <code>status</code> still says not running, kill stale processes:
-          <code>pkill -f "openclaw gateway"</code>, then start again.</li>
-        <li data-step="t-no-agents" data-symptom="no-agents"><b>Dashboard shows no agents / SSE dead</b> after a gateway restart: reload the
-          browser tab. The SSE connection is per-page; a gateway bounce doesn't invalidate
-          it, but a fs.watch reset can.</li>
-        <li data-step="t-rps-dash" data-symptom="rps-dash" data-validate="burp-ext"><b>Burp RPS stuck at <code>—</code></b>: the GLaDOS Burp extension isn't running.
-          If <code>:1338</code> returns JSON but RPS still reads <code>—</code>, no traffic has
-          hit Burp yet — run <code>curl -x http://127.0.0.1:8080 https://example.com</code>
-          to confirm proxying works.</li>
-        <li data-step="t-none-tag" data-symptom="none-tag" data-validate="patches"><b>Burp history shows agent traffic as <code>(none)</code></b>: the openclaw bundle patch has been overwritten (usually by <code>npm install -g openclaw</code>).
-          Re-run <code>bash tools/patch-openclaw-bundle.sh</code>, then
-          <b>Restart gateway</b>.</li>
-        <li data-step="t-1338" data-symptom="proxy-1338" data-validate="burp-ext"><b>Proxy tab shows "No connection to Burp extension at :1338"</b>: install/rebuild
-          the extension per <a href="#install">step 1.6</a>.</li>
-        <li data-step="t-cert" data-symptom="cert-err" data-validate="burp-ca"><b>HTTPS requests failing with cert errors</b>: Burp CA is not trusted on this
-          machine. Redo <a href="#install">step 1.4</a>.</li>
-        <li data-step="t-halt" data-symptom="halt-stuck"><b>HALT ALL doesn't stop an in-flight browser tool call</b>: expected. OpenClaw
-          has no <code>sessions_interrupt</code>. The kill switch fires within one turn
-          (next tool call is denied). Close the Chromium tab manually if you need it gone now.</li>
-        <li data-step="t-wedged" data-symptom="wedged"><b>Completely wedged</b>: <code>openclaw daemon restart</code> + reload the
-          dashboard tab. Burp keeps its history, blackboard keeps its findings — nothing
-          is lost.</li>
-        <li data-step="t-update"><b>Updating GLaDOS</b>: run <code>git pull</code>, then
-          <code>scripts/update-macos.sh</code>, then <code>scripts/glados-doctor.sh</code>.
-          Upstream agent template changes are shown as optional updates in <code>~/.glados/upstream-agent-status.json</code>.</li>
-      </ol>
-    </div>`;
-  paneEl.appendChild(wrap);
-  hydrateGettingStarted(wrap);
-}
-
-// v3.1 Tier 2 — Getting Started interactive checklist hydration.
-// Adds: per-step checkboxes (persisted), Validate buttons wired to /api/validate/*,
-// copy buttons on <pre>, cross-link data-open-tab handlers, symptom-keyed dropdown.
-function hydrateGettingStarted(wrap) {
-  const storeKey = 'glados-dash.gs.checked-v1';
-  const loadChecked = () => { try { return JSON.parse(localStorage.getItem(storeKey) || '{}'); } catch { return {}; } };
-  const saveChecked = (obj) => { try { localStorage.setItem(storeKey, JSON.stringify(obj)); } catch {} };
-  const checked = loadChecked();
-
-  const allSteps = wrap.querySelectorAll('li[data-step]');
-  const progressEl = wrap.querySelector('#gs-progress');
-  const updateProgress = () => {
-    const total = allSteps.length;
-    let done = 0;
-    for (const li of allSteps) if (li.classList.contains('done')) done++;
-    if (progressEl) progressEl.textContent = `${done} / ${total} done`;
-  };
-
-  for (const li of allSteps) {
-    const step = li.dataset.step;
-    const row = document.createElement('span');
-    row.className = 'gs-step-row';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.className = 'gs-check';
-    cb.checked = !!checked[step];
-    if (cb.checked) li.classList.add('done');
-    cb.addEventListener('change', () => {
-      li.classList.toggle('done', cb.checked);
-      const map = loadChecked();
-      if (cb.checked) map[step] = Date.now(); else delete map[step];
-      saveChecked(map);
-      updateProgress();
-    });
-    row.appendChild(cb);
-    li.prepend(row);
-
-    if (li.dataset.validate) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'gs-validate-btn';
-      btn.textContent = 'Validate';
-      btn.dataset.validate = li.dataset.validate;
-      const result = document.createElement('span');
-      result.className = 'gs-validate-result';
-      btn.addEventListener('click', () => runValidate(btn, result));
-      li.appendChild(document.createTextNode(' '));
-      li.appendChild(btn);
-      li.appendChild(result);
-    }
-  }
-
-  // Copy buttons on <pre> blocks.
-  for (const pre of wrap.querySelectorAll('pre')) {
-    if (pre.querySelector('.gs-copy-btn')) continue;
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'gs-copy-btn';
-    btn.textContent = 'copy';
-    btn.addEventListener('click', () => {
-      navigator.clipboard?.writeText(pre.textContent || '').then(
-        () => { btn.textContent = '✓ copied'; setTimeout(() => { btn.textContent = 'copy'; }, 1200); },
-        () => { btn.textContent = '✗ failed'; setTimeout(() => { btn.textContent = 'copy'; }, 1200); }
-      );
-    });
-    pre.style.position = 'relative';
-    pre.appendChild(btn);
-  }
-
-  // Cross-links: data-open-tab="proxy|terminal|glados|chatbot|reports".
-  for (const a of wrap.querySelectorAll('a[data-open-tab]')) {
-    a.addEventListener('click', ev => {
-      ev.preventDefault();
-      const tab = a.dataset.openTab;
-      if (tab === 'proxy') openProxy();
-      else if (tab === 'terminal') openTerminal();
-      else if (tab === 'glados') openGladosChat();
-      else if (tab === 'chatbot') openChatBot();
-      else if (tab === 'reports') openReports();
-    });
-  }
-
-  // Symptom-keyed filter: dims rows that don't match, scrolls to first match.
-  const symptomSel = wrap.querySelector('#gs-symptom');
-  const troubleUl  = wrap.querySelector('ol.gs-trouble');
-  if (symptomSel && troubleUl) {
-    symptomSel.addEventListener('change', () => {
-      const s = symptomSel.value;
-      let first = null;
-      for (const li of troubleUl.querySelectorAll('li[data-symptom]')) {
-        const match = !s || li.dataset.symptom === s;
-        li.classList.toggle('gs-dim', !match);
-        if (match && !first) first = li;
-      }
-      if (first && s) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    });
-  }
-
-  // Top-level action buttons.
-  wrap.querySelector('#gs-run-all-validations').addEventListener('click', async () => {
-    const btns = wrap.querySelectorAll('.gs-validate-btn');
-    for (const btn of btns) {
-      const result = btn.nextSibling?.classList?.contains('gs-validate-result') ? btn.nextSibling : btn.parentElement.querySelector('.gs-validate-result');
-      await runValidate(btn, result);
-    }
-  });
-  wrap.querySelector('#gs-reset-progress').addEventListener('click', () => {
-    if (!confirm('Reset all checklist progress?')) return;
-    saveChecked({});
-    for (const li of allSteps) li.classList.remove('done');
-    for (const cb of wrap.querySelectorAll('.gs-check')) cb.checked = false;
-    updateProgress();
-  });
-
-  updateProgress();
-
-  // Honor URL hash (#install, #engagement, #troubleshooting) on initial render.
-  const hash = location.hash?.slice(1);
-  if (hash) {
-    const anchor = wrap.querySelector('#' + CSS.escape(hash));
-    anchor?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }
-}
-
-async function runValidate(btn, resultEl) {
-  const step = btn.dataset.validate;
-  btn.disabled = true;
-  resultEl.textContent = ' · checking…';
-  resultEl.className = 'gs-validate-result checking';
-  try {
-    const r = await fetch('/api/validate/' + encodeURIComponent(step));
-    const data = await r.json();
-    resultEl.className = 'gs-validate-result ' + (data.ok ? 'ok' : 'fail');
-    resultEl.textContent = (data.ok ? ' ✓ ' : ' ✗ ') + (data.detail || '');
-    if (!data.ok && data.hint) {
-      const hint = document.createElement('span');
-      hint.className = 'gs-validate-hint';
-      hint.textContent = ' · hint: ' + data.hint;
-      resultEl.appendChild(hint);
-    }
-  } catch (e) {
-    resultEl.className = 'gs-validate-result fail';
-    resultEl.textContent = ' ✗ ' + e.message;
-  } finally {
-    btn.disabled = false;
-  }
-}
-
 // --- About ---
 // What GLaDOS is, how the pieces fit, and the "you need to know this" operator
-// notes. Day-to-day setup and troubleshooting live in Getting Started.
+// notes. Day-to-day agent controls now live in Settings.
 
 function renderAboutPane() {
   const wrap = document.createElement('div');
@@ -2956,25 +2656,41 @@ async function renderSettingsPane() {
   wrap.innerHTML = `
     <h1>Agent Settings</h1>
     <div id="settings-version" class="settings-version">Version loading…</div>
-    <p style="color:var(--fg-dim);">Click an agent to expand. Model changes are saved to durable GLaDOS overrides and patched into <code>~/.openclaw/openclaw.json</code> atomically with a backup.</p>
+    <p style="color:var(--fg-dim);">Click an agent to expand. Enable/disable changes update the local agent workspace and regenerate <code>~/.openclaw/openclaw.json</code>; restart the gateway when prompted.</p>
     <div id="settings-list">loading…</div>`;
   paneEl.appendChild(wrap);
 
   try {
-    const [versionInfo, modelsResp] = await Promise.all([
+    const [versionInfo, modelsResp, settingsResp] = await Promise.all([
       fetch('/api/version').then(r => r.json()).catch(e => ({ error: e.message })),
       fetch('/api/models').then(r => r.json()),
+      fetch('/api/settings/agents').then(r => r.json()),
     ]);
     renderSettingsVersion(versionInfo);
     const models = modelsResp.models || [];
+    const settingsAgents = settingsResp.agents || [];
     const listEl = document.getElementById('settings-list');
     listEl.innerHTML = '';
-    for (const agent of state.agents) {
+    if (!settingsAgents.length) {
+      listEl.innerHTML = '<div style="color:var(--fg-dim);">no agents found</div>';
+      return;
+    }
+    for (const agent of settingsAgents) {
       const card = document.createElement('div');
-      card.className = 'agent-card';
+      card.className = `agent-card ${agent.enabled ? '' : 'disabled-agent'}`;
+      card.dataset.agentId = agent.id;
+      const badges = [
+        agent.enabled ? '<span class="agent-badge enabled">enabled</span>' : '<span class="agent-badge disabled">disabled</span>',
+        agent.registered
+          ? '<span class="agent-badge registered">registered</span>'
+          : (agent.enabled ? '<span class="agent-badge pending">pending restart</span>' : '<span class="agent-badge pending">not loaded</span>'),
+        agent.dispatch === 'conditional' ? '<span class="agent-badge conditional">conditional</span>' : '',
+        agent.subagent === false ? '<span class="agent-badge separate">not subagent</span>' : '',
+      ].filter(Boolean).join('');
       card.innerHTML = `
         <div class="agent-card-head">
           <span class="title">${escapeHtml(agent.id)}</span>
+          <span class="agent-card-badges">${badges}</span>
           <span class="caret">▸</span>
         </div>
         <div class="agent-card-body" data-loaded="false">
@@ -3011,15 +2727,29 @@ async function hydrateAgentCard(agentId, body, models) {
   try {
     const d = await fetch(`/api/agents/${encodeURIComponent(agentId)}/details`).then(r => r.json());
     if (d.error) { body.textContent = 'error: ' + d.error; return; }
-    const modelOpts = models.map(m => `<option${m === d.model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('');
+    const modelChoices = [...new Set([d.model, ...(models || [])].filter(Boolean))];
+    const modelOpts = modelChoices.map(m => `<option${m === d.model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('');
     const skills = (d.skills || []).map(s =>
       `<div class="skill"><strong>${escapeHtml(s.name)}</strong>${s.description ? `<span class="desc">${escapeHtml(s.description.slice(0, 300))}${s.description.length > 300 ? '…' : ''}</span>` : ''}</div>`
     ).join('') || '<div style="color:var(--fg-dim);">no skills</div>';
     body.innerHTML = `
+      <label>Agent State</label>
+      <div class="agent-state-row">
+        <span class="agent-state-copy">
+          <strong>${d.enabled ? 'Enabled' : 'Disabled'}</strong>
+          ${d.registered ? 'registered in OpenClaw config' : (d.enabled ? 'enabled locally but not registered yet' : 'not registered while disabled')}
+          ${d.dispatch ? ` · ${escapeHtml(d.dispatch)}` : ''}
+          ${d.subagent === false ? ' · not dispatchable as subagent' : ''}
+        </span>
+        <button data-toggle-enabled ${agentId === 'glados' ? 'disabled title="GLaDOS cannot be disabled from Settings"' : ''}>
+          ${d.enabled ? 'Disable' : 'Enable'}
+        </button>
+      </div>
+
       <label>Model (current: <code>${escapeHtml(d.model || '?')}</code>)</label>
       <div class="model-row">
-        <select id="model-${agentId}">${modelOpts}</select>
-        <button data-save="${agentId}">Save</button>
+        <select data-model-select ${d.registered ? '' : 'disabled'}>${modelOpts}</select>
+        <button data-save ${d.registered ? '' : 'disabled title="Enable this agent and restart the gateway before changing its active model"'}>Save</button>
       </div>
 
       <label>Workspace</label>
@@ -3043,8 +2773,25 @@ async function hydrateAgentCard(agentId, body, models) {
       <label>IDENTITY.md</label>
       <div class="doc">${escapeHtml(d.identity || '(missing)')}</div>
     `;
-    body.querySelector(`[data-save="${agentId}"]`).addEventListener('click', async () => {
-      const sel = body.querySelector(`#model-${agentId}`);
+    body.querySelector('[data-toggle-enabled]')?.addEventListener('click', async () => {
+      const nextEnabled = !d.enabled;
+      const action = nextEnabled ? 'enable' : 'disable';
+      if (!confirm(`${action[0].toUpperCase()}${action.slice(1)} ${agentId}?\n\nThis updates its local agent.json and regenerates ~/.openclaw/openclaw.json. Restart the gateway for running sessions to pick it up.`)) return;
+      const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/enabled`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: nextEnabled }),
+      }).then(r => r.json());
+      if (r.ok) {
+        logEvent('started', `${agentId} ${nextEnabled ? 'enabled' : 'disabled'} — restart gateway to apply`);
+        await loadAgents();
+        renderPane();
+      } else {
+        alert('Update failed: ' + (r.error || 'unknown'));
+      }
+    });
+    body.querySelector('[data-save]')?.addEventListener('click', async () => {
+      const sel = body.querySelector('[data-model-select]');
       const newModel = sel.value;
       if (!confirm(`Change ${agentId}'s model to ${newModel}?\n\nThis edits ~/.openclaw/openclaw.json. A .bak file will be written.\nThe next agent session will pick up the new model.`)) return;
       const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/model`, {
@@ -3469,32 +3216,6 @@ document.getElementById('open-chatbot').addEventListener('click', ev => { ev.pre
 document.getElementById('open-reports').addEventListener('click', ev => { ev.preventDefault(); openReports(); });
 document.getElementById('open-settings').addEventListener('click', ev => { ev.preventDefault(); openSettings(); });
 document.getElementById('open-about').addEventListener('click', ev => { ev.preventDefault(); openAbout(); });
-document.getElementById('open-getting-started').addEventListener('click', ev => {
-  ev.preventDefault();
-  // Support deep-linking via href="#install" | "#engagement" | "#troubleshooting"
-  // on the sidebar entry or any caller that sets the href hash.
-  const href = ev.currentTarget?.getAttribute('href') || '';
-  const anchor = href.startsWith('#') ? href.slice(1) : null;
-  openGettingStarted(anchor);
-});
-// Allow any element in the app to deep-link into Getting Started via
-// <a data-gs-anchor="install|engagement|troubleshooting">…</a>. Used by
-// health-banner "Re-apply patches" hint and Proxy tab error states.
-document.addEventListener('click', ev => {
-  const el = ev.target?.closest?.('[data-gs-anchor]');
-  if (!el) return;
-  ev.preventDefault();
-  openGettingStarted(el.getAttribute('data-gs-anchor'));
-});
-// Initial hash navigation: dashboard URL ending in #install /#engagement
-// /#troubleshooting opens Getting Started and scrolls to that section.
-(() => {
-  const h = (location.hash || '').replace(/^#/, '');
-  if (h === 'install' || h === 'engagement' || h === 'troubleshooting') {
-    // Defer so the main render completes first.
-    requestAnimationFrame(() => openGettingStarted(h));
-  }
-})();
 document.getElementById('open-terminal').addEventListener('click', ev => { ev.preventDefault(); openTerminal(); });
 document.getElementById('open-proxy').addEventListener('click', ev => { ev.preventDefault(); openProxy(); });
 

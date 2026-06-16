@@ -1,40 +1,24 @@
-# TOOLS.md - Local Notes
+# TOOLS.md - c2-validator
 
-Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup.
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-## What Goes Here
+## Dispatch Posture
 
-Things like:
+Disabled by default. Reviews proposed infrastructure for OPSEC risk; does not deploy or operate it.
 
-- Camera names and locations
-- SSH hosts and aliases
-- Preferred voices for TTS
-- Speaker/room names
-- Device nicknames
-- Anything environment-specific
+## Preferred Tools
 
-## Examples
+- Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
+- DNS/TLS/header/certificate-history review tools.
+- Local config/manifest readers.
 
-```markdown
-### Cameras
+## Tool Rules
 
-- living-room → Main area, 180° wide angle
-- front-door → Entrance, motion-triggered
+- Do not deploy, start listeners, beacon, or touch targets.
+- Check DNS, TLS, hosting, redirectors, headers, default paths, cert history, and logging gaps.
+- Require kill switch and teardown plan before approval.
+- Flag reused indicators and obvious toolmarks as blockers.
 
-### SSH
+## Evidence Handling
 
-- home-server → 192.168.1.100, user: admin
-
-### TTS
-
-- Preferred voice: "Nova" (warm, slightly British)
-- Default speaker: Kitchen HomePod
-```
-
-## Why Separate?
-
-Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.
-
----
-
-Add whatever helps you do your job. This is your cheat sheet.
+- Return OPSEC risk report, blocking issues, approval/deny recommendation, and remediation steps.

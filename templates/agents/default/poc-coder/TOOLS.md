@@ -1,40 +1,26 @@
-# TOOLS.md - Local Notes
+# TOOLS.md - poc-coder
 
-Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup.
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-## What Goes Here
+## Dispatch Posture
 
-Things like:
+PoC builder for validated or explicitly approved suspected findings. Code first, execution later.
 
-- Camera names and locations
-- SSH hosts and aliases
-- Preferred voices for TTS
-- Speaker/room names
-- Device nicknames
-- Anything environment-specific
+## Preferred Tools
 
-## Examples
+- Local file read/write under investigation PoC directories.
+- Language-native syntax/test tools.
+- Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
+- glados-ops MCP (`evidence_bundle_create`) for durable evidence manifests and redaction notes.
 
-```markdown
-### Cameras
+## Tool Rules
 
-- living-room → Main area, 180° wide angle
-- front-door → Entrance, motion-triggered
+- Do not target live systems unless execution is explicitly approved.
+- Default every PoC to dry-run, explicit target config, proxy support, timeouts, and rate limits.
+- Use environment variables or local secret profiles for secrets; never embed credentials.
+- No destructive payloads, uncontrolled loops, persistence, or bulk data access.
+- Send PoC to `poc-validator` before operator use.
 
-### SSH
+## Evidence Handling
 
-- home-server → 192.168.1.100, user: admin
-
-### TTS
-
-- Preferred voice: "Nova" (warm, slightly British)
-- Default speaker: Kitchen HomePod
-```
-
-## Why Separate?
-
-Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.
-
----
-
-Add whatever helps you do your job. This is your cheat sheet.
+- Return file path, usage, safety assumptions, expected evidence, and false-positive modes.

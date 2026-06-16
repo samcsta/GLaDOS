@@ -164,15 +164,23 @@ Verify:
 env -u OPENCLAW_HOME openclaw gateway status --deep
 cat ~/.openclaw/logs/tag-injector-health.json | jq .
 jq -r '.models.providers | keys[]' ~/.openclaw/openclaw.json
+jq '.agents.list | length' ~/.openclaw/openclaw.json
+jq -r '[.agents.list[].id | select(test("^(c2|phish|postex)"))] | join(",")' ~/.openclaw/openclaw.json
+jq -r '[.agents.defaults.subagents.allowAgents[] | select(.=="atlas" or .=="glados")] | join(",")' ~/.openclaw/openclaw.json
 jq -r '.agents.list[].model' ~/.openclaw/openclaw.json | sort | uniq -c
 ```
 
-Expected provider/model output for the HPC path:
+Expected stable values:
 
-```text
-custom-llmapi-redteamstuff-com
-31 custom-llmapi-redteamstuff-com/claude-sonnet-4-6
-```
+- Provider output includes `custom-llmapi-redteamstuff-com`.
+- Active agent count is `25`.
+- The high-risk active-agent check returns an empty string because `c2-*`,
+  `phish-*`, and `postex-*` are disabled by default.
+- The subagent allow-list check returns an empty string because neither `atlas`
+  nor `glados` is dispatchable as a subagent.
+
+Exact model counts can vary because local per-agent model overrides are
+preserved across updates.
 
 ### 5. MCP Servers And Agent Tools
 

@@ -1389,6 +1389,11 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
 });
 
 // --- Agent details + model update (Settings) ---
+app.get('/api/settings/agents', (req, res) => {
+  try {
+    res.json({ agents: agentDetails.listSettingsAgents() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 app.get('/api/agents/:id/details', (req, res) => {
   const d = agentDetails.agentDetails(req.params.id);
   if (!d) return res.status(404).json({ error: 'agent not found' });
@@ -1401,6 +1406,13 @@ app.post('/api/agents/:id/model', (req, res) => {
   try {
     const result = agentDetails.updateAgentModel(req.params.id, String(req.body?.model || ''));
     broadcastLobby('agent-model-changed', result);
+    res.json({ ok: true, ...result });
+  } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+app.post('/api/agents/:id/enabled', (req, res) => {
+  try {
+    const result = agentDetails.updateAgentEnabled(req.params.id, !!req.body?.enabled);
+    broadcastLobby('agent-enabled-changed', result);
     res.json({ ok: true, ...result });
   } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 });
@@ -1454,116 +1466,6 @@ app.post('/api/health/burp/reapply-patches', (req, res) => {
     broadcastLobby('patches-reapplied', { ok: true });
     res.json({ ok: true, stdout: stdout?.toString(), stderr: stderr?.toString() });
   });
-});
-
-// v3.1 Tier 2 — Getting Started "Validate this step" endpoints.
-// Each returns { ok: true|false, detail: '...', hint?: '...' }.
-app.get('/api/validate/:step', async (req, res) => {
-  const { execFile } = require('node:child_process');
-  const fs = require('node:fs');
-  const os = require('node:os');
-  const step = req.params.step;
-
-  const run = (cmd, args, timeoutMs = 5000) => new Promise(resolve => {
-    execFile(cmd, args, { timeout: timeoutMs }, (err, stdout, stderr) => {
-      resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout || ''), stderr: String(stderr || '') });
-    });
-  });
-
-  try {
-    if (step === 'burp-ca') {
-      const r = await run('security', ['find-certificate', '-c', 'PortSwigger CA', '/Library/Keychains/System.keychain']);
-      if (r.code === 0 && /PortSwigger/i.test(r.stdout)) return res.json({ ok: true, detail: 'PortSwigger CA trusted in System.keychain' });
-      return res.json({ ok: false, detail: 'PortSwigger CA not found in System.keychain', hint: 'Re-run step 1.4 — export CA from Burp and security add-trusted-cert.' });
-    }
-    if (step === 'burp-proxy') {
-      const r = await run('/usr/bin/curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', '-x', 'http://127.0.0.1:8080', '--max-time', '4', 'http://example.com']);
-      const code = Number((r.stdout || '').trim());
-      if (code >= 200 && code < 600) return res.json({ ok: true, detail: `proxy alive → example.com → ${code}` });
-      return res.json({ ok: false, detail: 'curl through 127.0.0.1:8080 failed', hint: 'Launch Burp Pro and confirm Proxy listener on :8080.' });
-    }
-    if (step === 'burp-ext') {
-      try {
-        const r = await fetch('http://127.0.0.1:1338/health', { signal: AbortSignal.timeout(3000) });
-        if (r.ok) { const j = await r.json().catch(() => ({})); return res.json({ ok: true, detail: `extension healthy: ${JSON.stringify(j).slice(0,200)}` }); }
-        return res.json({ ok: false, detail: `extension returned HTTP ${r.status}`, hint: 'Re-install glados-proxy-api jar in Burp Extensions.' });
-      } catch (e) { return res.json({ ok: false, detail: 'no response on :1338', hint: 'Burp closed or extension not loaded — see step 1.6.' }); }
-    }
-    if (step === 'burp-rest') {
-      try {
-        const r = await fetch('http://127.0.0.1:1337/v0.1/', { signal: AbortSignal.timeout(3000) });
-        if (r.status < 500) return res.json({ ok: true, detail: `Burp native REST reachable (HTTP ${r.status})` });
-        return res.json({ ok: false, detail: `Burp REST returned ${r.status}`, hint: 'Enable REST API: Settings → Suite → REST API.' });
-      } catch (e) { return res.json({ ok: false, detail: 'no response on :1337', hint: 'Enable Burp REST API at :1337 (loopback, no key).' }); }
-    }
-    if (step === 'dashboard') {
-      return res.json({ ok: true, detail: 'dashboard is responding — you just hit it' });
-    }
-    if (step === 'gateway') {
-      // On some workstations the OpenClaw status probe takes >5s while the
-      // daemon is healthy, especially right after a restart.
-      const r = await run('/usr/local/bin/openclaw', ['daemon', 'status'], 15000);
-      if (r.code === 0 && /running/i.test(r.stdout)) return res.json({ ok: true, detail: 'openclaw daemon: running' });
-      // Fallback — try homebrew bin path
-      const r2 = await run('/opt/homebrew/bin/openclaw', ['daemon', 'status'], 15000);
-      if (r2.code === 0 && /running/i.test(r2.stdout)) return res.json({ ok: true, detail: 'openclaw daemon: running' });
-      return res.json({ ok: false, detail: 'openclaw daemon not running', hint: 'Run `openclaw daemon start` or click Restart gateway.' });
-    }
-    if (step === 'patches') {
-      const distDir = path.join(os.homedir(), '../../opt/homebrew/lib/node_modules/openclaw/dist');
-      const resolved = path.resolve(distDir);
-      const scan = (marker) => {
-        try {
-          const files = fs.readdirSync(resolved).filter(f => f.endsWith('.js'));
-          for (const f of files) {
-            const txt = fs.readFileSync(path.join(resolved, f), 'utf8');
-            if (txt.includes(marker)) return f;
-          }
-        } catch {}
-        return null;
-      };
-      const alsFile = scan('GLADOS_ALS_PATCH_V1');
-      const ssrfV2File = scan('GLADOS_SSRF_ROUTE_V2');
-      const ssrfV1File = ssrfV2File ? null : scan('GLADOS_SSRF_ROUTE_V1');
-      const ssrfFile = ssrfV2File || ssrfV1File;
-      const ssrfVersion = ssrfV2File ? 'v2' : (ssrfV1File ? 'v1' : 'missing');
-      const planGateFile = scan('GLADOS_PLAN_GATE_V2') || scan('GLADOS_PLAN_GATE_V1');
-      if (alsFile && ssrfFile && planGateFile) {
-        return res.json({
-          ok: true,
-          detail: `ALS marker in ${alsFile}, SSRF ${ssrfVersion} marker in ${ssrfFile}, plan-gate marker in ${planGateFile}`,
-          patches: {
-            als: { ok: true, file: alsFile },
-            ssrf: { ok: true, file: ssrfFile, version: ssrfVersion },
-            planGate: { ok: true, file: planGateFile },
-          },
-        });
-      }
-      return res.json({
-        ok: false,
-        detail: `missing markers — ALS:${alsFile ? 'ok' : 'MISSING'} SSRF:${ssrfFile ? ssrfVersion : 'MISSING'} PLAN_GATE:${planGateFile ? 'ok' : 'MISSING'}`,
-        hint: 'Re-run `bash tools/patch-openclaw-bundle.sh`, then Restart gateway.',
-      });
-    }
-    if (step === 'watchdog-mcp') {
-      const r = await run('/opt/homebrew/bin/openclaw', ['mcp', 'list'], 5000);
-      const out = (r.stdout || '') + (r.stderr || '');
-      if (/watchdog/i.test(out)) return res.json({ ok: true, detail: 'watchdog MCP registered' });
-      return res.json({ ok: false, detail: 'watchdog MCP not listed', hint: 'Check ~/.openclaw/openclaw.json mcpServers block.' });
-    }
-    if (step === 'tag-injector') {
-      const p = path.join(os.homedir(), '.openclaw/logs/tag-injector-health.json');
-      try {
-        const data = JSON.parse(fs.readFileSync(p, 'utf8'));
-        const stale = Date.now() - data.ts > 180_000;
-        if (data.healthy && !stale) return res.json({ ok: true, detail: `sentinel healthy · age ${((Date.now() - data.ts)/1000).toFixed(0)}s` });
-        return res.json({ ok: false, detail: stale ? 'sentinel is stale' : 'sentinel reports unhealthy', hint: 'Restart gateway; see Help tab Re-apply patches.' });
-      } catch { return res.json({ ok: false, detail: 'no sentinel found', hint: 'Gateway not running or NODE_OPTIONS missing preload.' }); }
-    }
-    return res.status(400).json({ ok: false, error: 'unknown validation step: ' + step });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
 });
 
 // v3.1 — Plan-approval workflow endpoints (see routes/plans.js).

@@ -1,40 +1,20 @@
-# TOOLS.md - Local Notes
+# TOOLS.md - atlas
 
-Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup.
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-## What Goes Here
+## Dispatch Posture
 
-Things like:
+Separate personal ChatBot assistant. Atlas is not part of the GLaDOS red-team roster and must not dispatch or approve assessment agents.
 
-- Camera names and locations
-- SSH hosts and aliases
-- Preferred voices for TTS
-- Speaker/room names
-- Device nicknames
-- Anything environment-specific
+## Preferred Tools
 
-## Examples
+- Local files and shell for Sam-requested personal or project tasks.
+- Browser/web tools for general research or troubleshooting.
+- Computer-use only when a native app truly needs UI control.
 
-```markdown
-### Cameras
+## Tool Rules
 
-- living-room → Main area, 180° wide angle
-- front-door → Entrance, motion-triggered
-
-### SSH
-
-- home-server → 192.168.1.100, user: admin
-
-### TTS
-
-- Preferred voice: "Nova" (warm, slightly British)
-- Default speaker: Kitchen HomePod
-```
-
-## Why Separate?
-
-Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.
-
----
-
-Add whatever helps you do your job. This is your cheat sheet.
+- Do not write to the GLaDOS blackboard except read-only summaries when explicitly asked.
+- Do not approve plans, alter assessment scope, or dispatch GLaDOS agents.
+- Ask before deleting data, installing software, sending messages, posting externally, purchasing, or changing access.
+- Never expose secrets or private memories in shared contexts.

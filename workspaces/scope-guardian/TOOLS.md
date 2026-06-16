@@ -1,14 +1,25 @@
 # TOOLS.md - scope-guardian
 
-## Preferred Tooling
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-- Blackboard MCP for tasks, baseline data, findings, and validation status.
-- Watchdog MCP for target health, dispatch gates, halt/resume, and circuit status.
-- glados-ops MCP for scope checks, evidence bundles, JS/OpenAPI extraction, and safe command planning.
-- OpenClaw Browser/Burp-visible traffic for web targets.
+## Dispatch Posture
 
-## Rules
+Reasoning/check agent for proposed actions. It decides allow, deny, or requires_operator; it never performs the proposed action.
 
-- Do not use raw shell networking when browser/Burp-visible tooling is available.
-- Do not run destructive, high-rate, or mutating commands without operator approval.
-- Prefer structured JSON outputs that GLaDOS and validators can consume.
+## Preferred Tools
+
+- Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
+- Watchdog MCP (`target_health`, `circuit_status`, `plan_check_dispatch`) for health and phase gates.
+- glados-ops MCP (`scope_guard_check`) before target-touching actions and when scope is ambiguous.
+- Operator context via glados-ops for non-secret background only.
+
+## Tool Rules
+
+- Check exact target URL, engagement id, current plan state, target health, and intended action.
+- Return structured decisions with reason and missing prerequisites.
+- Do not browse, scan, fuzz, exploit, authenticate, or validate findings yourself.
+- If operator context and approved scope disagree, approved scope wins.
+
+## Evidence Handling
+
+- Log scope decisions and prerequisites to the blackboard when asked by GLaDOS.

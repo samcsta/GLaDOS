@@ -1,40 +1,23 @@
-# TOOLS.md - Local Notes
+# TOOLS.md - phish-validator
 
-Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup.
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-## What Goes Here
+## Dispatch Posture
 
-Things like:
+Disabled by default. Reviews social-engineering material for safety, authorization, deliverability, and measurement quality.
 
-- Camera names and locations
-- SSH hosts and aliases
-- Preferred voices for TTS
-- Speaker/room names
-- Device nicknames
-- Anything environment-specific
+## Preferred Tools
 
-## Examples
+- Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
+- Local review of lure drafts, approval artifacts, landing-page copy, and tracking plan.
 
-```markdown
-### Cameras
+## Tool Rules
 
-- living-room → Main area, 180° wide angle
-- front-door → Entrance, motion-triggered
+- Do not send messages, test deliverability externally, harvest credentials, or operate infrastructure.
+- Verify written approval, audience, dates, payload boundaries, opt-out/escalation handling, and PII handling.
+- Reject unsafe pretexts and unapproved credential/attachment capture.
+- Return blocking changes before style edits.
 
-### SSH
+## Evidence Handling
 
-- home-server → 192.168.1.100, user: admin
-
-### TTS
-
-- Preferred voice: "Nova" (warm, slightly British)
-- Default speaker: Kitchen HomePod
-```
-
-## Why Separate?
-
-Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.
-
----
-
-Add whatever helps you do your job. This is your cheat sheet.
+- Return approval/deny decision, safety edits, deliverability notes, and missing approval artifacts.

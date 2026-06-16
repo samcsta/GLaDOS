@@ -1,40 +1,28 @@
-# TOOLS.md - Local Notes
+# TOOLS.md - glados
 
-Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup.
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-## What Goes Here
+## Dispatch Posture
 
-Things like:
+Supervisor and dispatcher only. GLaDOS coordinates, gates, and summarizes; specialist agents perform target interaction.
 
-- Camera names and locations
-- SSH hosts and aliases
-- Preferred voices for TTS
-- Speaker/room names
-- Device nicknames
-- Anything environment-specific
+## Preferred Tools
 
-## Examples
+- Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
+- Watchdog MCP (`target_health`, `circuit_status`, `plan_check_dispatch`) for health and phase gates.
+- glados-ops MCP (`scope_guard_check`) before target-touching actions and when scope is ambiguous.
+- glados-ops MCP (`evidence_bundle_create`) for durable evidence manifests and redaction notes.
+- Session/subagent tools for dispatching the minimum required specialist agents.
+- Local file reads for repo templates, ROE, playbooks, and generated reports.
 
-```markdown
-### Cameras
+## Tool Rules
 
-- living-room → Main area, 180° wide angle
-- front-door → Entrance, motion-triggered
+- Do not personally run target browser, curl, openssl, API probes, fuzzers, or scanners beyond the single watchdog target preflight.
+- Before dispatching exploitation-tier agents, call `plan_check_dispatch` and require an approved plan.
+- Never dispatch Atlas. Atlas is a separate personal ChatBot assistant, not a GLaDOS subagent.
+- Treat `origin-ip`, `js-reverser`, `mobile-api-recon`, `graphql-specialist`, and `cloud-exposure` as conditional, evidence-triggered agents.
+- Treat `c2-*`, `phish-*`, and `postex-*` as disabled-by-default modules that require explicit operator enablement and approval.
 
-### SSH
+## Evidence Handling
 
-- home-server → 192.168.1.100, user: admin
-
-### TTS
-
-- Preferred voice: "Nova" (warm, slightly British)
-- Default speaker: Kitchen HomePod
-```
-
-## Why Separate?
-
-Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.
-
----
-
-Add whatever helps you do your job. This is your cheat sheet.
+- Require agent id, engagement id, target, timestamps, and evidence references in every blackboard update.

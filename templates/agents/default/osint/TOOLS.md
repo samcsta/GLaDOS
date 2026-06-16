@@ -1,40 +1,26 @@
-# TOOLS.md - Local Notes
+# TOOLS.md - osint
 
-Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup.
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-## What Goes Here
+## Dispatch Posture
 
-Things like:
+Manual-only Phase 1 support. Dispatch only when the operator explicitly asks for OSINT/passive public-source recon.
 
-- Camera names and locations
-- SSH hosts and aliases
-- Preferred voices for TTS
-- Speaker/room names
-- Device nicknames
-- Anything environment-specific
+## Preferred Tools
 
-## Examples
+- Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
+- Approved passive public sources and exact-target web lookups.
+- DomainsAI or internal intelligence passed by GLaDOS when approved.
+- Local parsing helpers: `jq`, `rg`, `python3`.
 
-```markdown
-### Cameras
+## Tool Rules
 
-- living-room → Main area, 180° wide angle
-- front-door → Entrance, motion-triggered
+- Do not touch target infrastructure directly.
+- Do not run broad corporate sweeps unless explicitly requested.
+- Timebox slow or failing sources and mark degraded; OSINT must not block plan synthesis.
+- Do not collect, print, or store leaked credentials or personal data; stop and escalate if encountered.
+- OSINT-only leads are low confidence and require direct validation.
 
-### SSH
+## Evidence Handling
 
-- home-server → 192.168.1.100, user: admin
-
-### TTS
-
-- Preferred voice: "Nova" (warm, slightly British)
-- Default speaker: Kitchen HomePod
-```
-
-## Why Separate?
-
-Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.
-
----
-
-Add whatever helps you do your job. This is your cheat sheet.
+- Write `baseline.osint.*` with source, timestamp, confidence, status, `blocking=false`, and needs_direct_validation markers.

@@ -1,14 +1,27 @@
 # TOOLS.md - cloud-exposure
 
-## Preferred Tooling
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-- Blackboard MCP for tasks, baseline data, findings, and validation status.
-- Watchdog MCP for target health, dispatch gates, halt/resume, and circuit status.
-- glados-ops MCP for scope checks, evidence bundles, JS/OpenAPI extraction, and safe command planning.
-- OpenClaw Browser/Burp-visible traffic for web targets.
+## Dispatch Posture
 
-## Rules
+Conditional specialist. Dispatch when DNS, JS, source code, OSINT, or app recon suggests cloud storage, CDN origin, metadata, or public admin exposure.
 
-- Do not use raw shell networking when browser/Burp-visible tooling is available.
-- Do not run destructive, high-rate, or mutating commands without operator approval.
-- Prefer structured JSON outputs that GLaDOS and validators can consume.
+## Preferred Tools
+
+- Watchdog MCP (`target_health`, `circuit_status`, `plan_check_dispatch`) for health and phase gates.
+- glados-ops MCP (`scope_guard_check`) before target-touching actions and when scope is ambiguous.
+- Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
+- glados-ops MCP (`evidence_bundle_create`) for durable evidence manifests and redaction notes.
+- Safe provider metadata/existence checks approved by GLaDOS.
+- DNS/TLS/header evidence and captured client config.
+
+## Tool Rules
+
+- Do not enumerate or download bucket/container objects.
+- Do not access provider accounts, metadata services, or admin panels unless explicitly scoped and approved.
+- Treat public-looking assets as candidates until validated safely.
+- Stop immediately if sensitive data appears.
+
+## Evidence Handling
+
+- Report provider, asset, evidence source, safe validation path, and redaction notes.

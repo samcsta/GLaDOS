@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <title>GLaDOS Ops Dashboard</title>
-  <link rel="stylesheet" href="/styles.css?v=20260428-sidebar-clean" />
+  <link rel="stylesheet" href="/styles.css?v=20260616-agent-settings" />
 </head>
 <body>
   <header class="topbar">
@@ -25,7 +25,6 @@
     <span class="health-banner-msg" id="health-banner-msg"></span>
     <span class="health-banner-actions">
       <button id="health-reapply-btn" type="button">Re-apply patches</button>
-      <a href="#troubleshooting" data-gs-anchor="troubleshooting" class="health-banner-link" title="Open Getting Started → Troubleshooting">Troubleshoot ↗</a>
       <button id="health-details-btn" type="button">Details</button>
       <button id="health-dismiss-btn" type="button" title="Hide until next failure">✕</button>
     </span>
@@ -60,7 +59,6 @@
       <div class="workspace-links" id="help-links">
         <a href="#" id="open-settings">Settings</a>
         <a href="#" id="open-about">About</a>
-        <a href="#" id="open-getting-started">Getting Started</a>
       </div>
     </aside>
 
@@ -82,6 +80,6 @@
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.11/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-  <script src="/app.js?v=20260616-transcript-dedupe"></script>
+  <script src="/app.js?v=20260616-agent-settings"></script>
 </body>
 </html>

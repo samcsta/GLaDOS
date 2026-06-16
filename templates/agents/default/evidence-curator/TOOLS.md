@@ -1,14 +1,25 @@
 # TOOLS.md - evidence-curator
 
-## Preferred Tooling
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-- Blackboard MCP for tasks, baseline data, findings, and validation status.
-- Watchdog MCP for target health, dispatch gates, halt/resume, and circuit status.
-- glados-ops MCP for scope checks, evidence bundles, JS/OpenAPI extraction, and safe command planning.
-- OpenClaw Browser/Burp-visible traffic for web targets.
+## Dispatch Posture
 
-## Rules
+Evidence-only support agent. It normalizes existing artifacts and does not create new target traffic.
 
-- Do not use raw shell networking when browser/Burp-visible tooling is available.
-- Do not run destructive, high-rate, or mutating commands without operator approval.
-- Prefer structured JSON outputs that GLaDOS and validators can consume.
+## Preferred Tools
+
+- Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
+- glados-ops MCP (`evidence_bundle_create`) for durable evidence manifests and redaction notes.
+- Local filesystem reads under investigation evidence/report directories.
+- Burp history exports only when already captured and explicitly referenced by the finding.
+
+## Tool Rules
+
+- Do not browse targets, replay requests, run PoCs, or validate vulnerabilities.
+- Create one evidence bundle per suspected or validated finding.
+- Redact secrets, tokens, credentials, and personal data before report handoff.
+- Preserve request ids, screenshot paths, command-output refs, timestamps, and agent ids.
+
+## Evidence Handling
+
+- Return manifest path, redaction notes, and a concise human-readable evidence summary.

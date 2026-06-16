@@ -1,7 +1,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { OPENCLAW_JSON, MODEL_OVERRIDES_JSON } = require('./config');
+const { OPENCLAW_JSON, MODEL_OVERRIDES_JSON, GLADOS_AGENT_WORKSPACES } = require('./config');
 const { loadAgentRegistry } = require('./openclaw');
+const gladosLocal = require('../../scripts/lib/glados-local');
 
 function safeRead(p) {
   try { return fs.readFileSync(p, 'utf8'); } catch { return null; }
@@ -36,15 +37,85 @@ function listMcpServers() {
   } catch { return []; }
 }
 
+function readJson(p, fallback = {}) {
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return fallback; }
+}
+
+function writeJsonAtomic(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`);
+  fs.renameSync(tmp, file);
+}
+
+function templateRegistryById() {
+  const registryPath = path.resolve(__dirname, '..', '..', 'templates', 'agent-registry.json');
+  const rows = readJson(registryPath, []);
+  const map = new Map();
+  for (const row of Array.isArray(rows) ? rows : rows.agents || []) {
+    if (row?.id) map.set(row.id, row);
+  }
+  return map;
+}
+
+function workspaceMeta(agentId) {
+  const workspace = path.join(GLADOS_AGENT_WORKSPACES, agentId);
+  const meta = readJson(path.join(workspace, 'agent.json'), {});
+  const upstream = templateRegistryById().get(agentId) || {};
+  const disabledFile = fs.existsSync(path.join(workspace, '.disabled'));
+  const enabled = (meta.enabled !== undefined ? meta.enabled !== false : upstream.enabled !== false) && !disabledFile;
+  return { workspace, meta, upstream, disabledFile, enabled };
+}
+
+function activeEntryById(agentId) {
+  return loadAgentRegistry().find(a => a.id === agentId) || null;
+}
+
+function isSubagent(agentId, meta, upstream) {
+  if (agentId === 'glados' || agentId === 'atlas') return false;
+  return meta.subagent !== undefined ? meta.subagent !== false : upstream.subagent !== false;
+}
+
+function listSettingsAgents() {
+  const active = new Map(loadAgentRegistry().map(a => [a.id, a]));
+  const upstream = templateRegistryById();
+  const ids = new Set([...active.keys(), ...upstream.keys()]);
+  try {
+    for (const d of fs.readdirSync(GLADOS_AGENT_WORKSPACES, { withFileTypes: true })) {
+      if (d.isDirectory() && !d.name.startsWith('.')) ids.add(d.name);
+    }
+  } catch {}
+  return [...ids].sort().map(id => {
+    const local = workspaceMeta(id);
+    const entry = active.get(id);
+    return {
+      id,
+      name: local.meta.name || local.upstream.name || entry?.name || id,
+      enabled: local.enabled,
+      registered: !!entry,
+      subagent: isSubagent(id, local.meta, local.upstream),
+      dispatch: local.meta.dispatch || local.upstream.dispatch || null,
+      model: entry?.model || local.meta.model || local.upstream.model || null,
+      workspace: local.workspace,
+      disabledFile: local.disabledFile,
+    };
+  });
+}
+
 function agentDetails(agentId) {
-  const registry = loadAgentRegistry();
-  const entry = registry.find(a => a.id === agentId);
-  if (!entry) return null;
-  const ws = entry.workspace;
+  const entry = activeEntryById(agentId);
+  const local = workspaceMeta(agentId);
+  const ws = entry?.workspace || local.workspace;
+  if (!fs.existsSync(ws)) return null;
   return {
-    id: entry.id,
-    name: entry.name,
-    model: entry.model,
+    id: entry?.id || agentId,
+    name: local.meta.name || local.upstream.name || entry?.name || agentId,
+    model: entry?.model || local.meta.model || local.upstream.model,
+    enabled: local.enabled,
+    registered: !!entry,
+    subagent: isSubagent(agentId, local.meta, local.upstream),
+    dispatch: local.meta.dispatch || local.upstream.dispatch || null,
+    disabledFile: local.disabledFile,
     workspace: ws,
     agentsDoc: safeRead(path.join(ws, 'AGENTS.md')),
     toolsDoc: safeRead(path.join(ws, 'TOOLS.md')),
@@ -86,6 +157,33 @@ function updateAgentModel(agentId, newModel) {
   // Durable store so the choice persists across `glados update` regenerations.
   persistModelOverride(agentId, newModel);
   return { agentId, oldModel: old, newModel, backup };
+}
+
+function updateAgentEnabled(agentId, enabled) {
+  if (agentId === 'glados' && enabled === false) throw new Error('glados cannot be disabled from Settings');
+  const { workspace, meta, upstream } = workspaceMeta(agentId);
+  if (!fs.existsSync(workspace)) throw new Error(`agent workspace not found: ${agentId}`);
+  const disabledPath = path.join(workspace, '.disabled');
+  if (enabled && fs.existsSync(disabledPath)) fs.unlinkSync(disabledPath);
+  const next = {
+    id: meta.id || upstream.id || agentId,
+    name: meta.name || upstream.name || agentId,
+    model: meta.model || upstream.model,
+    ...meta,
+    enabled: !!enabled,
+  };
+  if (agentId === 'atlas' || agentId === 'glados') next.subagent = false;
+  writeJsonAtomic(path.join(workspace, 'agent.json'), next);
+  const paths = gladosLocal.localPaths();
+  const config = gladosLocal.generateOpenClawConfig(paths);
+  return {
+    agentId,
+    enabled: !!enabled,
+    workspace,
+    openclawJson: config.openclawJson,
+    registered: !!activeEntryById(agentId),
+    requiresRestart: true,
+  };
 }
 
 async function fetchOllamaModels() {
@@ -133,4 +231,4 @@ async function listKnownModels() {
   return [...models].sort();
 }
 
-module.exports = { agentDetails, updateAgentModel, listKnownModels };
+module.exports = { agentDetails, updateAgentModel, updateAgentEnabled, listKnownModels, listSettingsAgents };

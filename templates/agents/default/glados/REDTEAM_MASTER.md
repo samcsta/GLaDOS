@@ -31,13 +31,16 @@ The installed default roster is described by `templates/agent-registry.json`. Op
 High-level groups:
 
 - Supervisor: `glados`
-- General local assistant: `atlas`
-- Phase 1 recon: `origin-ip`, `net-recon`, `webapp-recon`, `source-code`, `js-reverser`, `mobile-api-recon`
+- Atlas: separate personal ChatBot assistant. It is not part of the GLaDOS assessment roster and must not be dispatched as a subagent.
+- Core Phase 1 recon: `webapp-recon`, `source-code`, `net-recon`
+- Conditional Phase 1 recon: `origin-ip`, `js-reverser`, `mobile-api-recon`
 - Manual-only Phase 1 support: `osint` (dispatch only when the operator explicitly asks for OSINT/passive public-source recon)
 - Planning and guardrails: `plan-synthesizer`, `scope-guardian`, `evidence-curator`
-- Web/API specialists: `webapp-vuln`, `webapp-validator`, `api-expert`, `api-validator`, `graphql-specialist`, `cloud-exposure`
-- Exploit/report chain: `poc-coder`, `poc-validator`, `postex`, `postex-validator`, `report-writer`, `report-validator`
-- Specialty domains: `ad-expert`, `ad-validator`, `ai-specialist`, `c2-builder`, `c2-validator`, `phisherman`, `phish-validator`
+- Web/API specialists: `webapp-vuln`, `webapp-validator`, `api-expert`, `api-validator`
+- Conditional web/API specialists: `graphql-specialist`, `cloud-exposure`
+- Exploit/report chain: `poc-coder`, `poc-validator`, `report-writer`, `report-validator`
+- Specialty domains: `ad-expert`, `ad-validator`, `ai-specialist`
+- Disabled by default, enable only for explicit engagement need: `c2-builder`, `c2-validator`, `phisherman`, `phish-validator`, `postex`, `postex-validator`
 
 ## External Systems
 

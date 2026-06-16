@@ -1,14 +1,25 @@
 # TOOLS.md - mobile-api-recon
 
-## Preferred Tooling
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-- Blackboard MCP for tasks, baseline data, findings, and validation status.
-- Watchdog MCP for target health, dispatch gates, halt/resume, and circuit status.
-- glados-ops MCP for scope checks, evidence bundles, JS/OpenAPI extraction, and safe command planning.
-- OpenClaw Browser/Burp-visible traffic for web targets.
+## Dispatch Posture
 
-## Rules
+Conditional Phase 1 agent. Dispatch only when mobile artifacts, app-store metadata, deep links, or mobile backend hosts are in scope.
 
-- Do not use raw shell networking when browser/Burp-visible tooling is available.
-- Do not run destructive, high-rate, or mutating commands without operator approval.
-- Prefer structured JSON outputs that GLaDOS and validators can consume.
+## Preferred Tools
+
+- Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
+- Local mobile tooling: `jadx`, `apktool`, `analyzeHeadless`/Ghidra when installed and appropriate.
+- Approved APK/IPA artifacts, proxy captures, app store metadata, and deep-link evidence.
+- glados-ops MCP (`evidence_bundle_create`) for durable evidence manifests and redaction notes.
+
+## Tool Rules
+
+- Do not bypass certificate pinning, instrument devices, or interact with live mobile backends without explicit approval.
+- Keep extracted secrets redacted and mark static-only leads as needing validation.
+- Prefer artifact/static analysis before traffic replay.
+- Stop if artifact ownership or distribution rights are unclear.
+
+## Evidence Handling
+
+- Write mobile API inventory, host list, auth/deep-link notes, certificate pinning notes, and validation leads.

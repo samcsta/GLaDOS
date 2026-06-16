@@ -1,40 +1,24 @@
-# TOOLS.md - Local Notes
+# TOOLS.md - phisherman
 
-Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup.
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-## What Goes Here
+## Dispatch Posture
 
-Things like:
+Disabled by default. Enable only with written social-engineering authorization, target population, dates, and payload boundaries.
 
-- Camera names and locations
-- SSH hosts and aliases
-- Preferred voices for TTS
-- Speaker/room names
-- Device nicknames
-- Anything environment-specific
+## Preferred Tools
 
-## Examples
+- Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
+- Local writing/templates and approved landing/tracking infrastructure documentation.
+- No sending tools unless explicitly approved and configured by the operator.
 
-```markdown
-### Cameras
+## Tool Rules
 
-- living-room → Main area, 180° wide angle
-- front-door → Entrance, motion-triggered
+- Do not send emails/messages, harvest credentials, attach payloads, or launch campaigns without explicit written approval.
+- Avoid panic, medical, legal, personal-harm, and coercive pretexts.
+- Use only approved landing/tracking infrastructure and target lists.
+- Hand every lure to `phish-validator`.
 
-### SSH
+## Evidence Handling
 
-- home-server → 192.168.1.100, user: admin
-
-### TTS
-
-- Preferred voice: "Nova" (warm, slightly British)
-- Default speaker: Kitchen HomePod
-```
-
-## Why Separate?
-
-Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.
-
----
-
-Add whatever helps you do your job. This is your cheat sheet.
+- Return lure drafts, targeting assumptions, approval checklist, risk notes, and measurement plan.

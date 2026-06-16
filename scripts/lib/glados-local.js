@@ -164,7 +164,9 @@ function createLocalAgentJson(file, entry, templateHash) {
     id: entry.id,
     name: entry.name || entry.id,
     model: resolveAgentModel(entry.model),
-    enabled: true,
+    enabled: entry.enabled !== false,
+    subagent: entry.subagent !== false,
+    ...(entry.dispatch ? { dispatch: entry.dispatch } : {}),
     upstream: {
       source: `templates/agents/default/${entry.id}`,
       installed_template_hash: templateHash,
@@ -306,8 +308,9 @@ function localAgentEntries(paths) {
     if (!d.isDirectory() || d.name.startsWith('.')) continue;
     const workspace = path.join(paths.agentsDir, d.name);
     const meta = readJson(path.join(workspace, 'agent.json'), {});
-    if (meta.enabled === false || fs.existsSync(path.join(workspace, '.disabled'))) continue;
     const upstream = registry.get(d.name) || {};
+    const enabled = meta.enabled !== undefined ? meta.enabled !== false : upstream.enabled !== false;
+    if (!enabled || fs.existsSync(path.join(workspace, '.disabled'))) continue;
     const id = meta.id || upstream.id || d.name;
     entries.push({
       id,
@@ -316,6 +319,7 @@ function localAgentEntries(paths) {
       agentDir: path.join(paths.openclawAgentsDir, id, 'agent'),
       model: modelOverrides[id] || resolveAgentModel(meta.model || upstream.model),
       identity: meta.identity || upstream.identity,
+      subagent: meta.subagent !== undefined ? meta.subagent !== false : upstream.subagent !== false,
     });
   }
   return entries;
@@ -359,6 +363,10 @@ const LLMAPI_MODELS = [
 function generateOpenClawConfig(paths) {
   const existing = readJson(paths.openclawJson, {});
   const agents = localAgentEntries(paths);
+  const subagentAllowAgents = agents
+    .filter(a => a.subagent !== false && a.id !== 'glados')
+    .map(a => a.id);
+  const openClawAgents = agents.map(({ subagent, ...agent }) => agent);
   for (const a of agents) {
     ensureDir(a.agentDir);
     const sessionDir = path.join(paths.openclawAgentsDir, a.id, 'sessions');
@@ -453,17 +461,22 @@ function generateOpenClawConfig(paths) {
         maxConcurrent: Number(process.env.GLADOS_MAX_CONCURRENT || existing.agents?.defaults?.maxConcurrent || 6),
         subagents: {
           maxConcurrent: Math.max(agents.length, Number(process.env.GLADOS_SUBAGENT_MAX || existing.agents?.defaults?.subagents?.maxConcurrent || 6)),
-          allowAgents: ['*'],
+          allowAgents: subagentAllowAgents,
         },
         llm: { idleTimeoutSeconds: Number(process.env.OPENCLAW_LLM_IDLE_TIMEOUT_SECONDS || existing.agents?.defaults?.llm?.idleTimeoutSeconds || 1200) },
       },
-      list: agents,
+      list: openClawAgents,
     },
-    tools: existing.tools || {
-      profile: 'full',
-      sessions: { visibility: 'all' },
-      agentToAgent: { enabled: true, allow: ['*'] },
-      fs: { workspaceOnly: false },
+    tools: {
+      ...(existing.tools || {}),
+      profile: existing.tools?.profile || 'full',
+      sessions: existing.tools?.sessions || { visibility: 'all' },
+      agentToAgent: {
+        ...(existing.tools?.agentToAgent || {}),
+        enabled: true,
+        allow: subagentAllowAgents,
+      },
+      fs: existing.tools?.fs || { workspaceOnly: false },
     },
     gateway: {
       ...(existing.gateway || {}),
@@ -516,7 +529,7 @@ function generateOpenClawConfig(paths) {
     fs.copyFileSync(paths.openclawJson, backup);
   }
   writeJson(paths.openclawJson, config);
-  return { agents: agents.map(a => ({ id: a.id, model: a.model, workspace: a.workspace })), openclawJson: paths.openclawJson };
+  return { agents: openClawAgents.map(a => ({ id: a.id, model: a.model, workspace: a.workspace })), openclawJson: paths.openclawJson };
 }
 
 function which(cmd) {

@@ -1,40 +1,24 @@
-# TOOLS.md - Local Notes
+# TOOLS.md - report-validator
 
-Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup.
+This file defines the tools this agent should prefer, avoid, and document. It is role-specific guidance, not a place for generic personal-device notes.
 
-## What Goes Here
+## Dispatch Posture
 
-Things like:
+Report QA agent only. Reviews report text, evidence support, CWE/CVSS, and template compliance.
 
-- Camera names and locations
-- SSH hosts and aliases
-- Preferred voices for TTS
-- Speaker/room names
-- Device nicknames
-- Anything environment-specific
+## Preferred Tools
 
-## Examples
+- Local file reads for reports, evidence manifests, and report template.
+- Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
+- glados-ops MCP (`evidence_bundle_create`) for durable evidence manifests and redaction notes.
 
-```markdown
-### Cameras
+## Tool Rules
 
-- living-room → Main area, 180° wide angle
-- front-door → Entrance, motion-triggered
+- Do not touch targets, replay requests, browse apps, run scanners, or execute PoCs.
+- Validate every claim against evidence references or validator notes.
+- Return blocking issues first, then suggested edits.
+- Reject unvalidated findings, weak CWE mapping, unsupported impact language, and missing remediation specifics.
 
-### SSH
+## Evidence Handling
 
-- home-server → 192.168.1.100, user: admin
-
-### TTS
-
-- Preferred voice: "Nova" (warm, slightly British)
-- Default speaker: Kitchen HomePod
-```
-
-## Why Separate?
-
-Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.
-
----
-
-Add whatever helps you do your job. This is your cheat sheet.
+- Confirm redaction status for screenshots, request bodies, tokens, credentials, and personal data.
