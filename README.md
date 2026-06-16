@@ -24,42 +24,48 @@ Updates never overwrite local agents, reports, investigations, blackboards, watc
 
 ### 1. Install Prerequisites
 
-On a fresh MacBook:
+On a fresh MacBook, install Apple Command Line Tools, Homebrew, and the
+GLaDOS workstation dependencies. Use Node 22 LTS; Homebrew's latest `node`
+can be too new for native dashboard dependencies.
 
 ```bash
-# Xcode command line tools
 xcode-select --install
 
-# Homebrew packages used by GLaDOS, OpenClaw, Burp extension builds, and agent tooling
-brew install node git openjdk@21 openjdk@17 gradle jq ripgrep sqlite ollama ffuf nmap nuclei jadx apktool
+eval "$(/opt/homebrew/bin/brew shellenv)"
+
+brew install node@22 git openjdk@21 openjdk@17 gradle jq ripgrep sqlite ffuf nmap nuclei jadx apktool
 brew install --cask ghidra
 
-# Optional but recommended: make Java 21 available in shells
+brew link --overwrite --force node@22
+
 echo 'export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home' >> ~/.zshrc
-echo 'export PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"' >> ~/.zshrc
+echo 'export PATH="/opt/homebrew/opt/node@22/bin:/opt/homebrew/opt/openjdk@21/bin:/opt/homebrew/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
+
+sudo mkdir -p /Library/Java/JavaVirtualMachines
+sudo ln -sfn /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk /Library/Java/JavaVirtualMachines/openjdk-17.jdk
 ```
 
-Install OpenClaw if it is not already installed:
+Do not install Ollama for the standard HPC/LiteLLM workstation path.
+GLaDOS uses the remote LiteLLM-compatible provider configured in `.env`.
 
-```bash
-npm install -g openclaw
-```
-
-Install Burp Suite Professional separately, then launch it at least once so the
-extensions UI and user-level configuration exist.
+Install Burp Suite Professional separately, then launch it at least once so
+the extensions UI and user-level configuration exist.
 
 ### 2. Clone And Bootstrap
 
+Use the private Gitea repo when available. If the operator cannot access
+Gitea, use the public GitHub mirror.
+
 ```bash
-git clone <private-github-url> GLaDOS
+cd ~/Desktop
+git clone https://github.com/samcsta/GLaDOS.git
 cd GLaDOS
+
 cp .env.example .env
-# edit .env and add your own local LLM API key
+# edit .env and set LLMAPI_API_KEY to the workstation's HPC/LiteLLM key
 scripts/bootstrap-macos.sh
-scripts/setup-local-secrets.sh # optional, local workstation only
 scripts/glados-doctor.sh
-cd dashboard && npm start
 ```
 
 Bootstrap copies the default agent seeds once into `~/.glados/workspaces/agents`, creates local runtime directories and DBs, installs Node dependencies, and generates `~/.openclaw/openclaw.json` so OpenClaw points at the local editable agents.
@@ -83,27 +89,24 @@ Bootstrap also installs a neutral local fallback copy at:
 Report-writing agents prefer the repo template path and use the local fallback
 only if the repo path is unavailable.
 
-### 3. Ollama Setup
+### 3. OpenClaw Setup
 
-GLaDOS can use local Ollama models for agents configured with the
-`ollama-local` provider. Start Ollama and pull the default local model:
+GLaDOS currently pins OpenClaw to the version compatible with
+`tools/patch-openclaw-bundle.sh` and installs older optional channel
+dependencies that OpenClaw 2026.4.5 expects at runtime.
 
 ```bash
-brew services start ollama
-ollama pull glm-4.7-flash:latest
-curl -s http://localhost:11434/api/tags | jq .
+scripts/setup-openclaw-macos.sh --no-start
 ```
 
-The default local provider is configured in `~/.openclaw/openclaw.json` during
-bootstrap with:
+Important: do not export `OPENCLAW_HOME=$HOME/.openclaw` before running
+OpenClaw CLI commands. OpenClaw interprets that as a base directory and will
+look for `~/.openclaw/.openclaw/openclaw.json`. If in doubt, run OpenClaw
+commands as:
 
-```text
-OLLAMA_BASE_URL=http://localhost:11434/v1/
-GLADOS_LOCAL_MODEL=glm-4.7-flash:latest
+```bash
+env -u OPENCLAW_HOME openclaw gateway status --deep
 ```
-
-Change those in `.env`, then run `scripts/update-macos.sh` if a workstation
-uses a different local model.
 
 ### 4. Burp Suite Integration
 
@@ -119,6 +122,7 @@ Build the GLaDOS Montoya extension:
 
 ```bash
 cd tools/burp-ext-glados-proxy-api
+export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 ./gradlew shadowJar
 ```
 
@@ -141,12 +145,29 @@ Then patch OpenClaw's runtime bundle so agent HTTP traffic is attributed and
 routed through Burp:
 
 ```bash
-tools/patch-openclaw-bundle.sh
-openclaw daemon restart
+cd ~/Desktop/GLaDOS
+scripts/setup-openclaw-macos.sh
 ```
 
-If OpenClaw is upgraded with `npm install -g openclaw`, re-run the patch script.
-The dashboard health banner will warn when the patch markers are missing.
+The setup script installs the compatible OpenClaw version, re-applies the
+GLaDOS bundle patches, writes the gateway LaunchAgent `NODE_OPTIONS` preload
+for `tools/tag-injector.js`, and restarts the gateway.
+
+Verify:
+
+```bash
+env -u OPENCLAW_HOME openclaw gateway status --deep
+cat ~/.openclaw/logs/tag-injector-health.json | jq .
+jq -r '.models.providers | keys[]' ~/.openclaw/openclaw.json
+jq -r '.agents.list[].model' ~/.openclaw/openclaw.json | sort | uniq -c
+```
+
+Expected provider/model output for the HPC path:
+
+```text
+custom-llmapi-redteamstuff-com
+31 custom-llmapi-redteamstuff-com/claude-sonnet-4-6
+```
 
 ### 5. MCP Servers And Agent Tools
 
@@ -177,6 +198,10 @@ Open:
 ```text
 http://localhost:4280
 ```
+
+If the dashboard Terminal tab is unavailable on a fresh Mac, the rest of
+GLaDOS can still run. `dashboard/scripts/ensure-pty-binary.js` treats the
+`node-pty` native rebuild as optional unless `GLADOS_STRICT_PTY=1` is set.
 
 ## Updating
 

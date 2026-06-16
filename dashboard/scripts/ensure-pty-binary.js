@@ -23,5 +23,6 @@ try {
 } catch (e) {
   console.error('[ensure-pty-binary] rebuild failed. The Terminal tab will not work.');
   console.error('  Fix: install Xcode CLI tools (`xcode-select --install`) and re-run `npm install`.');
-  process.exit(1);
+  if (process.env.GLADOS_STRICT_PTY === '1') process.exit(1);
+  process.exit(0);
 }

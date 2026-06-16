@@ -12,10 +12,31 @@ const REGISTRY_PATH = path.join(REPO_ROOT, 'templates', 'agent-registry.json');
 const DOTENV_PATH = path.join(REPO_ROOT, '.env');
 const DEFAULT_OPERATOR_CONTEXT = path.join(REPO_ROOT, 'templates', 'operator-context', 'ford-redteam.json');
 const REPORTING_TEMPLATE_ROOT = path.join(REPO_ROOT, 'templates', 'reporting');
+const DEFAULT_PRIMARY_MODEL = 'custom-llmapi-redteamstuff-com/claude-sonnet-4-6';
+const OLLAMA_PROVIDER = 'ollama-local';
 
 function log(msg) { process.stdout.write(`${msg}\n`); }
 function warn(msg) { process.stderr.write(`WARN: ${msg}\n`); }
 function fail(msg, code = 1) { process.stderr.write(`ERROR: ${msg}\n`); process.exit(code); }
+
+function truthyEnv(value) {
+  return /^(1|true|yes)$/i.test(String(value || ''));
+}
+
+function ollamaDisabled() {
+  return truthyEnv(process.env.GLADOS_DISABLE_OLLAMA);
+}
+
+function primaryModel() {
+  return process.env.GLADOS_PRIMARY_MODEL || DEFAULT_PRIMARY_MODEL;
+}
+
+function resolveAgentModel(model) {
+  if (ollamaDisabled() && typeof model === 'string' && model.startsWith(`${OLLAMA_PROVIDER}/`)) {
+    return primaryModel();
+  }
+  return model || primaryModel();
+}
 
 function expandValue(value) {
   if (value == null) return value;
@@ -141,7 +162,7 @@ function createLocalAgentJson(file, entry, templateHash) {
   writeJson(file, {
     id: entry.id,
     name: entry.name || entry.id,
-    model: entry.model || process.env.GLADOS_PRIMARY_MODEL || 'custom-llmapi-redteamstuff-com/claude-sonnet-4-6',
+    model: resolveAgentModel(entry.model),
     enabled: true,
     upstream: {
       source: `templates/agents/default/${entry.id}`,
@@ -284,7 +305,7 @@ function localAgentEntries(paths) {
       name: meta.name || upstream.name || id,
       workspace,
       agentDir: path.join(paths.openclawAgentsDir, id, 'agent'),
-      model: meta.model || upstream.model || process.env.GLADOS_PRIMARY_MODEL || 'custom-llmapi-redteamstuff-com/claude-sonnet-4-6',
+      model: resolveAgentModel(meta.model || upstream.model),
       identity: meta.identity || upstream.identity,
     });
   }
@@ -337,11 +358,12 @@ function generateOpenClawConfig(paths) {
     if (!fs.existsSync(sessionIndex)) writeJson(sessionIndex, {});
   }
 
-  const primary = process.env.GLADOS_PRIMARY_MODEL || existing?.agents?.defaults?.model?.primary || 'custom-llmapi-redteamstuff-com/claude-sonnet-4-6';
+  const primary = process.env.GLADOS_PRIMARY_MODEL || existing?.agents?.defaults?.model?.primary || DEFAULT_PRIMARY_MODEL;
   const llmApiKey = process.env.LLMAPI_API_KEY || existing?.models?.providers?.['custom-llmapi-redteamstuff-com']?.apiKey || 'replace-me';
   const llmBaseUrl = process.env.LLMAPI_BASE_URL || existing?.models?.providers?.['custom-llmapi-redteamstuff-com']?.baseUrl || 'https://llmapi.redteamstuff.com/';
   const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || existing?.models?.providers?.['ollama-local']?.baseUrl || 'http://localhost:11434/v1/';
   const localModel = process.env.GLADOS_LOCAL_MODEL || 'glm-4.7-flash:latest';
+  const disableOllama = ollamaDisabled();
   const burpProxy = process.env.BURP_PROXY || 'http://127.0.0.1:8080';
   const burpExtApi = process.env.BURP_EXT_API || 'http://127.0.0.1:1338';
   const burpApi = process.env.BURP_API || 'http://127.0.0.1:1337';
@@ -477,6 +499,7 @@ function generateOpenClawConfig(paths) {
     },
   };
   delete config.env.OPENCLAW_HOME;
+  if (disableOllama) delete config.models.providers['ollama-local'];
   if (fs.existsSync(paths.openclawJson)) {
     const backup = `${paths.openclawJson}.bak-glados-local-${Date.now()}`;
     fs.copyFileSync(paths.openclawJson, backup);
@@ -668,7 +691,21 @@ CREATE TABLE IF NOT EXISTS breaker_trips (
 `);
 }
 
+function assertSupportedNodeForInstall() {
+  const major = Number(process.versions.node.split('.')[0]);
+  if (Number.isFinite(major) && major > 22) {
+    fail([
+      `Node ${process.versions.node} is too new for the current GLaDOS native dependencies on macOS.`,
+      'Install Node 22 LTS instead:',
+      '  brew unlink node || true',
+      '  brew install node@22',
+      '  brew link --overwrite --force node@22',
+    ].join('\n'));
+  }
+}
+
 function installDeps() {
+  assertSupportedNodeForInstall();
   const dirs = [
     'dashboard',
     'blackboard/blackboard-mcp',
