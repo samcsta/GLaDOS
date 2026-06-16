@@ -1,0 +1,8 @@
+{
+  "_comment": "Per-agent model overrides. Copy to ~/.glados/model-overrides.json (outside the repo, gitignored). Maps an agent id to a model ref. These WIN over the registry/agent.json defaults, are applied verbatim (not subject to the ollama-disabled swap), and survive `git pull` + `glados update`. The dashboard model picker writes here automatically. Run `glados update` (or scripts/update.sh) to apply changes to the running config. Remove the _comment and _examples keys in your real file (unknown keys are ignored, but keep it clean).",
+  "_examples": {
+    "atlas": "custom-llmapi-redteamstuff-com/minimax-m2.7",
+    "report-writer": "custom-llmapi-redteamstuff-com/qwen3.6-27b-fp8",
+    "osint": "custom-llmapi-redteamstuff-com/qwen3.6-35b-a3b-fp8"
+  }
+}

@@ -83,6 +83,8 @@ function localPaths() {
     seedStatePath: path.join(runtimeDir, 'agent-seed-state.json'),
     upstreamStatusPath: path.join(runtimeDir, 'upstream-agent-status.json'),
     operatorContextPath: path.join(runtimeDir, 'operator-context.json'),
+    modelOverridesPath: path.join(runtimeDir, 'model-overrides.json'),
+    thinkingOverridesPath: path.join(runtimeDir, 'thinking-overrides.json'),
     secretsDir: path.join(runtimeDir, 'secrets'),
     localAuthPath: path.join(runtimeDir, 'secrets', 'local-auth.json'),
     openclawJson: path.join(openclawHome, 'openclaw.json'),
@@ -185,6 +187,10 @@ function ensureRuntimeDirs(paths) {
     paths.openclawAgentsDir,
   ]) ensureDir(dir);
   if (!fs.existsSync(paths.customAgentsJson)) writeJson(paths.customAgentsJson, { version: 1, agents: [] });
+  if (!fs.existsSync(paths.modelOverridesPath)) writeJson(paths.modelOverridesPath, {});
+  // Default the personal assistant to minimal reasoning so it answers fast; the
+  // dashboard reasoning dropdown (and this file) can change it per agent.
+  if (!fs.existsSync(paths.thinkingOverridesPath)) writeJson(paths.thinkingOverridesPath, { atlas: 'minimal' });
   if (!fs.existsSync(paths.operatorContextPath) && fs.existsSync(DEFAULT_OPERATOR_CONTEXT)) {
     fs.copyFileSync(DEFAULT_OPERATOR_CONTEXT, paths.operatorContextPath);
     fs.chmodSync(paths.operatorContextPath, 0o600);
@@ -291,6 +297,13 @@ function updateAgentStatus(paths) {
 
 function localAgentEntries(paths) {
   const registry = registryById();
+  // User-owned, update-surviving per-agent model assignments. This file lives in
+  // the runtime dir (outside the repo, gitignored) so `git pull` never touches it,
+  // and it is read on every config regen so a user's choices persist across
+  // updates instead of being wiped when openclaw.json is rebuilt. An override is
+  // applied verbatim and is intentionally EXEMPT from the ollama-disabled swap —
+  // an explicit user choice always wins. Precedence: override > agent.json > registry.
+  const modelOverrides = readJson(paths.modelOverridesPath, {}) || {};
   const entries = [];
   if (!fs.existsSync(paths.agentsDir)) return entries;
   for (const d of fs.readdirSync(paths.agentsDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -305,7 +318,7 @@ function localAgentEntries(paths) {
       name: meta.name || upstream.name || id,
       workspace,
       agentDir: path.join(paths.openclawAgentsDir, id, 'agent'),
-      model: resolveAgentModel(meta.model || upstream.model),
+      model: modelOverrides[id] || resolveAgentModel(meta.model || upstream.model),
       identity: meta.identity || upstream.identity,
     });
   }
@@ -410,6 +423,32 @@ function generateOpenClawConfig(paths) {
   delete meta.gladosLocalVersion;
   meta.lastTouchedAt = new Date().toISOString();
 
+  // Per-agent reasoning level. Some cheaper HPC models (e.g. minimax) are
+  // reasoning-heavy and burn 20-30s of thinking on trivial conversational turns.
+  // The dashboard reasoning dropdown (and ~/.glados/thinking-overrides.json, a
+  // gitignored, update-surviving map of agent-id -> level) controls how hard an
+  // agent thinks. OpenClaw resolves a model's thinking level from
+  // agents.defaults.models[<modelRef>].params.thinking (model-selection:
+  // resolveThinkingDefault), which is keyed per MODEL, not per agent. So we apply
+  // a level to a model only when every agent on that model agrees on it, and we
+  // never touch the shared primary (Sonnet keeps its native adaptive reasoning).
+  // In practice atlas is the sole user of its cheap model, so its dropdown choice
+  // applies cleanly; the red-team fleet on the shared primary is untouched.
+  const thinkingOverrides = readJson(paths.thinkingOverridesPath, {}) || {};
+  const agentsByModel = new Map();
+  for (const a of agents) {
+    if (!agentsByModel.has(a.model)) agentsByModel.set(a.model, []);
+    agentsByModel.get(a.model).push(a.id);
+  }
+  const modelsMap = { [primary]: {} };
+  for (const [model, ids] of agentsByModel) {
+    if (model === primary) continue;
+    const levels = ids.map(id => thinkingOverrides[id]).filter(Boolean);
+    if (levels.length === ids.length && new Set(levels).size === 1) {
+      modelsMap[model] = { params: { thinking: levels[0] } };
+    }
+  }
+
   const config = {
     ...existing,
     meta,
@@ -438,7 +477,7 @@ function generateOpenClawConfig(paths) {
       defaults: {
         ...(existing.agents?.defaults || {}),
         model: { primary },
-        models: { [primary]: {} },
+        models: modelsMap,
         workspace: paths.agentsDir,
         compaction: { mode: 'safeguard' },
         maxConcurrent: Number(process.env.GLADOS_MAX_CONCURRENT || existing.agents?.defaults?.maxConcurrent || 6),

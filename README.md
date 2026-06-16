@@ -210,13 +210,29 @@ GLaDOS can still run. `dashboard/scripts/ensure-pty-binary.js` treats the
 
 ## Updating
 
+One command does everything — `git pull origin main`, install deps for **all** packages
+(dashboard + the 4 MCP servers), run DB migrations, regenerate the OpenClaw config, restart the
+gateway, and run the doctor:
+
 ```bash
-git pull
-scripts/update-macos.sh
-scripts/glados-doctor.sh
+scripts/update.sh
 ```
 
-`scripts/update-macos.sh` updates code dependencies and regenerates OpenClaw registration from local agents. It does not copy changed seed files over local agents. If upstream templates changed, status is written to:
+Flags:
+
+- `--dry-run` — show the incoming commits and what would change, then exit (no changes).
+- `--with-openclaw` — also reinstall/patch OpenClaw and the gateway LaunchAgent (use when the pinned
+  OpenClaw version bumps).
+- `--no-restart` — skip restarting the gateway daemon.
+- `--force` — proceed even if the working tree is dirty or you're not on `main`.
+
+It is idempotent (re-running with no new commits is a no-op) and preserves all local state: agents,
+reports, investigations, blackboard, watchdog, operator-context, local-auth, `.env`, **per-agent
+model overrides** (see [Customizing Agents](#customizing-agents)), and OpenClaw sessions.
+`scripts/update-macos.sh` is a backwards-compatible alias for `scripts/update.sh`.
+
+The update regenerates OpenClaw registration from local agents. It does not copy changed seed files
+over local agents. If upstream templates changed, status is written to:
 
 ```text
 ~/.glados/upstream-agent-status.json
@@ -264,6 +280,37 @@ scripts/update-macos.sh
 ```
 
 To add a custom agent, create a new folder under `~/.glados/workspaces/agents/<new-id>/` with an `agent.json` file. The updater will register it without touching upstream seeds.
+
+### Per-agent model assignments (survive updates)
+
+A fresh install runs every agent on the default Sonnet model. To offset cost you can move
+individual agents to a cheaper HPC-hosted model (e.g. `minimax-m2.7`, `qwen3.6-27b-fp8`) — and those
+choices now **persist across every `git pull` + update**.
+
+Assign models either way:
+
+- **Dashboard** — use the model picker in the agent panel / ChatBot tab. It writes your choice to the
+  durable store automatically.
+- **By hand** — edit `~/.glados/model-overrides.json` (a flat `{"<agent-id>": "<provider/model>"}`
+  map). Seed it with `scripts/setup-model-overrides.sh`; see
+  `templates/model-overrides.example.json` for the format. Apply with `scripts/update.sh`.
+
+This file lives outside the repo (gitignored), is read on every config regen, and **always wins**
+over the registry default (it is applied verbatim and is not affected by `GLADOS_DISABLE_OLLAMA`).
+Do **not** hand-edit `~/.openclaw/openclaw.json` — it is generated and will be overwritten.
+
+#### Response speed on reasoning models
+
+Some cheap HPC models (e.g. `minimax-m2.7`) are reasoning-heavy and will "think" for 20-30s even on
+trivial replies. The Atlas ChatBot page has a **reasoning dropdown** next to the model picker —
+choose `off` / `minimal` / `low` / `medium` / `high` (default **`minimal`**). The choice is saved to
+`~/.glados/thinking-overrides.json` (a gitignored `{"<agent-id>": "<level>"}` map), so it **persists
+across updates**, and the gateway restarts to apply it (~3s).
+
+The level is applied only to a model used **exclusively** by the agent (and never the shared Sonnet
+primary), so the red-team fleet keeps its full reasoning budget. Sonnet agents like GLaDOS already
+reason **adaptively** (the model scales effort per message); a fixed level is mainly useful for
+non-adaptive cheap models. See [docs/model-customization.md](docs/model-customization.md).
 
 ## Architecture
 

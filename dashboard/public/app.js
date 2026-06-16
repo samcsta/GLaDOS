@@ -1045,6 +1045,7 @@ function renderChatBotPane() {
     </div>
     <div class="chatbot-controls">
       <select id="chatbot-model" title="Switch model (restarts the gateway — takes ~3s)"></select>
+      <select id="chatbot-thinking" title="Reasoning level (restarts the gateway — takes ~3s). Lower = faster replies."></select>
       <button id="chatbot-clear" title="Archive the current Atlas session and start fresh">Clear</button>
     </div>
   `;
@@ -1088,6 +1089,7 @@ function renderChatBotPane() {
   // --- Model selector: fetch known models + current atlas model ---
   const modelSel = document.getElementById('chatbot-model');
   const modelLabel = document.getElementById('chatbot-model-label');
+  const thinkingSel = document.getElementById('chatbot-thinking');
   async function populateModels() {
     try {
       const [models, details] = await Promise.all([
@@ -1103,9 +1105,42 @@ function renderChatBotPane() {
       const current = details?.model || 'ollama-local/glm-4.7-flash:latest';
       modelSel.value = current;
       modelLabel.textContent = displayModel(current);
+
+      // Reasoning level dropdown (defaults to minimal).
+      const levels = details?.thinkingLevels || ['off', 'minimal', 'low', 'medium', 'high'];
+      thinkingSel.innerHTML = levels
+        .map(l => `<option value="${escapeHtml(l)}">🧠 ${escapeHtml(l)}</option>`)
+        .join('');
+      thinkingSel.value = details?.thinking || 'minimal';
     } catch (e) { modelLabel.textContent = '(model list unavailable)'; }
   }
   populateModels();
+
+  thinkingSel.addEventListener('change', async () => {
+    const level = thinkingSel.value;
+    if (!level) return;
+    thinkingSel.disabled = true;
+    const prev = modelLabel.textContent;
+    try {
+      const r = await fetch('/api/agents/atlas/thinking', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ level }),
+      });
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || 'reasoning change failed');
+      // Like model changes, the gateway caches config in-memory — restart to apply.
+      modelLabel.textContent = 'restarting gateway…';
+      const rr = await fetch('/api/gateway/restart', { method: 'POST' });
+      const rj = await rr.json();
+      if (!rj.ok) throw new Error(rj.error || 'gateway restart failed');
+      modelLabel.textContent = prev;
+    } catch (e) {
+      alert('Reasoning change failed: ' + e.message);
+    } finally {
+      thinkingSel.disabled = false;
+    }
+  });
 
   modelSel.addEventListener('change', async () => {
     const newModel = modelSel.value;

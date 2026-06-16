@@ -1,7 +1,12 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { OPENCLAW_JSON } = require('./config');
+const { OPENCLAW_JSON, MODEL_OVERRIDES_JSON, THINKING_OVERRIDES_JSON } = require('./config');
 const { loadAgentRegistry } = require('./openclaw');
+
+// Reasoning levels exposed in the dashboard, fastest -> hardest. These are the
+// OpenClaw thinking levels honored by the gateway; "off" disables reasoning.
+const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high'];
+const DEFAULT_THINKING = 'minimal';
 
 function safeRead(p) {
   try { return fs.readFileSync(p, 'utf8'); } catch { return null; }
@@ -45,6 +50,8 @@ function agentDetails(agentId) {
     id: entry.id,
     name: entry.name,
     model: entry.model,
+    thinking: getAgentThinking(entry.id, entry.model),
+    thinkingLevels: THINKING_LEVELS,
     workspace: ws,
     agentsDoc: safeRead(path.join(ws, 'AGENTS.md')),
     toolsDoc: safeRead(path.join(ws, 'TOOLS.md')),
@@ -53,6 +60,83 @@ function agentDetails(agentId) {
     skills: listSkills(ws),
     mcp: listMcpServers(),
   };
+}
+
+// Persist the model choice to the durable override store so it survives the next
+// `glados update` (which fully regenerates openclaw.json), then patch the live
+// openclaw.json for immediate effect. Writing both means: the dashboard change
+// takes effect now, AND the override file is what config regen reads back — so
+// the assignment is no longer wiped on every update.
+function persistModelOverride(agentId, newModel) {
+  let overrides = {};
+  try { overrides = JSON.parse(fs.readFileSync(MODEL_OVERRIDES_JSON, 'utf8')) || {}; } catch {}
+  if (newModel) overrides[agentId] = newModel;
+  else delete overrides[agentId];
+  fs.mkdirSync(path.dirname(MODEL_OVERRIDES_JSON), { recursive: true });
+  const tmp = MODEL_OVERRIDES_JSON + '.tmp';
+  fs.writeFileSync(tmp, `${JSON.stringify(overrides, null, 2)}\n`);
+  fs.renameSync(tmp, MODEL_OVERRIDES_JSON);
+}
+
+// Read the effective reasoning level for an agent: explicit per-agent override
+// wins, else whatever the live config resolves for the agent's model, else the
+// default. Used to seed the dashboard dropdown.
+function getAgentThinking(agentId, modelRef) {
+  try {
+    const overrides = JSON.parse(fs.readFileSync(THINKING_OVERRIDES_JSON, 'utf8')) || {};
+    if (overrides[agentId]) return overrides[agentId];
+  } catch {}
+  if (modelRef) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(OPENCLAW_JSON, 'utf8'));
+      const lvl = cfg?.agents?.defaults?.models?.[modelRef]?.params?.thinking;
+      if (lvl) return lvl;
+    } catch {}
+  }
+  return DEFAULT_THINKING;
+}
+
+// Persist a per-agent reasoning level to the durable override store (so it
+// survives `glados update`), then patch the live openclaw.json for immediate
+// effect. OpenClaw keys thinking per MODEL, so we only patch the model params
+// when this agent is the SOLE user of its model (and it isn't the shared
+// primary) — otherwise we'd change every agent on that model. The durable
+// override is always written; config regen applies it safely via the same
+// "all agents on the model agree" rule.
+function updateAgentThinking(agentId, level) {
+  if (!THINKING_LEVELS.includes(level)) {
+    throw new Error(`invalid reasoning level: ${level} (use ${THINKING_LEVELS.join('|')})`);
+  }
+  // Durable store.
+  let overrides = {};
+  try { overrides = JSON.parse(fs.readFileSync(THINKING_OVERRIDES_JSON, 'utf8')) || {}; } catch {}
+  const old = overrides[agentId] || null;
+  overrides[agentId] = level;
+  fs.mkdirSync(path.dirname(THINKING_OVERRIDES_JSON), { recursive: true });
+  const tmp = THINKING_OVERRIDES_JSON + '.tmp';
+  fs.writeFileSync(tmp, `${JSON.stringify(overrides, null, 2)}\n`);
+  fs.renameSync(tmp, THINKING_OVERRIDES_JSON);
+
+  // Patch the live config for instant effect, only when safe (sole user, not primary).
+  let patched = false;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(OPENCLAW_JSON, 'utf8'));
+    const list = cfg?.agents?.list || [];
+    const entry = list.find(a => a.id === agentId);
+    const modelRef = entry?.model;
+    const primary = cfg?.agents?.defaults?.model?.primary;
+    const sharers = list.filter(a => a.model === modelRef).map(a => a.id);
+    if (modelRef && modelRef !== primary && sharers.length === 1) {
+      cfg.agents.defaults.models = cfg.agents.defaults.models || {};
+      const cur = cfg.agents.defaults.models[modelRef] || {};
+      cfg.agents.defaults.models[modelRef] = { ...cur, params: { ...(cur.params || {}), thinking: level } };
+      const backup = OPENCLAW_JSON + `.bak.${Date.now()}`;
+      fs.copyFileSync(OPENCLAW_JSON, backup);
+      fs.writeFileSync(OPENCLAW_JSON, JSON.stringify(cfg, null, 2));
+      patched = true;
+    }
+  } catch {}
+  return { agentId, oldLevel: old, newLevel: level, livePatched: patched };
 }
 
 function updateAgentModel(agentId, newModel) {
@@ -67,6 +151,8 @@ function updateAgentModel(agentId, newModel) {
   const backup = OPENCLAW_JSON + `.bak.${Date.now()}`;
   fs.copyFileSync(OPENCLAW_JSON, backup);
   fs.writeFileSync(OPENCLAW_JSON, JSON.stringify(parsed, null, 2));
+  // Durable store so the choice persists across `glados update` regenerations.
+  persistModelOverride(agentId, newModel);
   return { agentId, oldModel: old, newModel, backup };
 }
 
@@ -115,4 +201,11 @@ async function listKnownModels() {
   return [...models].sort();
 }
 
-module.exports = { agentDetails, updateAgentModel, listKnownModels };
+module.exports = {
+  agentDetails,
+  updateAgentModel,
+  listKnownModels,
+  getAgentThinking,
+  updateAgentThinking,
+  THINKING_LEVELS,
+};
