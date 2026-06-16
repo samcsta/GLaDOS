@@ -274,7 +274,7 @@ function ensureTranscript(tabId, agentId) {
       const matchKind = ev.kind === 'thinking' ? 'thinking' : 'text';
       if (wasRecentlyStreamed(rec, matchKind, ev.text)) {
         reconcileStreamedEvent(rec, ev);
-        if (ev.kind === 'assistant-text' && rec.sending) {
+        if (ev.kind === 'assistant-text' && rec.sending && eventBelongsToCurrentTurn(rec, ev)) {
           rec.firstTokenSeenAt ||= Date.now();
           finishTranscriptTurn(rec, tabId);
         }
@@ -304,12 +304,25 @@ function ensureTranscript(tabId, agentId) {
       return;
     }
 
-	    rec.events.push(ev);
-    if (rec.el && rec.el.isConnected) appendEntry(rec.el, ev, rec);
-    if (rec.sending) {
-      if (ev.kind === 'assistant-text' || ev.kind === 'prompt-error') {
+    const inserted = insertTranscriptEvent(rec, ev);
+    if (!inserted.added) {
+      if (rec.el && rec.el.isConnected && inserted.index >= 0) renderTranscriptEvents(rec);
+      if (rec.sending && (ev.kind === 'assistant-text' || ev.kind === 'prompt-error') && eventBelongsToCurrentTurn(rec, ev)) {
         rec.firstTokenSeenAt ||= Date.now();
         finishTranscriptTurn(rec, tabId);
+      }
+      return;
+    }
+    if (rec.el && rec.el.isConnected) {
+      if (inserted.outOfOrder) renderTranscriptEvents(rec);
+      else appendEntry(rec.el, ev, rec);
+    }
+    if (rec.sending) {
+      if (ev.kind === 'assistant-text' || ev.kind === 'prompt-error') {
+        if (eventBelongsToCurrentTurn(rec, ev)) {
+          rec.firstTokenSeenAt ||= Date.now();
+          finishTranscriptTurn(rec, tabId);
+        }
       } else if (ev.kind === 'thinking') {
         rec.firstTokenSeenAt ||= Date.now();
         markTranscriptActivity(rec, tabId, 'thinking');
@@ -366,6 +379,69 @@ function textsMatch(a, b) {
 function transcriptTextKey(kind, text) {
   const normalized = normalizeTranscriptText(text);
   return normalized ? `${kind}:${normalized}` : null;
+}
+
+function transcriptEventMs(ev) {
+  if (!ev) return 0;
+  if (typeof ev.ts === 'number' && Number.isFinite(ev.ts)) return ev.ts;
+  const parsed = Date.parse(ev.ts || '');
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function eventBelongsToCurrentTurn(rec, ev) {
+  if (!rec?.turnStartedAt) return true;
+  const evMs = transcriptEventMs(ev);
+  if (!evMs) return true;
+  return evMs >= rec.turnStartedAt - 1000;
+}
+
+function findEventIndexByIdentity(rec, ev) {
+  if (!rec || !Array.isArray(rec.events) || !ev) return -1;
+  if (ev.id) {
+    const byId = rec.events.findIndex(x => x.id && x.id === ev.id);
+    if (byId >= 0) return byId;
+  }
+  if (ev.toolCallId) {
+    const byTool = rec.events.findIndex(x => x.kind === ev.kind && x.toolCallId === ev.toolCallId);
+    if (byTool >= 0) return byTool;
+  }
+  const evMs = transcriptEventMs(ev);
+  if (ev.kind && ev.text && evMs) {
+    return rec.events.findIndex(x =>
+      x.kind === ev.kind &&
+      transcriptEventMs(x) === evMs &&
+      textsMatch(x.text, ev.text)
+    );
+  }
+  return -1;
+}
+
+function insertTranscriptEvent(rec, ev) {
+  const existingIdx = findEventIndexByIdentity(rec, ev);
+  if (existingIdx >= 0) {
+    rec.events[existingIdx] = { ...rec.events[existingIdx], ...ev };
+    return { added: false, duplicate: true, index: existingIdx };
+  }
+
+  const evMs = transcriptEventMs(ev);
+  let index = rec.events.length;
+  if (evMs && !ev._optimistic) {
+    while (index > 0) {
+      const prev = rec.events[index - 1];
+      const prevMs = transcriptEventMs(prev);
+      if (!prevMs || prevMs <= evMs) break;
+      index--;
+    }
+  }
+  rec.events.splice(index, 0, ev);
+  return { added: true, duplicate: false, index, outOfOrder: index !== rec.events.length - 1 };
+}
+
+function renderTranscriptEvents(rec) {
+  if (!rec?.el || !rec.el.isConnected) return;
+  rec.el.innerHTML = '';
+  for (const ev of rec.events) appendEntry(rec.el, ev, rec);
+  if (rec.autoScroll !== false) scheduleStickyScroll(rec.el, rec);
 }
 
 function pruneRecentlyStreamed(rec) {

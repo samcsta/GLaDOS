@@ -112,9 +112,11 @@ function finishChatTurn(agentId, turnId) {
   broadcastLobby('chat-turn-ended', { agentId, turnId });
 }
 
-function finishActiveChatTurn(agentId) {
+function finishActiveChatTurn(agentId, ev = null) {
   const current = activeChatTurns.get(agentId);
   if (!current) return;
+  const evMs = eventSortMs(ev);
+  if (evMs && evMs < current.startedAt - 1000) return;
   finishChatTurn(agentId, current.turnId);
 }
 
@@ -667,7 +669,7 @@ watcher.on('event', ev => {
   pushBuffer(ev.agentId, ev);
   broadcastTranscript(ev.agentId, ev);
   if (ev.kind === 'assistant-text' || ev.kind === 'prompt-error') {
-    finishActiveChatTurn(ev.agentId);
+    finishActiveChatTurn(ev.agentId, ev);
   }
 });
 watcher.on('session-started', info => {
