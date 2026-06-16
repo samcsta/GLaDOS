@@ -362,10 +362,24 @@ try {
   const net = require('node:net');
   const path = require('node:path');
   const os = require('node:os');
+  const cp = require('node:child_process');
 
   const LOGS_DIR = path.join(os.homedir(), '.openclaw/logs');
   const SENTINEL = path.join(LOGS_DIR, 'tag-injector-health.json');
-  const DIST = '/opt/homebrew/lib/node_modules/openclaw/dist';
+  const DIST = (() => {
+    if (process.env.OPENCLAW_DIST) return process.env.OPENCLAW_DIST;
+    try {
+      return path.join(cp.execSync('npm root -g', { encoding: 'utf8' }).trim(), 'openclaw', 'dist');
+    } catch (_) {
+      for (const p of [
+        '/opt/homebrew/lib/node_modules/openclaw/dist',
+        '/usr/local/lib/node_modules/openclaw/dist',
+      ]) {
+        if (fs.existsSync(p)) return p;
+      }
+      return '/opt/homebrew/lib/node_modules/openclaw/dist';
+    }
+  })();
   const MARKER_ALS = 'GLADOS_ALS_PATCH_V1';
   // SSRF marker: prefer V2 (HMAC + ACL), accept V1 as legacy.
   const MARKER_SSRF_V1 = 'GLADOS_SSRF_ROUTE_V1';

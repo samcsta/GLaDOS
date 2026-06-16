@@ -31,19 +31,24 @@ can be too new for native dashboard dependencies.
 ```bash
 xcode-select --install
 
-eval "$(/opt/homebrew/bin/brew shellenv)"
+if [[ -x /opt/homebrew/bin/brew ]]; then
+  eval "$(/opt/homebrew/bin/brew shellenv)"
+else
+  eval "$(/usr/local/bin/brew shellenv)"
+fi
+BREW_PREFIX="$(brew --prefix)"
 
 brew install node@22 git openjdk@21 openjdk@17 gradle jq ripgrep sqlite ffuf nmap nuclei jadx apktool
 brew install --cask ghidra
 
 brew link --overwrite --force node@22
 
-echo 'export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home' >> ~/.zshrc
-echo 'export PATH="/opt/homebrew/opt/node@22/bin:/opt/homebrew/opt/openjdk@21/bin:/opt/homebrew/bin:$PATH"' >> ~/.zshrc
+echo "export JAVA_HOME=\"$BREW_PREFIX/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home\"" >> ~/.zshrc
+echo "export PATH=\"$BREW_PREFIX/opt/node@22/bin:$BREW_PREFIX/opt/openjdk@21/bin:$BREW_PREFIX/bin:\$PATH\"" >> ~/.zshrc
 source ~/.zshrc
 
 sudo mkdir -p /Library/Java/JavaVirtualMachines
-sudo ln -sfn /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk /Library/Java/JavaVirtualMachines/openjdk-17.jdk
+sudo ln -sfn "$BREW_PREFIX/opt/openjdk@17/libexec/openjdk.jdk" /Library/Java/JavaVirtualMachines/openjdk-17.jdk
 ```
 
 Do not install Ollama for the standard HPC/LiteLLM workstation path.

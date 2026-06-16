@@ -16,7 +16,11 @@
 
 set -euo pipefail
 
-DIST="/opt/homebrew/lib/node_modules/openclaw/dist"
+DIST="${OPENCLAW_DIST:-$(npm root -g)/openclaw/dist}"
+if [ ! -d "$DIST" ]; then
+  echo "[patch] openclaw dist not found: $DIST" >&2
+  exit 1
+fi
 # Find the bundle containing wrapToolWithBeforeToolCallHook (the seam we patch).
 BUNDLE=$(grep -l "wrapToolWithBeforeToolCallHook" "$DIST"/pi-embedded-*.js 2>/dev/null | head -n 1)
 if [ -z "${BUNDLE:-}" ]; then

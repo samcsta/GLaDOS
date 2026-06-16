@@ -5,6 +5,8 @@ cd "$(dirname "$0")/.."
 
 OPENCLAW_VERSION="${GLADOS_OPENCLAW_VERSION:-2026.4.5}"
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+BREW_PREFIX="$(brew --prefix)"
+GLOBAL_NODE_MODULES="$(npm root -g)"
 START_GATEWAY=1
 if [[ "${1:-}" == "--no-start" ]]; then
   START_GATEWAY=0
@@ -56,7 +58,8 @@ echo "Configuring gateway LaunchAgent environment..."
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:BURP_PROXY string ${BURP_PROXY:-http://127.0.0.1:8080}" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:BURP_EXT_API string ${BURP_EXT_API:-http://127.0.0.1:1338}" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:GLADOS_REPO_ROOT string $PWD" "$PLIST"
-/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:PATH string /opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" "$PLIST"
+/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:OPENCLAW_DIST string ${GLOBAL_NODE_MODULES}/openclaw/dist" "$PLIST"
+/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:PATH string ${BREW_PREFIX}/opt/node@22/bin:${BREW_PREFIX}/bin:${BREW_PREFIX}/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" "$PLIST"
 
 if [[ "$START_GATEWAY" == "1" ]]; then
   echo "Restarting OpenClaw gateway..."

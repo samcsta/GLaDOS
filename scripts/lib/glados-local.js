@@ -368,11 +368,13 @@ function generateOpenClawConfig(paths) {
   const burpExtApi = process.env.BURP_EXT_API || 'http://127.0.0.1:1338';
   const burpApi = process.env.BURP_API || 'http://127.0.0.1:1337';
   const gatewayToken = existing?.gateway?.auth?.token || crypto.randomBytes(24).toString('hex');
+  const hb = brewPrefix();
   const toolPath = [
     path.join(REPO_ROOT, 'tools', 'bin'),
     path.join(os.homedir(), '.local', 'bin'),
-    '/opt/homebrew/bin',
-    '/opt/homebrew/sbin',
+    path.join(hb, 'opt', 'node@22', 'bin'),
+    path.join(hb, 'bin'),
+    path.join(hb, 'sbin'),
     '/usr/local/bin',
     '/usr/bin',
     '/bin',
@@ -494,8 +496,8 @@ function generateOpenClawConfig(paths) {
       NO_PROXY: 'localhost,127.0.0.1,::1,host.docker.internal,llmapi.redteamstuff.com',
       OPENCLAW_RAW_STREAM: process.env.OPENCLAW_RAW_STREAM || '1',
       PATH: toolPath,
-      JAVA_HOME: process.env.JAVA_HOME || existing.env?.JAVA_HOME || '/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home',
-      DYLD_LIBRARY_PATH: process.env.DYLD_LIBRARY_PATH || existing.env?.DYLD_LIBRARY_PATH || '/opt/homebrew/opt/expat/lib',
+      JAVA_HOME: process.env.JAVA_HOME || existing.env?.JAVA_HOME || path.join(hb, 'opt', 'openjdk@21', 'libexec', 'openjdk.jdk', 'Contents', 'Home'),
+      DYLD_LIBRARY_PATH: process.env.DYLD_LIBRARY_PATH || existing.env?.DYLD_LIBRARY_PATH || path.join(hb, 'opt', 'expat', 'lib'),
     },
   };
   delete config.env.OPENCLAW_HOME;
@@ -514,6 +516,13 @@ function which(cmd) {
     if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
   }
   return null;
+}
+
+function brewPrefix() {
+  const r = cp.spawnSync('brew', ['--prefix'], { encoding: 'utf8' });
+  if (r.status === 0 && r.stdout.trim()) return r.stdout.trim();
+  if (fs.existsSync('/opt/homebrew')) return '/opt/homebrew';
+  return '/usr/local';
 }
 
 function sqlite() {
