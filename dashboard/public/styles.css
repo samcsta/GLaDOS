@@ -49,6 +49,8 @@ button {
 }
 button:hover:not(:disabled) { background: var(--muted); }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.safe { background: #153325; border-color: #245c41; color: #b8f7d2; }
+button.safe:hover { background: #1d4a34; }
 button.danger { background: #3a1d1d; border-color: #582626; color: #ffb4b4; }
 button.danger:hover { background: #5a2828; }
 

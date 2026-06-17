@@ -23,12 +23,22 @@ function listAgentIds() {
   }
 }
 
+const sessionIndexCache = new Map();
+
 function readSessionsIndex(agentId) {
   const p = path.join(AGENTS_DIR, agentId, 'sessions', 'sessions.json');
   try {
     const raw = fs.readFileSync(p, 'utf8');
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    sessionIndexCache.set(p, parsed);
+    return parsed;
   } catch (e) {
+    // OpenClaw rewrites session indexes while runs are active. The dashboard
+    // polls those files and also watches change events, so it can occasionally
+    // observe a transient partial write. Use the last good parse instead of
+    // making the agent appear to stop and start again.
+    if (e?.code !== 'ENOENT' && sessionIndexCache.has(p)) return sessionIndexCache.get(p);
+    if (e?.code === 'ENOENT') sessionIndexCache.delete(p);
     return null;
   }
 }

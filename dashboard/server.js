@@ -1426,6 +1426,7 @@ app.get('/api/slash-commands', (req, res) => {
       { cmd: '/halt <agent>', desc: 'Halt a single agent (writes deny rule + burp-gate halt-agent)' },
       { cmd: '/halt-all', desc: 'Engagement-wide halt (Burp scope drop-all + deny-all)' },
       { cmd: '/resume <agent>', desc: 'Resume a halted agent' },
+      { cmd: '/resume-all', desc: 'Resume all halted agents and restore Burp scope' },
       { cmd: '/probe <url>', desc: 'Run watchdog target_probe against a URL' },
       { cmd: '/breaker', desc: 'Show circuit-breaker status' },
       { cmd: '/clear', desc: 'Clear the current transcript view (local only)' },

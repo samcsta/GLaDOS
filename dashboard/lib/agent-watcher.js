@@ -19,6 +19,7 @@ class AgentWatcher extends EventEmitter {
     super();
     this.tails = new Map(); // sessionFile -> { tail, agentId, sessionId }
     this.sessionState = new Map(); // agentId -> current session snapshot
+    this.lifecycle = new Map(); // agentId -> { sessionId, live }
     this._watcher = null;
     this._rescanTimer = null;
   }
@@ -53,6 +54,8 @@ class AgentWatcher extends EventEmitter {
     }
     const agentId = agentIdFromPath(p);
     if (!agentId) return;
+    const snap = currentSessionForAgent(agentId);
+    if (!snap?.live || snap.sessionFile !== p) return;
     if (!this.tails.has(p)) this._attachTail(agentId, p);
   }
 
@@ -62,7 +65,8 @@ class AgentWatcher extends EventEmitter {
     if (entry) {
       entry.tail.close();
       this.tails.delete(p);
-      this.emit('session-ended', { agentId: entry.agentId, sessionId: entry.sessionId });
+      const snap = currentSessionForAgent(entry.agentId);
+      if (isEndedSnapshot(snap, entry.sessionId)) this._emitSessionEnded(entry.agentId, entry.sessionId);
     }
   }
 
@@ -91,7 +95,10 @@ class AgentWatcher extends EventEmitter {
       if (sessionFile && p !== sessionFile) continue;
       entry.tail.close();
       this.tails.delete(p);
-      this.emit('session-ended', { agentId: entry.agentId, sessionId: entry.sessionId });
+      const snap = currentSessionForAgent(entry.agentId);
+      if (!sessionFile || isEndedSnapshot(snap, entry.sessionId)) {
+        this._emitSessionEnded(entry.agentId, entry.sessionId);
+      }
     }
   }
 
@@ -106,11 +113,26 @@ class AgentWatcher extends EventEmitter {
     tail.on('missing', () => {
       tail.close();
       this.tails.delete(sessionFile);
-      this.emit('session-ended', { agentId, sessionId });
+      const snap = currentSessionForAgent(agentId);
+      if (isEndedSnapshot(snap, sessionId)) this._emitSessionEnded(agentId, sessionId);
     });
     tail.on('error', () => {});
     tail.start();
+    this._emitSessionStarted(agentId, sessionId, sessionFile);
+  }
+
+  _emitSessionStarted(agentId, sessionId, sessionFile) {
+    const prev = this.lifecycle.get(agentId);
+    if (prev?.live && prev.sessionId === sessionId) return;
+    this.lifecycle.set(agentId, { sessionId, live: true });
     this.emit('session-started', { agentId, sessionId, sessionFile });
+  }
+
+  _emitSessionEnded(agentId, sessionId) {
+    const prev = this.lifecycle.get(agentId);
+    if (!prev?.live || prev.sessionId !== sessionId) return;
+    this.lifecycle.set(agentId, { sessionId, live: false });
+    this.emit('session-ended', { agentId, sessionId });
   }
 
   activeAgents() {
@@ -129,6 +151,14 @@ class AgentWatcher extends EventEmitter {
     if (this._watcher) this._watcher.close();
     if (this._rescanTimer) clearInterval(this._rescanTimer);
   }
+}
+
+function isEndedSnapshot(snap, sessionId) {
+  if (!snap || snap.sessionId !== sessionId) return false;
+  const endedAt = typeof snap.endedAt === 'number' ? snap.endedAt : 0;
+  const startedAt = typeof snap.startedAt === 'number' ? snap.startedAt : 0;
+  if (endedAt > 0 && (!startedAt || endedAt >= startedAt)) return true;
+  return ['done', 'timeout', 'error', 'aborted'].includes(String(snap.status || '').toLowerCase());
 }
 
 function agentIdFromPath(p) {

@@ -15,6 +15,7 @@ const errorsOnlyEl = document.getElementById('errors-only');
 const debugModeEl = document.getElementById('debug-mode');
 const haltOneBtn = document.getElementById('halt-one');
 const haltAllBtn = document.getElementById('halt-all');
+const resumeAllBtn = document.getElementById('resume-all');
 
 errorsOnlyEl.addEventListener('change', () => {
   document.body.classList.toggle('errors-only', errorsOnlyEl.checked);
@@ -37,6 +38,18 @@ haltAllBtn.addEventListener('click', async () => {
   });
   const j = await r.json();
   logEvent('ended', `halt-all -> ${j.ok ? 'ok' : (j.error || 'error')}`);
+});
+
+resumeAllBtn.addEventListener('click', async () => {
+  if (!confirm('Resume all agents and restore Burp scope now?')) return;
+  const r = await fetch('/api/resume-all', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  const j = await r.json();
+  const count = Array.isArray(j.resumed) ? ` (${j.resumed.length} agents)` : '';
+  logEvent('started', `resume-all -> ${j.ok ? 'ok' + count : (j.error || 'error')}`);
 });
 
 haltOneBtn.addEventListener('click', async () => {
@@ -1593,6 +1606,11 @@ function subscribeLobby() {
     const { reason } = JSON.parse(e.data);
     logEvent('ended', `HALT ALL${reason ? ' — ' + reason : ''}`);
   });
+  es.addEventListener('resume-all', e => {
+    const info = JSON.parse(e.data);
+    const count = Array.isArray(info.resumed) ? ` (${info.resumed.length} agents)` : '';
+    logEvent('started', `resume all${count}`);
+  });
   es.addEventListener('breaker-trip', e => {
     const info = JSON.parse(e.data);
     logEvent('ended', `BREAKER TRIPPED on ${info.host} (${info.samples?.length || '?'} fails)`);
@@ -2912,6 +2930,11 @@ async function runSlashCommand(raw, rec) {
       const r = await fetch('/api/halt-all', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: 'slash command' }),
+      }).then(r => r.json());
+      echo(JSON.stringify(r, null, 2));
+    } else if (cmd === '/resume-all') {
+      const r = await fetch('/api/resume-all', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
       }).then(r => r.json());
       echo(JSON.stringify(r, null, 2));
     } else if (cmd === '/resume') {

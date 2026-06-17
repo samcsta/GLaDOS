@@ -8,7 +8,7 @@
   {
     "id": "ad-validator",
     "name": "ad-validator",
-    "model": "ollama-local/glm-4.7-flash:latest",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
     "enabled": true
   },
   {
@@ -26,13 +26,13 @@
   {
     "id": "api-validator",
     "name": "api-validator",
-    "model": "ollama-local/glm-4.7-flash:latest",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
     "enabled": true
   },
   {
     "id": "atlas",
     "name": "atlas",
-    "model": "ollama-local/glm-4.7-flash:latest",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
     "enabled": true,
     "subagent": false,
     "identity": {
@@ -50,7 +50,7 @@
   {
     "id": "c2-validator",
     "name": "c2-validator",
-    "model": "ollama-local/glm-4.7-flash:latest",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
     "enabled": false
   },
   {
@@ -63,7 +63,7 @@
   {
     "id": "evidence-curator",
     "name": "evidence-curator",
-    "model": "ollama-local/glm-4.7-flash:latest",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
     "enabled": true
   },
   {
@@ -101,13 +101,13 @@
   {
     "id": "net-recon",
     "name": "net-recon",
-    "model": "ollama-local/glm-4.7-flash:latest",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
     "enabled": true
   },
   {
     "id": "origin-ip",
     "name": "origin-ip",
-    "model": "ollama-local/glm-4.7-flash:latest",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
     "enabled": true,
     "dispatch": "conditional"
   },
@@ -120,7 +120,7 @@
   {
     "id": "phish-validator",
     "name": "phish-validator",
-    "model": "ollama-local/glm-4.7-flash:latest",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
     "enabled": false
   },
   {
@@ -132,7 +132,7 @@
   {
     "id": "plan-synthesizer",
     "name": "plan-synthesizer",
-    "model": "ollama-local/glm-4.7-flash:latest",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
     "enabled": true,
     "identity": {
       "name": "Plan Synthesizer",
@@ -161,25 +161,25 @@
   {
     "id": "postex-validator",
     "name": "postex-validator",
-    "model": "ollama-local/glm-4.7-flash:latest",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
     "enabled": false
   },
   {
     "id": "report-validator",
     "name": "report-validator",
-    "model": "ollama-local/glm-4.7-flash:latest",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
     "enabled": true
   },
   {
     "id": "report-writer",
     "name": "report-writer",
-    "model": "ollama-local/glm-4.7-flash:latest",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
     "enabled": true
   },
   {
     "id": "scope-guardian",
     "name": "scope-guardian",
-    "model": "ollama-local/glm-4.7-flash:latest",
+    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
     "enabled": true
   },
   {

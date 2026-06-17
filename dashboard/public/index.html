@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <title>GLaDOS Ops Dashboard</title>
-  <link rel="stylesheet" href="/styles.css?v=20260616-agent-settings" />
+  <link rel="stylesheet" href="/styles.css?v=20260617-resume-all" />
 </head>
 <body>
   <header class="topbar">
@@ -17,6 +17,7 @@
       <button id="restart-gateway" title="openclaw daemon restart — restarts the WebSocket Gateway via launchd">Restart gateway</button>
       <button id="reset-session" title="Archive the current agent's session JSONL — next turn starts fresh">Reset session</button>
       <button id="halt-one" disabled>Halt agent</button>
+      <button id="resume-all" class="safe" title="Clear dashboard halt-all deny rules and re-enable Burp scope">Resume all</button>
       <button id="halt-all" class="danger">HALT ALL</button>
     </div>
   </header>
@@ -80,6 +81,6 @@
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.11/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-  <script src="/app.js?v=20260616-agent-settings"></script>
+  <script src="/app.js?v=20260617-resume-all"></script>
 </body>
 </html>
