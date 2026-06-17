@@ -252,12 +252,10 @@ flowchart TD
     %% ─── OPERATOR CONTROL PLANE (ambient, always active) ───────────
     subgraph OPS ["  Operator Control Plane  (runs alongside every phase)  "]
       direction TB
-      DASH[" GLaDOS Ops Dashboard\n http://localhost:4280 \nAuto-spawning per-agent tabs\nLive JSONL transcript stream\nGLaDOS chat pane\nHALT controls · indicators "]
-      WDMCP[" watchdog_mcp\ntarget_probe · target_health\nagent_halt · engagement_halt_all\ncircuit_status "]
-      BREAKER[" B2 Circuit Breaker\nPolls Burp history every 5s\n3× 5xx/429 in 60s → halt_all "]
+      DASH[" GLaDOS Ops Dashboard\n http://localhost:4280 \nAuto-spawning per-agent tabs\nLive JSONL transcript stream\nGLaDOS chat pane\nHALT controls · Burp RPS "]
+      WDMCP[" watchdog_mcp\ntarget_probe · target_health\nagent_halt · engagement_halt_all "]
       BURPGATE[" A1 Burp-Gated Egress\nHTTPS_PROXY=127.0.0.1:8080\nburp-gate.sh halt-all → drop scope "]
       EXECAPP[" A2 Tool-Permission Revocation\nexec-approvals.json deny rules\n per-agent, next tool call fails "]
-      BREAKER -->|trip event| DASH
       WDMCP -->|writes| EXECAPP
       WDMCP -->|invokes| BURPGATE
       DASH -->|HALT button| WDMCP

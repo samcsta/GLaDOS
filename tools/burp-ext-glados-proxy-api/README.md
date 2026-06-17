@@ -1,7 +1,7 @@
 # GLaDOS Proxy API — Burp Montoya Extension
 
 Exposes Burp Pro proxy history over a small local HTTP API so the GLaDOS Ops
-Dashboard and the watchdog circuit breaker can ingest traffic Burp sees.
+Dashboard can display traffic and RPS from Burp.
 
 ## Why
 

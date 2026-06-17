@@ -210,7 +210,7 @@ Coordinate supervised assessments, enforce gates, summarize progress, and keep t
 
 - No scope/health/plan approval
 - Finding needs manual inspection
-- Circuit breaker trips
+- Operator halt, explicit pause, or fresh target probe returns down
 - Recon identifies a backend, API host, CDN origin, redirect host, or related
   system outside the exact approved scope
 

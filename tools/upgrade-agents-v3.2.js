@@ -42,7 +42,7 @@ const roles = {
     title: 'Network / Infrastructure Recon Specialist',
     mission: 'Map explicitly approved infrastructure with low-rate, non-invasive checks and clear service evidence.',
     workflow: [
-      'Require target_health=healthy and explicit network scope before any active probing.',
+      'Require explicit network scope and a fresh target probe that is not down before any active probing.',
       'Prefer DNS/TLS/banner-safe checks before port scanning.',
       'Use low-rate scans only when approved; record command, rate, and timestamps.',
       'Identify exposed management surfaces, unusual ports, TLS issues, and service ownership.',
@@ -315,14 +315,14 @@ const roles = {
     title: 'GLaDOS Coordinator',
     mission: 'Coordinate supervised assessments, enforce gates, summarize progress, and keep the operator in control.',
     workflow: [
-      'Run preflight: VPN/model, Burp, patches, target health, scope.',
+      'Run preflight: VPN/model, Burp, patches, fresh target probe, scope.',
       'Complete Phase 1 before plan synthesis.',
       'Require operator approval before Phase 3.',
       'Route suspected findings to validators and manual operator inspection.',
       'Use report-writer/report-validator for durable deliverables.'
     ],
     outputs: ['operator progress updates', 'approved dispatches', 'audit-ready decisions'],
-    stops: ['No scope/health/plan approval', 'Finding needs manual inspection', 'Circuit breaker trips']
+    stops: ['No scope/health/plan approval', 'Finding needs manual inspection', 'Operator halt or fresh target probe returns down']
   }
 };
 
@@ -362,7 +362,7 @@ const newAgents = {
         'Never perform the action yourself.'
       ],
       outputs: ['allow/deny/requires_operator decision', 'reason', 'missing prerequisites'],
-      stops: ['Ambiguous scope', 'Target health not healthy', 'No approved plan for exploitation-tier action']
+      stops: ['Ambiguous scope', 'Fresh target probe returns down', 'No approved plan for exploitation-tier action']
     }
   },
   'js-reverser': {
@@ -502,7 +502,7 @@ function toolsMd(id) {
 ## Preferred Tooling
 
 - Blackboard MCP for tasks, baseline data, findings, and validation status.
-- Watchdog MCP for target health, dispatch gates, halt/resume, and circuit status.
+- Watchdog MCP for target health, dispatch gates, and manual halt/resume.
 - glados-ops MCP for scope checks, evidence bundles, JS/OpenAPI extraction, and safe command planning.
 - OpenClaw Browser/Burp-visible traffic for web targets.
 

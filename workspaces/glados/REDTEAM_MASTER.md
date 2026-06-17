@@ -49,7 +49,7 @@ External project trackers, report systems, LLM providers, VPNs, and customer por
 ## MCP Servers
 
 - `blackboard`: findings, tasks, baseline recon, plans, replan proposals.
-- `watchdog`: target health, halts, circuit breaker, plan dispatch gate.
+- `watchdog`: target health, manual halts/resumes, plan dispatch gate.
 - `glados-ops`: scope guard checks, evidence bundles, JS/OpenAPI extraction, safe command planning.
 - `computer-use` / browser integrations: interactive inspection where configured.
 

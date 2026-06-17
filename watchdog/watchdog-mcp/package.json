@@ -1,7 +1,7 @@
 {
   "name": "watchdog-mcp",
   "version": "0.1.0",
-  "description": "MCP server exposing GLaDOS watchdog primitives (target health, agent halt, circuit breaker).",
+  "description": "MCP server exposing GLaDOS watchdog primitives (target health, manual halt/resume, plan gate).",
   "bin": { "watchdog-mcp": "./index.js" },
   "main": "index.js",
   "scripts": { "start": "node index.js" },

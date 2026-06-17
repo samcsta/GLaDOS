@@ -22,9 +22,9 @@ import kotlin.concurrent.write
 /**
  * GLaDOS Burp Montoya extension.
  *
- * Exposes a local HTTP API on 127.0.0.1:1338 so the GLaDOS Ops Dashboard and
- * watchdog circuit breaker can read Burp proxy history — something the built-in
- * Burp REST API does not provide.
+ * Exposes a local HTTP API on 127.0.0.1:1338 so the GLaDOS Ops Dashboard can
+ * read Burp proxy history and RPS — something the built-in Burp REST API does
+ * not provide.
  *
  * Endpoints:
  *   GET  /health                  -> {"ok":true,"buffered":N}

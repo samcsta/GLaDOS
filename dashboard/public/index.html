@@ -3,7 +3,20 @@
 <head>
   <meta charset="utf-8" />
   <title>GLaDOS Ops Dashboard</title>
-  <link rel="stylesheet" href="/styles.css?v=20260617-resume-all" />
+  <script>
+    try {
+      const root = document.documentElement;
+      root.dataset.colorProfile = localStorage.getItem('glados-dash.color-profile') || 'classic';
+      root.dataset.density = localStorage.getItem('glados-dash.density') || 'comfortable';
+      root.dataset.fontSize = localStorage.getItem('glados-dash.font-size') || 'default';
+    } catch {
+      const root = document.documentElement;
+      root.dataset.colorProfile = 'classic';
+      root.dataset.density = 'comfortable';
+      root.dataset.fontSize = 'default';
+    }
+  </script>
+  <link rel="stylesheet" href="/styles.css?v=20260617-appearance-controls" />
 </head>
 <body>
   <header class="topbar">
@@ -17,8 +30,8 @@
       <button id="restart-gateway" title="openclaw daemon restart — restarts the WebSocket Gateway via launchd">Restart gateway</button>
       <button id="reset-session" title="Archive the current agent's session JSONL — next turn starts fresh">Reset session</button>
       <button id="halt-one" disabled>Halt agent</button>
-      <button id="resume-all" class="safe" title="Clear dashboard halt-all deny rules and re-enable Burp scope">Resume all</button>
-      <button id="halt-all" class="danger">HALT ALL</button>
+      <button id="resume-all" class="safe" title="Clear dashboard halt-all deny rules and re-enable Burp scope">Resume All</button>
+      <button id="halt-all" class="danger">Halt All</button>
     </div>
   </header>
 
@@ -51,7 +64,6 @@
         <span class="collapsible-chevron">▾</span> Indicators
       </h2>
       <div class="indicators-group" id="indicators-group">
-        <div class="indicator" title="Worst state across all probed targets (healthy / degraded / down). Updated on each target_probe call.">Target health <span id="target-health" class="pill muted">—</span></div>
         <div class="indicator" title="Burp Pro requests-per-second, 10s rolling window, polled from /v0.1/proxy/http_history every 5s.">Burp RPS <span id="burp-rps" class="pill muted">—</span></div>
       </div>
       <h2 class="collapsible-heading" id="help-heading" data-section="help" title="Click to collapse/expand">
@@ -81,6 +93,6 @@
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.11/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-  <script src="/app.js?v=20260617-resume-all"></script>
+  <script src="/app.js?v=20260617-appearance-controls"></script>
 </body>
 </html>

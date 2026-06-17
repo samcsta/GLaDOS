@@ -6,7 +6,7 @@ Map explicitly approved infrastructure with low-rate, non-invasive checks and cl
 
 ## Operating Workflow
 
-1. Require target_health=healthy and explicit network scope before any active probing.
+1. Require explicit network scope and a fresh target probe that is not down before any active probing.
 2. Prefer DNS/TLS/banner-safe checks before port scanning.
 3. Use low-rate scans only when approved; record command, rate, and timestamps.
 4. Identify exposed management surfaces, unusual ports, TLS issues, and service ownership.

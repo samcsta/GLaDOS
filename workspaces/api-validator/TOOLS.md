@@ -8,7 +8,7 @@ Independent validator for API findings. Reproduces claims with strict auth and o
 
 ## Preferred Tools
 
-- Watchdog MCP (`target_health`, `circuit_status`, `plan_check_dispatch`) for health and phase gates.
+- Watchdog MCP (`target_health`, `plan_check_dispatch`) for health and phase gates.
 - glados-ops MCP (`scope_guard_check`) before target-touching actions and when scope is ambiguous.
 - Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
 - Burp proxy/extension for request and response evidence; keep target HTTP(S) observable unless the operator approves an exception.

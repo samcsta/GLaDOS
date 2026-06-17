@@ -18,7 +18,7 @@ module.exports = {
   OPENCLAW_BIN: process.env.OPENCLAW_BIN || 'openclaw',
   // Tools whose use should be denied when an agent is halted.
   NETWORK_TOOL_NAMES: ['browser', 'exec', 'process', 'web_fetch', 'web_search'],
-  // Circuit breaker: N consecutive 5xx from same host inside WINDOW_MS -> trip.
+  // Diagnostic Burp error burst window. This no longer triggers automatic halt.
   BREAKER_THRESHOLD: Number(process.env.BREAKER_THRESHOLD || 3),
   BREAKER_WINDOW_MS: Number(process.env.BREAKER_WINDOW_MS || 60_000),
 };

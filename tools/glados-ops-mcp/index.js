@@ -19,6 +19,7 @@ const LOCAL_AUTH = process.env.GLADOS_LOCAL_AUTH || path.join(GLADOS_RUNTIME_DIR
 
 const blackboard = fs.existsSync(BLACKBOARD_DB) ? new Database(BLACKBOARD_DB, { readonly: true }) : null;
 const watchdog = fs.existsSync(WATCHDOG_DB) ? new Database(WATCHDOG_DB, { readonly: true }) : null;
+const HEALTH_STALE_MS = Number(process.env.GLADOS_HEALTH_STALE_MS || 5 * 60 * 1000);
 
 const PHASE1_AGENTS = new Set([
   'osint',
@@ -62,7 +63,7 @@ const EXPLOITATION_AGENTS = new Set([
 const TOOLS = [
   {
     name: 'scope_guard_check',
-    description: 'Check whether a proposed agent action is in scope, target-healthy, and plan-approved when required. Does not execute the action.',
+    description: 'Check whether a proposed agent action is in scope, recently target-healthy, and plan-approved when required. Does not execute the action.',
     inputSchema: {
       type: 'object',
       required: ['agent_id', 'target_url'],
@@ -430,7 +431,13 @@ function engagementScope(engagementId) {
 
 function targetHealth(targetUrl) {
   if (!watchdog) return { state: 'unknown', reason: 'watchdog db missing' };
-  return watchdog.prepare('SELECT * FROM target_health WHERE target_url = ?').get(targetUrl) || { state: 'unknown', reason: 'no target health row' };
+  const row = watchdog.prepare('SELECT * FROM target_health WHERE target_url = ?').get(targetUrl);
+  if (!row) return { state: 'unknown', reason: 'no target health row', stale: true };
+  const updatedAt = Number(row.updated_at || row.last_probed_at || 0);
+  return {
+    ...row,
+    stale: !updatedAt || Date.now() - updatedAt > HEALTH_STALE_MS,
+  };
 }
 
 function planFindingAgents(row) {
@@ -503,7 +510,7 @@ function scopeGuard(args) {
   const approved = preApprovedClass ? null : latestApprovedPlan(args.agent_id, args.engagement_id);
   const missing = [];
   if (!scopeResult.ok) missing.push(scopeResult.reason);
-  if (!['healthy', 'unknown'].includes(health.state)) missing.push(`target health is ${health.state}`);
+  if (!health.stale && !['healthy', 'unknown'].includes(health.state)) missing.push(`target health is ${health.state}`);
   if (!preApprovedClass && !approved) missing.push('no approved plan includes this agent');
   const actionText = String(args.action || '');
   const riskyAction = /post|exploit|mutat|delete|write|send|phish/i.test(actionText);

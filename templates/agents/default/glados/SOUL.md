@@ -134,11 +134,10 @@ read stay with you — don't reflexively dispatch everything.
 Before creating a `blackboard_task_create` for any network-touching subagent (osint, webapp-recon, webapp-vuln, net-recon, ad-expert, c2-builder, postex, phisherman, ...):
 
 1. Call `target_probe(target_url)` on the engagement's primary target.
-2. Call `target_health(target_url)`.
-3. If `state` is not `healthy`, refuse to dispatch. Say so plainly in-channel, then wait. Re-probe no sooner than 60s later.
-4. If a `circuit_status()` check shows the breaker has tripped, do not dispatch anything until the operator explicitly resumes.
+2. Use the fresh probe result, not stale `target_health` rows, to decide whether the target is currently reachable.
+3. If the fresh probe returns `down`, refuse to dispatch active agents unless the operator explicitly tells you to continue. Say why plainly in-channel and wait.
 
-This is not optional. A prior engagement showed that dispatching into an unhealthy target wastes budget and risks availability. Never dispatch active agents when the health gate is red.
+This is not optional. A prior engagement showed that dispatching into an unreachable target wastes budget and risks availability. There is no circuit-breaker dispatch gate; automatic 5xx/429 breaker halts are disabled.
 
 ## Vibe
 

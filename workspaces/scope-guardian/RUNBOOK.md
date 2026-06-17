@@ -21,7 +21,7 @@ Evaluate proposed actions against scope, target health, plan approval, ACL expec
 ## Stop And Ask
 
 - Ambiguous scope
-- Target health not healthy
+- Fresh target probe returns down
 - No approved plan for exploitation-tier action
 
 ## Blackboard Discipline

@@ -17,6 +17,122 @@ const haltOneBtn = document.getElementById('halt-one');
 const haltAllBtn = document.getElementById('halt-all');
 const resumeAllBtn = document.getElementById('resume-all');
 
+const COLOR_PROFILE_KEY = 'glados-dash.color-profile';
+const DENSITY_KEY = 'glados-dash.density';
+const FONT_SIZE_KEY = 'glados-dash.font-size';
+const COLOR_PROFILES = [
+  { id: 'classic', label: 'Classic', swatches: ['#0c0f14', '#5aa6ff', '#4ade80'] },
+  { id: 'purple', label: 'Purple', swatches: ['#100c18', '#a879ff', '#71e6a6'] },
+  { id: 'red', label: 'Red', swatches: ['#130d0f', '#ff6f7d', '#ffd16b'] },
+  { id: 'green', label: 'Green', swatches: ['#0b120f', '#58d68d', '#74e49b'] },
+  { id: 'bw', label: 'Black+White', swatches: ['#000000', '#f2f2f2', '#6f6f6f'] },
+];
+const DENSITY_OPTIONS = [
+  { id: 'comfortable', label: 'Comfortable' },
+  { id: 'compact', label: 'Compact' },
+];
+const FONT_SIZE_OPTIONS = [
+  { id: 'small', label: 'Small' },
+  { id: 'default', label: 'Default' },
+  { id: 'large', label: 'Large' },
+];
+
+function currentOption(storageKey, options, fallback) {
+  try {
+    const saved = localStorage.getItem(storageKey);
+    if (options.some(p => p.id === saved)) return saved;
+  } catch {}
+  return fallback;
+}
+
+function currentColorProfile() {
+  return currentOption(COLOR_PROFILE_KEY, COLOR_PROFILES, 'classic');
+}
+
+function currentDensity() {
+  return currentOption(DENSITY_KEY, DENSITY_OPTIONS, 'comfortable');
+}
+
+function currentFontSize() {
+  return currentOption(FONT_SIZE_KEY, FONT_SIZE_OPTIONS, 'default');
+}
+
+function applyColorProfile(profileId, { persist = true } = {}) {
+  const id = COLOR_PROFILES.some(p => p.id === profileId) ? profileId : 'classic';
+  document.documentElement.dataset.colorProfile = id;
+  if (persist) {
+    try { localStorage.setItem(COLOR_PROFILE_KEY, id); } catch {}
+  }
+  updateColorProfileButtons(id);
+}
+
+function applyDensity(densityId, { persist = true } = {}) {
+  const id = DENSITY_OPTIONS.some(p => p.id === densityId) ? densityId : 'comfortable';
+  document.documentElement.dataset.density = id;
+  if (persist) {
+    try { localStorage.setItem(DENSITY_KEY, id); } catch {}
+  }
+  updateSegmentedButtons('density', id);
+}
+
+function applyFontSize(fontSizeId, { persist = true } = {}) {
+  const id = FONT_SIZE_OPTIONS.some(p => p.id === fontSizeId) ? fontSizeId : 'default';
+  document.documentElement.dataset.fontSize = id;
+  if (persist) {
+    try { localStorage.setItem(FONT_SIZE_KEY, id); } catch {}
+  }
+  updateSegmentedButtons('font-size', id);
+}
+
+function updateColorProfileButtons(activeId = currentColorProfile()) {
+  document.querySelectorAll('.color-profile-option').forEach(btn => {
+    const selected = btn.dataset.profile === activeId;
+    btn.setAttribute('aria-checked', selected ? 'true' : 'false');
+  });
+}
+
+function updateSegmentedButtons(group, activeId) {
+  document.querySelectorAll(`.appearance-option[data-group="${group}"]`).forEach(btn => {
+    const selected = btn.dataset.value === activeId;
+    btn.setAttribute('aria-checked', selected ? 'true' : 'false');
+  });
+}
+
+function renderColorProfileControl() {
+  const el = document.getElementById('color-profile-options');
+  if (!el) return;
+  const active = currentColorProfile();
+  el.innerHTML = COLOR_PROFILES.map(profile => {
+    const swatches = profile.swatches
+      .map(color => `<span class="color-profile-swatch" style="background:${color}"></span>`)
+      .join('');
+    const checked = profile.id === active ? 'true' : 'false';
+    return `<button type="button" class="color-profile-option" role="radio" aria-checked="${checked}" data-profile="${profile.id}">
+      <span class="color-profile-swatches" aria-hidden="true">${swatches}</span>
+      <span>${profile.label}</span>
+    </button>`;
+  }).join('');
+  el.querySelectorAll('.color-profile-option').forEach(btn => {
+    btn.addEventListener('click', () => applyColorProfile(btn.dataset.profile));
+  });
+}
+
+function renderSegmentedControl(containerId, group, options, activeId, onSelect) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = options.map(option => {
+    const checked = option.id === activeId ? 'true' : 'false';
+    return `<button type="button" class="appearance-option" role="radio" aria-checked="${checked}" data-group="${group}" data-value="${option.id}">${option.label}</button>`;
+  }).join('');
+  el.querySelectorAll('.appearance-option').forEach(btn => {
+    btn.addEventListener('click', () => onSelect(btn.dataset.value));
+  });
+}
+
+applyColorProfile(currentColorProfile(), { persist: false });
+applyDensity(currentDensity(), { persist: false });
+applyFontSize(currentFontSize(), { persist: false });
+
 errorsOnlyEl.addEventListener('change', () => {
   document.body.classList.toggle('errors-only', errorsOnlyEl.checked);
 });
@@ -30,7 +146,7 @@ debugModeEl.addEventListener('change', applyDebugMode);
 applyDebugMode();
 
 haltAllBtn.addEventListener('click', async () => {
-  if (!confirm('HALT ALL agents now?')) return;
+  if (!confirm('Halt all agents now?')) return;
   const r = await fetch('/api/halt-all', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1604,17 +1720,12 @@ function subscribeLobby() {
   });
   es.addEventListener('halt-all', e => {
     const { reason } = JSON.parse(e.data);
-    logEvent('ended', `HALT ALL${reason ? ' — ' + reason : ''}`);
+    logEvent('ended', `Halt All${reason ? ' — ' + reason : ''}`);
   });
   es.addEventListener('resume-all', e => {
     const info = JSON.parse(e.data);
     const count = Array.isArray(info.resumed) ? ` (${info.resumed.length} agents)` : '';
-    logEvent('started', `resume all${count}`);
-  });
-  es.addEventListener('breaker-trip', e => {
-    const info = JSON.parse(e.data);
-    logEvent('ended', `BREAKER TRIPPED on ${info.host} (${info.samples?.length || '?'} fails)`);
-    refreshIndicators();
+    logEvent('started', `Resume All${count}`);
   });
   es.addEventListener('patches-reapplied', () => {
     logEvent('ok', 'openclaw patches re-applied');
@@ -1676,39 +1787,20 @@ function subscribeLobby() {
     const info = JSON.parse(e.data);
     logEvent(info.state === 'healthy' ? 'started' : 'ended',
       `probe ${info.target_url || '?'} → ${info.state} (${info.status})`);
-    refreshIndicators();
   });
 }
 
 // --- Indicators ---
-const healthPill = document.getElementById('target-health');
 const rpsPill = document.getElementById('burp-rps');
 
 async function refreshIndicators() {
   try {
-    const [t, r] = await Promise.all([
-      fetch('/api/targets').then(r => r.json()),
-      fetch('/api/burp/rps').then(r => r.json()),
-    ]);
-    const worst = worstState((t.targets || []).map(x => x.state));
-    healthPill.textContent = worst || '—';
-    healthPill.className = 'pill ' + stateClass(worst);
+    const r = await fetch('/api/burp/rps').then(r => r.json());
     rpsPill.textContent = r.rps == null ? '—' : r.rps.toFixed(2);
     rpsPill.className = 'pill ' + (r.rps == null ? 'muted' : 'ok');
   } catch {
-    healthPill.className = 'pill muted';
     rpsPill.className = 'pill muted';
   }
-}
-function stateClass(s) {
-  if (s === 'healthy') return 'ok';
-  if (s === 'degraded') return 'warn';
-  if (s === 'down' || s === 'paused') return 'err';
-  return 'muted';
-}
-function worstState(states) {
-  const rank = { down: 4, paused: 3, degraded: 2, healthy: 1, unknown: 0 };
-  return states.reduce((a, b) => (rank[b] || 0) > (rank[a] || 0) ? b : a, null);
 }
 
 // --- Reports ---
@@ -2645,7 +2737,7 @@ function renderAboutPane() {
 
       <h2>Kill-switches</h2>
       <ul>
-        <li><b>HALT ALL</b> (top bar) — flips Burp scope to <code>exclude ^.*$</code> and
+        <li><b>Halt All</b> (top bar) — flips Burp scope to <code>exclude ^.*$</code> and
           writes deny rules to <code>~/.openclaw/exec-approvals.json</code>. Next tool
           call from any agent fails within one turn.</li>
         <li><b>Halt agent</b> — same mechanism scoped to a single agent.</li>
@@ -2672,11 +2764,32 @@ async function renderSettingsPane() {
   const wrap = document.createElement('div');
   wrap.className = 'settings-pane';
   wrap.innerHTML = `
-    <h1>Agent Settings</h1>
-    <div id="settings-version" class="settings-version">Version loading…</div>
-    <p style="color:var(--fg-dim);">Click an agent to expand. Enable/disable changes update the local agent workspace and regenerate <code>~/.openclaw/openclaw.json</code>; restart the gateway when prompted.</p>
-    <div id="settings-list">loading…</div>`;
+    <h1>Settings</h1>
+    <section class="settings-section">
+      <h2>Appearance</h2>
+      <div class="settings-field">
+        <label>Color Profile</label>
+        <div id="color-profile-options" class="color-profile-options" role="radiogroup" aria-label="Color Profile"></div>
+      </div>
+      <div class="settings-field">
+        <label>Density</label>
+        <div id="density-options" class="appearance-options" role="radiogroup" aria-label="Density"></div>
+      </div>
+      <div class="settings-field">
+        <label>Font Size</label>
+        <div id="font-size-options" class="appearance-options" role="radiogroup" aria-label="Font Size"></div>
+      </div>
+    </section>
+    <section class="settings-section">
+      <h2>Agents</h2>
+      <div id="settings-version" class="settings-version">Version loading…</div>
+      <p style="color:var(--fg-dim);">Click an agent to expand. Enable/disable changes update the local agent workspace and regenerate <code>~/.openclaw/openclaw.json</code>; restart the gateway when prompted.</p>
+      <div id="settings-list">loading…</div>
+    </section>`;
   paneEl.appendChild(wrap);
+  renderColorProfileControl();
+  renderSegmentedControl('density-options', 'density', DENSITY_OPTIONS, currentDensity(), applyDensity);
+  renderSegmentedControl('font-size-options', 'font-size', FONT_SIZE_OPTIONS, currentFontSize(), applyFontSize);
 
   try {
     const [versionInfo, modelsResp, settingsResp] = await Promise.all([
@@ -2950,9 +3063,9 @@ async function runSlashCommand(raw, rec) {
         body: JSON.stringify({ target_url: arg }),
       }).then(r => r.json());
       echo(JSON.stringify(r, null, 2));
-    } else if (cmd === '/breaker') {
+    } else if (cmd === '/rps' || cmd === '/breaker') {
       const r = await fetch('/api/burp/rps').then(r => r.json());
-      echo(`Burp RPS: ${r.rps ?? 'n/a'}\n(Circuit breaker polls /v0.1/proxy/http_history every 5s; tripping threshold = 3× 5xx/429 in 60s.)`);
+      echo(`Burp RPS: ${r.rps ?? 'n/a'}\nAutomatic 5xx/429 halt breaker is disabled. Use Halt All when you want to stop the engagement.`);
     } else if (cmd === '/clear') {
       rec.events.length = 0;
       if (rec.el) rec.el.innerHTML = '';

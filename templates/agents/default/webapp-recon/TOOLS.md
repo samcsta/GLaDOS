@@ -11,7 +11,7 @@ Core Phase 1 recon agent. Maps the application and writes baseline data; does no
 - OpenClaw Browser with Burp-visible traffic for interactive web application work.
 - Burp proxy/extension for request and response evidence; keep target HTTP(S) observable unless the operator approves an exception.
 - Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
-- Watchdog MCP (`target_health`, `circuit_status`, `plan_check_dispatch`) for health and phase gates.
+- Watchdog MCP (`target_health`, `plan_check_dispatch`) for health and phase gates.
 - glados-ops `local_auth_status` and `adfs_active_directory_login` only for approved Ford ADFS dependency login.
 - glados-ops `js_endpoint_extract` when captured JS assets need endpoint extraction.
 

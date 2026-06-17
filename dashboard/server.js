@@ -11,7 +11,7 @@ const { JsonlTail, convertToEvents } = require('./lib/jsonl-tail');
 const { RawStreamTail } = require('./lib/raw-stream-tail');
 const watchdogHealth = require('glados-watchdog/lib/health');
 const watchdogHalt = require('glados-watchdog/lib/halt');
-const { CircuitBreaker, getBurpRps } = require('glados-watchdog/lib/breaker');
+const { getBurpRps } = require('glados-watchdog/lib/breaker');
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -1428,7 +1428,7 @@ app.get('/api/slash-commands', (req, res) => {
       { cmd: '/resume <agent>', desc: 'Resume a halted agent' },
       { cmd: '/resume-all', desc: 'Resume all halted agents and restore Burp scope' },
       { cmd: '/probe <url>', desc: 'Run watchdog target_probe against a URL' },
-      { cmd: '/breaker', desc: 'Show circuit-breaker status' },
+      { cmd: '/rps', desc: 'Show Burp requests-per-second' },
       { cmd: '/clear', desc: 'Clear the current transcript view (local only)' },
     ],
   });
@@ -1471,12 +1471,6 @@ app.post('/api/health/burp/reapply-patches', (req, res) => {
 
 // v3.1 — Plan-approval workflow endpoints (see routes/plans.js).
 app.use('/api/plans', require('./routes/plans')(broadcastLobby));
-
-// Circuit breaker — polls Burp proxy history; on trip, broadcast to lobby.
-const breaker = new CircuitBreaker({
-  intervalMs: 5000,
-  onTrip: info => broadcastLobby('breaker-trip', info),
-}).start();
 
 // v3.1.04252026 (Blocker E) — Replan-proposal watcher.
 // Polls blackboard's replan_proposals table every 5s for state='open' rows.
@@ -1575,6 +1569,6 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`GLaDOS Ops Dashboard on http://localhost:${PORT}`);
 });
 
-function shutdown() { try { watcher.stop(); breaker.stop(); } catch {} process.exit(0); }
+function shutdown() { try { watcher.stop(); } catch {} process.exit(0); }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

@@ -8,7 +8,7 @@ Core/conditional Phase 1 infrastructure mapper. Uses low-rate, non-invasive chec
 
 ## Preferred Tools
 
-- Watchdog MCP (`target_health`, `circuit_status`, `plan_check_dispatch`) for health and phase gates.
+- Watchdog MCP (`target_health`, `plan_check_dispatch`) for health and phase gates.
 - glados-ops MCP (`scope_guard_check`) before target-touching actions and when scope is ambiguous.
 - Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
 - DNS/TLS/banner-safe tools such as `dig`, `openssl`, `nmap` with approved low-rate profiles.
@@ -20,7 +20,7 @@ Core/conditional Phase 1 infrastructure mapper. Uses low-rate, non-invasive chec
 - Prefer DNS/TLS/banner checks before port scanning.
 - Record exact command, rate, ports, timestamps, and proxy/route assumptions.
 - No vulnerability scripts, brute force, NSE intrusive scripts, or high-rate scans without plan approval.
-- Stop on 429/503, circuit breaker, or health degradation.
+- Stop on repeated 429/503 responses, explicit operator halt, or fresh health degradation.
 
 ## Evidence Handling
 

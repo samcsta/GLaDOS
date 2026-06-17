@@ -189,7 +189,7 @@ installs the MCP server dependencies and writes them into
 `~/.openclaw/openclaw.json`:
 
 - `blackboard` MCP — findings, tasks, baseline recon, plans, approvals
-- `watchdog` MCP — target health, halt/resume, circuit breaker, plan gate
+- `watchdog` MCP — target health, manual halt/resume, plan gate
 - `glados-ops` MCP — operator context, local auth status, scope guard,
   browser/auth helpers, evidence helpers
 - `computer-use` MCP — included if already installed on the workstation
@@ -365,7 +365,7 @@ Core pieces:
 - OpenClaw: runs GLaDOS and subagents, stores local sessions, streams JSONL and raw token events.
 - Agents: editable local workspaces that define identity, runbook, tools, and skills.
 - Blackboard MCP: shared local SQLite state for findings, tasks, baseline recon, plans, approvals, and replans.
-- Watchdog MCP: target health, halts, circuit breaker, and deterministic plan dispatch checks.
+- Watchdog MCP: target health, manual halts/resumes, and deterministic plan dispatch checks.
 - GLaDOS ops MCP: scope guard checks, evidence bundle creation, JS/OpenAPI extraction, and safe command planning.
 - Operator context: non-secret background knowledge available to GLaDOS through `glados-ops.operator_context`.
 - Local auth status: redacted credential-profile availability through `glados-ops.local_auth_status`; credential values stay local and are not returned to agents.

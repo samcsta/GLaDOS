@@ -9,7 +9,7 @@ Disabled by default. Enable only for an engagement with explicit infrastructure 
 ## Preferred Tools
 
 - Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
-- Watchdog MCP (`target_health`, `circuit_status`, `plan_check_dispatch`) for health and phase gates.
+- Watchdog MCP (`target_health`, `plan_check_dispatch`) for health and phase gates.
 - Infrastructure-as-code or local config files approved by the operator.
 - DNS/TLS/domain tooling for manifests and review, not unapproved deployment.
 

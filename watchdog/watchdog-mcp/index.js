@@ -6,14 +6,13 @@ const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontext
 
 const { probe, getHealth, listHealth, markHealth } = require('../lib/health');
 const { agentHalt, agentResume, agentStatus, engagementHaltAll } = require('../lib/halt');
-const { db } = require('../lib/db');
 const { planCheckDispatch } = require('../lib/plan-gate');
 
 const TOOLS = [
   {
     name: 'target_probe',
     description:
-      'Actively probe a target URL (HEAD request through the local network stack) and record the result in target_health. Call this BEFORE dispatching any agent against a target. Returns the probe result and derived state (healthy|degraded|down|paused|unknown).',
+      'Actively probe a target URL (HEAD request through the local network stack) and record the fresh result in target_health. Call this BEFORE dispatching any agent against a target. Returns the probe result and derived state (healthy|degraded|down|paused|unknown).',
     inputSchema: {
       type: 'object',
       required: ['target_url'],
@@ -26,7 +25,7 @@ const TOOLS = [
   {
     name: 'target_health',
     description:
-      'Read the current health state for a target_url. Use this as a dispatch gate — refuse to create a task if state is not "healthy".',
+      'Read the most recently recorded health state for a target_url. Historical rows are diagnostic; use a fresh target_probe result for dispatch decisions.',
     inputSchema: {
       type: 'object',
       required: ['target_url'],
@@ -86,7 +85,7 @@ const TOOLS = [
   {
     name: 'engagement_halt_all',
     description:
-      'Halt every agent: call burp-gate.sh halt-all (flips Burp scope to drop-all). Typically triggered automatically by the circuit breaker, or manually via the dashboard HALT ALL button.',
+      'Operator halt for every agent: call burp-gate.sh halt-all (flips Burp scope to drop-all). This is a manual kill switch used by the dashboard HALT ALL button or explicit operator instruction.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -94,11 +93,6 @@ const TOOLS = [
         reason: { type: 'string' },
       },
     },
-  },
-  {
-    name: 'circuit_status',
-    description: 'Return recent circuit breaker trips.',
-    inputSchema: { type: 'object', properties: { limit: { type: 'number' } } },
   },
   {
     name: 'plan_check_dispatch',
@@ -147,10 +141,6 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
         break;
       case 'engagement_halt_all':
         result = await engagementHaltAll(args.engagement_id, args.reason, { initiator: 'mcp' });
-        break;
-      case 'circuit_status':
-        result = db.prepare('SELECT * FROM breaker_trips ORDER BY tripped_at DESC LIMIT ?')
-          .all(Number(args.limit) || 20);
         break;
       case 'plan_check_dispatch':
         result = planCheckDispatch(args.agent_id, args.engagement_id);

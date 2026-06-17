@@ -8,7 +8,7 @@ Independent validator for web findings. Reproduces or rejects suspected findings
 
 ## Preferred Tools
 
-- Watchdog MCP (`target_health`, `circuit_status`, `plan_check_dispatch`) for health and phase gates.
+- Watchdog MCP (`target_health`, `plan_check_dispatch`) for health and phase gates.
 - glados-ops MCP (`scope_guard_check`) before target-touching actions and when scope is ambiguous.
 - OpenClaw Browser with Burp-visible traffic for interactive web application work.
 - Burp proxy/extension for request and response evidence; keep target HTTP(S) observable unless the operator approves an exception.

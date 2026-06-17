@@ -1,18 +1,13 @@
 const { BURP_EXT_API, BREAKER_THRESHOLD, BREAKER_WINDOW_MS } = require('./config');
-const { markHealth } = require('./health');
-const { engagementHaltAll } = require('./halt');
 const { db } = require('./db');
 
 /**
- * Polls the GLaDOS Burp extension (tools/burp-ext-glados-proxy-api) every
- * intervalMs. Per host, if at least BREAKER_THRESHOLD of the responses inside
- * BREAKER_WINDOW_MS were 5xx or 429, trip the breaker:
- *   - mark target 'down'
- *   - engagementHaltAll with reason "breaker:<host>:<count>x<status>"
+ * Diagnostic Burp error monitor. It can record bursts of 5xx/429 responses
+ * in breaker_trips for operator visibility, but it does not mark targets down
+ * or halt an engagement.
  *
  * If the extension isn't reachable (not installed / Burp closed), the poll
- * quietly no-ops — the rest of the system keeps working; only the breaker
- * goes dark.
+ * quietly no-ops.
  */
 class CircuitBreaker {
   constructor({ intervalMs = 5000, onTrip } = {}) {
@@ -62,11 +57,9 @@ class CircuitBreaker {
   async _trip(host, samples) {
     const last = samples[samples.length - 1];
     const url = `https://${host}`;
-    markHealth(url, 'down', `circuit breaker: ${samples.length} fails (last ${last.status})`);
     db.prepare(`INSERT INTO breaker_trips (target_host, tripped_at, sample_count, last_status) VALUES (?, ?, ?, ?)`)
       .run(host, Date.now(), samples.length, last.status);
-    await engagementHaltAll(null, `breaker:${host}:${samples.length}x${last.status}`, { initiator: 'breaker' });
-    this.onTrip({ host, samples, url });
+    this.onTrip({ host, samples, url, automaticHalt: false });
   }
 }
 

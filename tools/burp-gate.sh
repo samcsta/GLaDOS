@@ -22,7 +22,7 @@
 #   2) watchdog/lib/halt.js writes deny rules into ~/.openclaw/exec-approvals.json
 #      so the agent's next network tool call is refused by OpenClaw.
 # The GLaDOS Burp extension at :1338 provides visibility (proxy history, RPS)
-# for the dashboard and circuit breaker — installed separately from
+# for the dashboard — installed separately from
 # tools/burp-ext-glados-proxy-api/.
 
 set -euo pipefail
