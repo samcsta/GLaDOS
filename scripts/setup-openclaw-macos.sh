@@ -59,6 +59,7 @@ echo "Configuring gateway LaunchAgent environment..."
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:BURP_EXT_API string ${BURP_EXT_API:-http://127.0.0.1:1338}" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:GLADOS_REPO_ROOT string $PWD" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:OPENCLAW_DIST string ${GLOBAL_NODE_MODULES}/openclaw/dist" "$PLIST"
+/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:NODE_PATH string $PWD/dashboard/node_modules" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:PATH string ${BREW_PREFIX}/opt/node@22/bin:${BREW_PREFIX}/bin:${BREW_PREFIX}/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" "$PLIST"
 
 if [[ "$START_GATEWAY" == "1" ]]; then

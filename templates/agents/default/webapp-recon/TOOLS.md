@@ -18,6 +18,17 @@ Core Phase 1 recon agent. Maps the application and writes baseline data; does no
 ## Tool Rules
 
 - Use Browser/Burp-visible navigation before shell HTTP.
+- Use only browser actions present in the tool schema. `fill` takes a `fields`
+  array; use `type` for one referenced field and `press` for keys. Do not invent
+  actions such as `triple_click` or `key`.
+- Use the browser's cookie/state actions for cookies, including HttpOnly
+  cookies. Do not build ad-hoc Python/Node CDP WebSocket clients.
+- A navigation wait timeout is not proof of failure: inspect the current URL
+  and snapshot before retrying. Use browser screenshots; `canvas snapshot`
+  requires a canvas node and is not a page-screenshot substitute.
+- In browser `evaluate` functions, avoid `//` comments in compact one-line
+  JavaScript because they comment out the rest of the function. Prefer `/* */`
+  comments and keep each evaluation small.
 - Stay inside exact scope; record discovered out-of-scope hosts as scope expansion candidates only.
 - Do not fuzz, exploit, mutate data, upload files, send messages, purchase/book, or validate high-impact leads.
 - Screenshot landing page, auth boundary, forms, error states, and meaningful app states.

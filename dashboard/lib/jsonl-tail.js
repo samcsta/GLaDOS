@@ -196,15 +196,23 @@ function convertToEvents(obj) {
 
   if (role === 'toolResult') {
     const text = extractText(m.content);
+    const exitCode = m.details?.exitCode;
+    const status = String(m.details?.status || '').toLowerCase();
+    // Several OpenClaw adapters return a normal toolResult envelope even when
+    // the wrapped operation failed. Relying only on m.isError hid browser
+    // status:error payloads and shell exit=1 failures in subagent panes.
+    const isError = !!m.isError
+      || (Number.isInteger(exitCode) && exitCode !== 0)
+      || ['error', 'failed', 'failure'].includes(status);
     out.push({
       kind: 'tool-result',
       ts,
       id,
       toolCallId: m.toolCallId,
       toolName: m.toolName,
-      isError: !!m.isError,
+      isError,
       text,
-      exitCode: m.details?.exitCode,
+      exitCode,
       status: m.details?.status,
       durationMs: m.details?.durationMs,
     });
@@ -222,6 +230,18 @@ function convertToEvents(obj) {
       api: m.api,
     });
     return out;
+  }
+
+  if (role === 'assistant' && m.stopReason === 'length') {
+    out.push({
+      kind: 'prompt-error',
+      ts,
+      id,
+      error: 'assistant output reached the model token limit; trailing tool calls may be incomplete',
+      provider: m.provider,
+      model: m.model,
+      api: m.api,
+    });
   }
 
   if (role === 'assistant' && Array.isArray(m.content)) {

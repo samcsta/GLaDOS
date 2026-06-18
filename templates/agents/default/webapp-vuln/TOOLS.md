@@ -18,6 +18,14 @@ Exploitation-tier web tester. Runs only approved plan vectors and produces suspe
 ## Tool Rules
 
 - Call `plan_check_dispatch` before work and stop if denied.
+- Use only browser actions present in the tool schema. `fill` takes a `fields`
+  array; use `type` for one referenced field and `press` for keys.
+- Use the browser's cookie/state actions for cookies, including HttpOnly
+  cookies. Do not build ad-hoc Python/Node CDP WebSocket clients.
+- Keep browser `evaluate` functions small and use `/* */` rather than `//`
+  comments in compact one-line functions.
+- Do not put quote-heavy parsers in `python3 -c`. Write a temporary script,
+  run it, then remove or retain it as evidence as appropriate.
 - Test approved endpoints deeply instead of broad crawling.
 - Use non-destructive payloads, low rate, timeouts, and clear negative controls.
 - No state-changing actions, file uploads, destructive payloads, DoS tests, or credential attacks without explicit operator approval.

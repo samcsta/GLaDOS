@@ -337,7 +337,16 @@ function existingComputerUseServer(existing) {
 }
 
 function providerModel(id) {
-  return { id, name: id.split('/').slice(1).join('/') || id };
+  const model = { id, name: id.split('/').slice(1).join('/') || id };
+  // OpenClaw otherwise falls back to provider-generic output limits for our
+  // OpenAI-compatible gateway. Claude agents routinely emit file contents in
+  // tool arguments, so give them enough headroom to finish a single large
+  // write without leaving a syntactically valid but incomplete tool call.
+  if (id.startsWith('claude-')) {
+    model.contextWindow = 200000;
+    model.maxTokens = 16384;
+  }
+  return model;
 }
 
 const LLMAPI_MODELS = [
@@ -398,6 +407,10 @@ function generateOpenClawConfig(paths) {
     '/usr/sbin',
     '/sbin',
   ].join(':');
+  const nodePath = [
+    path.join(REPO_ROOT, 'dashboard', 'node_modules'),
+    process.env.NODE_PATH,
+  ].filter(Boolean).join(':');
 
   const mcpEnv = {
     GLADOS_RUNTIME_DIR: paths.runtimeDir,
@@ -517,6 +530,7 @@ function generateOpenClawConfig(paths) {
       HTTP_PROXY: burpProxy,
       NO_PROXY: 'localhost,127.0.0.1,::1,host.docker.internal,llmapi.redteamstuff.com',
       OPENCLAW_RAW_STREAM: process.env.OPENCLAW_RAW_STREAM || '1',
+      NODE_PATH: nodePath,
       PATH: toolPath,
       JAVA_HOME: process.env.JAVA_HOME || existing.env?.JAVA_HOME || path.join(hb, 'opt', 'openjdk@21', 'libexec', 'openjdk.jdk', 'Contents', 'Home'),
       DYLD_LIBRARY_PATH: process.env.DYLD_LIBRARY_PATH || existing.env?.DYLD_LIBRARY_PATH || path.join(hb, 'opt', 'expat', 'lib'),

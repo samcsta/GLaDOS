@@ -1,0 +1,25 @@
+#!/usr/bin/env zsh
+set -e
+
+# Homebrew Python on macOS can bind against the system libexpat at runtime,
+# producing missing-symbol failures in pyexpat. GLaDOS puts tools/bin first in
+# agent PATH, so keep the matching Homebrew expat library visible for every
+# agent-side Python invocation.
+if [[ -d /opt/homebrew/opt/expat/lib ]]; then
+  export DYLD_LIBRARY_PATH="/opt/homebrew/opt/expat/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+fi
+
+for candidate in \
+  "${GLADOS_PYTHON:-}" \
+  /opt/homebrew/bin/python3 \
+  /usr/local/bin/python3 \
+  /usr/bin/python3
+do
+  [[ -n "$candidate" && -x "$candidate" ]] || continue
+  if "$candidate" -c 'import pyexpat' >/dev/null 2>&1; then
+    exec "$candidate" "$@"
+  fi
+done
+
+print -u2 'ERROR: no working Python 3 runtime found (pyexpat import failed)'
+exit 1
