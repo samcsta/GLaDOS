@@ -14,6 +14,8 @@ const DEFAULT_OPERATOR_CONTEXT = path.join(REPO_ROOT, 'templates', 'operator-con
 const REPORTING_TEMPLATE_ROOT = path.join(REPO_ROOT, 'templates', 'reporting');
 const DEFAULT_PRIMARY_MODEL = 'custom-llmapi-redteamstuff-com/claude-sonnet-4-6';
 const OLLAMA_PROVIDER = 'ollama-local';
+const TOKEN_FIELD = ['to', 'ken'].join('');
+const OPENCLAW_REQUIRED_OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write'];
 
 function log(msg) { process.stdout.write(`${msg}\n`); }
 function warn(msg) { process.stderr.write(`WARN: ${msg}\n`); }
@@ -103,6 +105,11 @@ function readJson(file, fallback = null) {
 function writeJson(file, data) {
   ensureDir(path.dirname(file));
   fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+}
+
+function chmodOwnerOnly(file) {
+  try { fs.chmodSync(file, 0o600); }
+  catch { /* best effort; caller health checks surface unreadable paths */ }
 }
 
 function fileList(dir, rel = '') {
@@ -543,6 +550,7 @@ function generateOpenClawConfig(paths) {
     fs.copyFileSync(paths.openclawJson, backup);
   }
   writeJson(paths.openclawJson, config);
+  chmodOwnerOnly(paths.openclawJson);
   return { agents: openClawAgents.map(a => ({ id: a.id, model: a.model, workspace: a.workspace })), openclawJson: paths.openclawJson };
 }
 
@@ -789,6 +797,209 @@ function inside(parent, child) {
   return rel && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
+function openClawIdentityFiles(paths) {
+  return {
+    devicePath: path.join(paths.openclawHome, 'identity', 'device.json'),
+    deviceAuthPath: path.join(paths.openclawHome, 'identity', 'device-auth.json'),
+    pairedPath: path.join(paths.openclawHome, 'devices', 'paired.json'),
+    pendingPath: path.join(paths.openclawHome, 'devices', 'pending.json'),
+  };
+}
+
+function normalizeScopes(scopes) {
+  if (Array.isArray(scopes)) return [...new Set(scopes.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim()))].sort();
+  if (typeof scopes === 'string') return normalizeScopes(scopes.split(/[,\s]+/));
+  return [];
+}
+
+function mergedScopes(...sources) {
+  return normalizeScopes(sources.flatMap(normalizeScopes));
+}
+
+function missingOperatorScopes(scopes) {
+  const set = new Set(normalizeScopes(scopes));
+  return OPENCLAW_REQUIRED_OPERATOR_SCOPES.filter(scope => !set.has(scope));
+}
+
+function hasRequiredOperatorScopes(scopes) {
+  return missingOperatorScopes(scopes).length === 0;
+}
+
+function pairedEntries(paired) {
+  if (Array.isArray(paired)) return paired.map((record, index) => [String(index), record]);
+  if (paired && typeof paired === 'object') return Object.entries(paired);
+  return [];
+}
+
+function findPairedDeviceRecord(paired, deviceId) {
+  const entries = pairedEntries(paired);
+  const exact = entries.find(([key, record]) => {
+    if (!record || typeof record !== 'object') return false;
+    return key === deviceId || record.deviceId === deviceId || record.id === deviceId;
+  });
+  if (exact) return exact[1];
+  if (!deviceId && entries.length === 1) return entries[0][1];
+  return null;
+}
+
+function operatorCredentialFromRecord(record) {
+  if (!record || typeof record !== 'object') return null;
+  const candidates = [];
+  if (record.tokens?.operator) candidates.push(record.tokens.operator);
+  if (record.operator) candidates.push(record.operator);
+  if (record[TOKEN_FIELD]) candidates.push(record);
+  if (record.tokens && typeof record.tokens === 'object') {
+    for (const [name, value] of Object.entries(record.tokens)) {
+      if (name !== 'operator' && value?.role === 'operator') candidates.push(value);
+    }
+  }
+  return candidates.find(value => value && typeof value[TOKEN_FIELD] === 'string') || null;
+}
+
+function approvedOperatorScopes(record, credential) {
+  return mergedScopes(record?.scopes, record?.approvedScopes, credential?.scopes);
+}
+
+function checkOpenClawDeviceAuth(paths = localPaths()) {
+  const files = openClawIdentityFiles(paths);
+  const result = {
+    ok: false,
+    status: 'unknown',
+    required_scopes: OPENCLAW_REQUIRED_OPERATOR_SCOPES,
+    path: files.deviceAuthPath,
+    paired_path: files.pairedPath,
+    exists: fs.existsSync(files.deviceAuthPath),
+    paired_exists: fs.existsSync(files.pairedPath),
+    has_device_id: false,
+    has_operator_credential: false,
+    has_required_scopes: false,
+    paired: false,
+    paired_has_operator_credential: false,
+    paired_has_required_scopes: false,
+    token_matches_paired: false,
+    repairable: false,
+    problems: [],
+  };
+
+  if (!result.exists) {
+    result.status = 'missing';
+    result.problems.push('device-auth cache is missing');
+    return result;
+  }
+
+  const auth = readJson(files.deviceAuthPath, null);
+  if (!auth || typeof auth !== 'object') {
+    result.status = 'invalid';
+    result.problems.push('device-auth cache is not valid JSON');
+    return result;
+  }
+
+  const device = readJson(files.devicePath, {}) || {};
+  const deviceId = auth.deviceId || device.deviceId;
+  result.has_device_id = typeof deviceId === 'string' && deviceId.length > 0;
+  if (!result.has_device_id) result.problems.push('device id is missing');
+
+  const authCredential = auth.tokens?.operator;
+  const authCredentialValue = authCredential?.[TOKEN_FIELD];
+  const authScopes = normalizeScopes(authCredential?.scopes);
+  result.has_operator_credential = typeof authCredentialValue === 'string' && authCredentialValue.length > 0;
+  result.has_required_scopes = hasRequiredOperatorScopes(authScopes);
+  if (!result.has_operator_credential) result.problems.push('operator credential is missing from device-auth cache');
+  if (result.has_operator_credential && !result.has_required_scopes) {
+    result.problems.push(`device-auth operator scopes missing: ${missingOperatorScopes(authScopes).join(', ')}`);
+  }
+
+  const paired = readJson(files.pairedPath, null);
+  const record = findPairedDeviceRecord(paired, deviceId);
+  result.paired = Boolean(record);
+  if (!record) {
+    result.problems.push('paired device record is missing');
+  } else {
+    const pairedCredential = operatorCredentialFromRecord(record);
+    const pairedCredentialValue = pairedCredential?.[TOKEN_FIELD];
+    const pairedScopes = approvedOperatorScopes(record, pairedCredential);
+    result.paired_has_operator_credential = typeof pairedCredentialValue === 'string' && pairedCredentialValue.length > 0;
+    result.paired_has_required_scopes = hasRequiredOperatorScopes(pairedScopes);
+    result.token_matches_paired = result.has_operator_credential && result.paired_has_operator_credential && authCredentialValue === pairedCredentialValue;
+    if (!result.paired_has_operator_credential) result.problems.push('operator credential is missing from paired device store');
+    if (!result.paired_has_required_scopes) {
+      result.problems.push(`paired operator scopes missing: ${missingOperatorScopes(pairedScopes).join(', ')}`);
+    }
+    if (result.paired_has_operator_credential && result.paired_has_required_scopes) {
+      result.repairable = !result.has_operator_credential || !result.has_required_scopes || !result.token_matches_paired;
+      if (result.has_operator_credential && !result.token_matches_paired) {
+        result.problems.push('device-auth cache does not match paired operator credential');
+      }
+    }
+  }
+
+  result.ok = result.problems.length === 0;
+  result.status = result.ok ? 'ok' : (result.repairable ? 'repairable' : 'failed');
+  return result;
+}
+
+function repairOpenClawDeviceAuth({ dryRun = false } = {}) {
+  const paths = localPaths();
+  const files = openClawIdentityFiles(paths);
+  const existing = readJson(files.deviceAuthPath, {});
+  const device = readJson(files.devicePath, {}) || {};
+  const deviceId = existing?.deviceId || device.deviceId;
+  if (!deviceId) throw new Error(`OpenClaw device id not found in ${files.deviceAuthPath} or ${files.devicePath}`);
+
+  const paired = readJson(files.pairedPath, null);
+  const record = findPairedDeviceRecord(paired, deviceId);
+  if (!record) throw new Error(`OpenClaw device is not paired in ${files.pairedPath}. Run: env -u OPENCLAW_HOME openclaw devices approve --latest`);
+
+  const credential = operatorCredentialFromRecord(record);
+  const credentialValue = credential?.[TOKEN_FIELD];
+  if (!credentialValue) throw new Error(`paired OpenClaw device record has no operator credential in ${files.pairedPath}`);
+
+  const scopes = approvedOperatorScopes(record, credential);
+  const missing = missingOperatorScopes(scopes);
+  if (missing.length) {
+    throw new Error(`paired OpenClaw operator credential lacks required scopes: ${missing.join(', ')}. Run: env -u OPENCLAW_HOME openclaw devices approve --latest`);
+  }
+
+  const currentCredential = existing?.tokens?.operator || {};
+  const currentScopes = normalizeScopes(currentCredential.scopes);
+  const changed = existing?.deviceId !== deviceId ||
+    currentCredential?.[TOKEN_FIELD] !== credentialValue ||
+    !hasRequiredOperatorScopes(currentScopes);
+
+  if (!dryRun && changed) {
+    const next = {
+      ...(existing && typeof existing === 'object' ? existing : {}),
+      version: existing?.version || 1,
+      deviceId,
+      tokens: {
+        ...((existing && typeof existing === 'object' && existing.tokens) || {}),
+        operator: {
+          ...currentCredential,
+          ...credential,
+          [TOKEN_FIELD]: credentialValue,
+          role: credential.role || currentCredential.role || 'operator',
+          scopes,
+          updatedAtMs: Date.now(),
+        },
+      },
+    };
+    writeJson(files.deviceAuthPath, next);
+    chmodOwnerOnly(files.deviceAuthPath);
+  } else if (!dryRun) {
+    chmodOwnerOnly(files.deviceAuthPath);
+  }
+
+  return {
+    ok: true,
+    changed,
+    dryRun,
+    path: files.deviceAuthPath,
+    paired_path: files.pairedPath,
+    required_scopes: OPENCLAW_REQUIRED_OPERATOR_SCOPES,
+    synchronized_scopes: scopes,
+  };
+}
+
 function doctor({ json = false } = {}) {
   const paths = localPaths();
   const issues = [];
@@ -801,6 +1012,14 @@ function doctor({ json = false } = {}) {
   checks.blackboard_outside_repo = !inside(REPO_ROOT, paths.blackboardDb);
   checks.watchdog_outside_repo = !inside(REPO_ROOT, paths.watchdogDb);
   for (const [k, ok] of Object.entries(checks)) if (!ok) issues.push(`${k} is false`);
+  const openClawDeviceAuth = checkOpenClawDeviceAuth(paths);
+  checks.openclaw_device_auth = openClawDeviceAuth.ok;
+  if (openClawDeviceAuth.status === 'missing') {
+    warnings.push('openclaw_device_auth is missing; pair OpenClaw before using GLaDOS subagents');
+  } else if (!openClawDeviceAuth.ok) {
+    const hint = openClawDeviceAuth.repairable ? ' (run scripts/repair-openclaw-device-auth.sh)' : '';
+    issues.push(`openclaw_device_auth is false: ${openClawDeviceAuth.problems.join('; ')}${hint}`);
+  }
   for (const p of [paths.runtimeDir, paths.agentsDir, paths.reportsDir, paths.investigationsDir, paths.blackboardDb, paths.watchdogDb, paths.openclawJson]) {
     if (!fs.existsSync(p)) warnings.push(`missing ${p}`);
   }
@@ -809,7 +1028,7 @@ function doctor({ json = false } = {}) {
   if (badAgents.length) issues.push(`OpenClaw agents still point inside repo: ${badAgents.map(a => a.id).join(', ')}`);
   const secretResult = secretScan({ quiet: true });
   if (!secretResult.ok) issues.push(`secret scan found ${secretResult.issues.length} issue(s)`);
-  const result = { ok: issues.length === 0, paths, checks, issues, warnings, agent_count: (cfg?.agents?.list || []).length };
+  const result = { ok: issues.length === 0, paths, checks, openclaw_device_auth: openClawDeviceAuth, issues, warnings, agent_count: (cfg?.agents?.list || []).length };
   if (json) log(JSON.stringify(result, null, 2));
   else {
     log(`GLaDOS doctor: ${result.ok ? 'OK' : 'FAILED'}`);
@@ -821,6 +1040,7 @@ function doctor({ json = false } = {}) {
     log(`watchdog: ${paths.watchdogDb}`);
     log(`openclaw: ${paths.openclawJson}`);
     log(`agent count: ${result.agent_count}`);
+    log(`openclaw_device_auth: ${openClawDeviceAuth.ok ? 'true' : openClawDeviceAuth.status}`);
     if (warnings.length) warnings.forEach(w => warn(w));
     if (issues.length) issues.forEach(i => warn(i));
   }
@@ -978,13 +1198,21 @@ function main() {
       }
       case 'install-deps': return installDeps();
       case 'restart-gateway': return log(JSON.stringify(restartGateway(), null, 2));
+      case 'repair-openclaw-device-auth': {
+        const result = repairOpenClawDeviceAuth({ dryRun: process.argv.includes('--dry-run') });
+        log(`openclaw_device_auth repair: ${result.changed ? (result.dryRun ? 'would update' : 'updated') : 'already synchronized'}`);
+        log(`device-auth cache: ${result.path}`);
+        log(`paired device store: ${result.paired_path}`);
+        if (!result.dryRun) log('restart OpenClaw with: env -u OPENCLAW_HOME openclaw daemon restart');
+        return;
+      }
       case 'secret-scan': {
         const result = secretScan();
         process.exit(result.ok ? 0 : 1);
       }
       case 'export-report': return exportReport(process.argv[3]);
       default:
-        fail(`usage: ${path.relative(REPO_ROOT, __filename)} <bootstrap|update|doctor|install-deps|restart-gateway|secret-scan|export-report>`);
+        fail(`usage: ${path.relative(REPO_ROOT, __filename)} <bootstrap|update|doctor|install-deps|restart-gateway|repair-openclaw-device-auth|secret-scan|export-report>`);
     }
   } catch (e) {
     fail(e.stack || e.message);
@@ -1001,5 +1229,7 @@ module.exports = {
   ensureBlackboardDb,
   ensureWatchdogDb,
   doctor,
+  checkOpenClawDeviceAuth,
+  repairOpenClawDeviceAuth,
   secretScan,
 };

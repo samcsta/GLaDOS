@@ -182,6 +182,36 @@ Expected stable values:
 Exact model counts can vary because local per-agent model overrides are
 preserved across updates.
 
+#### Pairing repair for subagent dispatch
+
+If a fresh install can chat with GLaDOS but cannot dispatch a subagent such as
+`source-code`, OpenClaw may report:
+
+```text
+gateway closed (1008): pairing required
+```
+
+This usually means the local OpenClaw device was originally paired with a
+read-only operator credential, then OpenClaw approved a broader local
+operator credential while `~/.openclaw/identity/device-auth.json` still cached
+the old one. GLaDOS doctor now checks this state as `openclaw_device_auth`.
+
+Repair it without printing or manually copying credentials:
+
+```bash
+cd ~/Desktop/GLaDOS
+env -u OPENCLAW_HOME openclaw devices approve --latest
+scripts/repair-openclaw-device-auth.sh
+env -u OPENCLAW_HOME openclaw daemon restart
+scripts/glados-doctor.sh
+```
+
+The repair command only synchronizes an already-approved local OpenClaw
+operator credential from the paired-device store into the private
+device-auth cache. It refuses to run if the device is not paired or the
+approved credential lacks the operator scopes GLaDOS needs for agent and
+subagent operations.
+
 ### 5. MCP Servers And Agent Tools
 
 No separate MCP registration step is required. `scripts/bootstrap-macos.sh`
@@ -469,6 +499,8 @@ Doctor verifies:
 
 - Runtime paths are outside the repo.
 - OpenClaw agents point at `~/.glados/workspaces/agents`.
+- `openclaw_device_auth` is synchronized and has the local operator scopes
+  needed for subagent dispatch, when OpenClaw has been paired.
 - Reports and investigations are local.
 - Local DB paths exist.
 - Secret scan passes for distributable source.
