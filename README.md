@@ -302,11 +302,11 @@ The dashboard Settings tab displays the repo `VERSION` file. GLaDOS release
 markers use:
 
 ```text
-v<major>.<MMDDYYYY>.<daily-update-number>
+v<major>.<minor>.<patch>
 ```
 
-Example: `v3.5.06162026.1`. For another update on the same day, bump to
-`v3.5.06162026.2`; on a new day, reset the final number to `1`.
+Example: `v3.6.0`. Future patch updates on the same release line bump the final
+number: `v3.6.1`, `v3.6.2`, `v3.6.3`.
 
 Use the helper before committing a release update:
 

@@ -3,12 +3,15 @@ const fs = require('node:fs');
 const express = require('express');
 const { PORT, BLACKBOARD_DB } = require('./lib/config');
 const { AgentWatcher } = require('./lib/agent-watcher');
-const { loadAgentRegistry, listAgentIds, currentSessionForAgent, sendMessageToAgent } = require('./lib/openclaw');
+const { loadAgentRegistry, listAgentIds, currentSessionForAgent, sendMessageToAgent, sendMessageToAgentTracked } = require('./lib/openclaw');
 const reports = require('./lib/reports');
 const agentDetails = require('./lib/agent-details');
 const { getVersionInfo } = require('./lib/version');
 const { JsonlTail, convertToEvents } = require('./lib/jsonl-tail');
 const { RawStreamTail } = require('./lib/raw-stream-tail');
+const { DashboardTranscriptStore, mergeTranscriptEvents, afterLastEventId, sseFrame } = require('./lib/transcript-store');
+const { ControllerLite } = require('./lib/controller');
+const slash = require('./lib/slash');
 const watchdogHealth = require('glados-watchdog/lib/health');
 const watchdogHalt = require('glados-watchdog/lib/halt');
 const { getBurpRps } = require('glados-watchdog/lib/breaker');
@@ -47,6 +50,13 @@ try {
 } catch (e) { console.warn('[startup] raw-stream truncate failed:', e.message); }
 
 const watcher = new AgentWatcher().start();
+const transcriptStore = new DashboardTranscriptStore(BLACKBOARD_DB);
+const controller = new ControllerLite({
+  dbPath: BLACKBOARD_DB,
+  sendMessageToAgentTracked,
+  currentSessionForAgent,
+});
+if (process.env.GLADOS_CONTROLLER_WORKER !== '0') controller.start();
 
 app.get('/api/version', (req, res) => {
   res.json(getVersionInfo());
@@ -60,8 +70,11 @@ const lobbyClients = new Set(); // /api/agents SSE subscribers
 const activeChatTurns = new Map(); // agentId -> { turnId, startedAt, messagePreview }
 const recentChatTurns = new Map(); // agentId -> { turnId, expiresAt } short grace for late raw-stream fs events
 let pendingGladosKickoff = null;
-let pendingGladosTargetRequest = null;
 const BLACKBOARD_STATE_TABLES = [
+  'controller_events',
+  'controller_jobs',
+  'controller_goals',
+  'dashboard_transcript_events',
   'replan_proposals',
   'plan_approvals',
   'plans',
@@ -83,7 +96,7 @@ function pushBuffer(agentId, ev) {
 function broadcastTranscript(agentId, ev) {
   const set = sseClients.get(agentId);
   if (!set) return;
-  const payload = `data: ${JSON.stringify(ev)}\n\n`;
+  const payload = sseFrame(ev);
   for (const res of set) res.write(payload);
 }
 
@@ -126,7 +139,7 @@ function finishActiveChatTurn(agentId, ev = null) {
 }
 
 function transcriptEvent(agentId, kind, text, extra = {}) {
-  const ev = {
+  let ev = {
     agentId,
     kind,
     text,
@@ -134,6 +147,11 @@ function transcriptEvent(agentId, kind, text, extra = {}) {
     id: `dashboard:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
     ...extra,
   };
+  try {
+    ev = transcriptStore.record(agentId, ev);
+  } catch (e) {
+    console.warn('[transcript-store] could not persist dashboard event:', e.message);
+  }
   pushBuffer(agentId, ev);
   broadcastTranscript(agentId, ev);
   return ev;
@@ -188,12 +206,6 @@ function extractBareTarget(message) {
   if (!text || /\s/.test(text.replace(/^https?:\/\//i, ''))) return null;
   const m = text.match(/^["'`]?(https?:\/\/[^\s"'`<>]+|[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,})(?:\/[^"'`\s<>]*)?["'`.,!?;:]*$/i);
   return m?.[1] ? normalizeTarget(m[1]) : null;
-}
-
-function isAssessmentReadinessIntent(message) {
-  const text = String(message || '').toLowerCase();
-  return /\b(ready|start|begin|run|launch|kick\s*off|spin\s*up)\b/.test(text)
-    && /\b(assessment|investigation|engagement|web\s*app|team)\b/.test(text);
 }
 
 function isFreshSessionQuestion(message) {
@@ -255,11 +267,20 @@ function kickoffApprovalPrompt(target) {
   ].join('\n');
 }
 
-function createPendingGladosKickoff(target, originalMessage) {
-  pendingGladosTargetRequest = null;
+function createPendingGladosKickoff(target, originalMessage, extra = {}) {
+  let goalId = extra.goalId || null;
+  if (!goalId) {
+    try {
+      const goal = controller.createWebGoal(target, { source: extra.source || 'chat' });
+      goalId = goal?.id || null;
+    } catch (e) {
+      console.warn('[controller] could not record web goal:', e.message);
+    }
+  }
   pendingGladosKickoff = {
     target,
     originalMessage,
+    goalId,
     createdAt: Date.now(),
   };
   const ev = transcriptEvent('glados', 'assistant-text', kickoffApprovalPrompt(target), { gated: true });
@@ -267,6 +288,7 @@ function createPendingGladosKickoff(target, originalMessage) {
     ok: true,
     gated: true,
     pending: pendingGladosKickoff,
+    event: ev,
     result: { payloads: [{ text: ev.text, mediaUrl: null }] },
   };
 }
@@ -782,26 +804,20 @@ function eventSortMs(ev) {
   return Number.isFinite(ms) ? ms : 0;
 }
 
-function bufferedTranscriptEvents(agentId) {
+function bufferedTranscriptEvents(agentId, lastEventId = null) {
   let backfill = [];
   const snap = currentSessionForAgent(agentId);
   if (snap && snap.sessionFile && fs.existsSync(snap.sessionFile)) {
     backfill = readSessionBackfillEvents(snap.sessionFile, agentId, snap.sessionId) || [];
-    for (const ev of backfill) pushBuffer(agentId, ev);
   }
-  const seen = new Set();
-  const combined = [];
-  for (const ev of [...backfill, ...(buffers.get(agentId) || [])]) {
-    const key = ev?.id ? `id:${ev.id}` : `${ev?.kind || ''}:${ev?.ts || ''}:${ev?.text || ev?.toolCallId || ''}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    combined.push(ev);
+  let dashboardEvents = [];
+  try {
+    dashboardEvents = transcriptStore.list(agentId);
+  } catch (e) {
+    console.warn('[transcript-store] could not list dashboard events:', e.message);
   }
-  return combined.sort((a, b) => {
-    const d = eventSortMs(a) - eventSortMs(b);
-    if (d) return d;
-    return String(a.id || '').localeCompare(String(b.id || ''));
-  });
+  const merged = mergeTranscriptEvents(backfill, dashboardEvents, buffers.get(agentId) || []);
+  return afterLastEventId(merged, lastEventId);
 }
 
 function suppressSupersededPromptErrors(events) {
@@ -907,8 +923,9 @@ app.get('/api/agents/:id/transcript', (req, res) => {
   // intentionally done on every connect, not only when the ring is empty:
   // subagent prompts can be written before the watcher attaches, while later
   // live events still populate the ring.
-  for (const ev of bufferedTranscriptEvents(agentId)) {
-    res.write(`data: ${JSON.stringify(ev)}\n\n`);
+  const lastEventId = req.get('Last-Event-ID') || req.query.lastEventId || null;
+  for (const ev of bufferedTranscriptEvents(agentId, lastEventId)) {
+    res.write(sseFrame(ev));
   }
 
   let set = sseClients.get(agentId);
@@ -927,6 +944,7 @@ app.post('/api/chat/glados', async (req, res) => {
     if (isKickoffCancel(message)) {
       const cancelled = pendingGladosKickoff;
       pendingGladosKickoff = null;
+      if (cancelled.goalId) controller.updateGoalStatus(cancelled.goalId, 'cancelled');
       const ev = transcriptEvent('glados', 'assistant-text', `Cancelled the pending investigation kickoff for \`${cancelled.target}\`. No resources were checked and no agents were dispatched.`);
       return res.json({ ok: true, gated: true, cancelled: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
     }
@@ -942,14 +960,20 @@ app.post('/api/chat/glados', async (req, res) => {
 
     const approved = pendingGladosKickoff;
     pendingGladosKickoff = null;
+    if (approved.goalId) controller.updateGoalStatus(approved.goalId, 'running');
     const approvedMessage = buildApprovedKickoffMessage(approved, message);
     const turnId = startChatTurn('glados', approvedMessage);
     try {
       const result = await sendMessageToAgent('glados', approvedMessage);
       const resultError = openclawResultError(result);
-      if (resultError) return res.status(502).json({ ok: false, error: resultError, result });
+      if (resultError) {
+        if (approved.goalId) controller.updateGoalStatus(approved.goalId, 'failed');
+        return res.status(502).json({ ok: false, error: resultError, result });
+      }
+      if (approved.goalId) controller.updateGoalStatus(approved.goalId, 'complete');
       return res.json({ ok: true, gated: true, approved: true, result });
     } catch (e) {
+      if (approved.goalId) controller.updateGoalStatus(approved.goalId, 'failed');
       return res.status(500).json({
         ok: false,
         error: e.message,
@@ -961,45 +985,10 @@ app.post('/api/chat/glados', async (req, res) => {
     }
   }
 
-  if (pendingGladosTargetRequest) {
-    recordUserTranscript('glados', message);
-    if (isKickoffCancel(message)) {
-      pendingGladosTargetRequest = null;
-      const ev = transcriptEvent('glados', 'assistant-text', 'Cancelled assessment startup. No resources were checked and no agents were dispatched.');
-      return res.json({ ok: true, gated: true, cancelled: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
-    }
-
-    const target = extractInvestigationTarget(message) || extractBareTarget(message);
-    if (target) {
-      return res.json(createPendingGladosKickoff(target, message));
-    }
-
-    const ev = transcriptEvent(
-      'glados',
-      'assistant-text',
-      'I am ready and still only need the target. Send a domain or URL, and I will ask before checking DradisTab, Dradis, or DomainsAI.'
-    );
-    return res.json({ ok: true, gated: true, waitingForTarget: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
-  }
-
   const kickoffTarget = extractInvestigationTarget(message);
   if (kickoffTarget) {
     recordUserTranscript('glados', message);
     return res.json(createPendingGladosKickoff(kickoffTarget, message));
-  }
-
-  if (isAssessmentReadinessIntent(message)) {
-    recordUserTranscript('glados', message);
-    pendingGladosTargetRequest = {
-      createdAt: Date.now(),
-      originalMessage: message,
-    };
-    const ev = transcriptEvent(
-      'glados',
-      'assistant-text',
-      'Ready. The local ROE, operator context, and local secret profiles are already configured. What target should we assess?'
-    );
-    return res.json({ ok: true, gated: true, waitingForTarget: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
   }
 
   if (isFreshSessionQuestion(message)) {
@@ -1093,46 +1082,224 @@ app.post('/api/chat/atlas/upload', express.json({ limit: '25mb' }), (req, res) =
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+async function haltAgent(agentId, reason = 'dashboard halt', initiator = 'dashboard') {
+  const result = await watchdogHalt.agentHalt(agentId, reason, { initiator });
+  broadcastLobby('halt', { agentId, reason });
+  return result;
+}
+
+async function resumeAgent(agentId, initiator = 'dashboard') {
+  const result = await watchdogHalt.agentResume(agentId, { initiator });
+  broadcastLobby('resume', { agentId });
+  return result;
+}
+
+async function haltAll(reason = 'dashboard halt-all', engagementId = null, initiator = 'dashboard') {
+  const result = await watchdogHalt.engagementHaltAll(engagementId, reason, { initiator });
+  broadcastLobby('halt-all', {
+    reason,
+    haltedAgents: result.haltedAgents || [],
+  });
+  return result;
+}
+
+async function resumeAll(initiator = 'dashboard') {
+  const result = await watchdogHalt.engagementResumeAll({ initiator });
+  broadcastLobby('resume-all', { resumed: result.resumed || [] });
+  return result;
+}
+
+async function probeTarget(targetUrl) {
+  const result = await watchdogHealth.probe(targetUrl);
+  broadcastLobby('target-health', result);
+  return result;
+}
+
+async function burpRps() {
+  return { rps: await getBurpRps({ windowSec: 10 }) };
+}
+
+function activeAgentStatus() {
+  try {
+    return loadAgentRegistry()
+      .map(a => ({ agentId: a.id, session: currentSessionForAgent(a.id) }))
+      .filter(a => a.session && a.session.live)
+      .map(a => ({ agentId: a.agentId, sessionId: a.session.sessionId }));
+  } catch {
+    return [];
+  }
+}
+
+function planSummary() {
+  const Database = require('better-sqlite3');
+  let db;
+  try {
+    db = new Database(BLACKBOARD_DB, { readonly: true, fileMustExist: true });
+    const rows = db.prepare('SELECT state, COUNT(*) AS n FROM plans GROUP BY state').all();
+    const out = {};
+    for (const row of rows) out[row.state] = row.n;
+    return {
+      pending: out.pending_approval || 0,
+      approved: out.approved || 0,
+      executing: out.executing || 0,
+      complete: out.complete || 0,
+      rejected: out.rejected || 0,
+    };
+  } catch {
+    return {};
+  } finally {
+    try { db?.close(); } catch {}
+  }
+}
+
+function controllerStatusPayload() {
+  return controller.status({
+    pendingKickoff: pendingGladosKickoff ? {
+      target: pendingGladosKickoff.target,
+      goalId: pendingGladosKickoff.goalId || null,
+      createdAt: pendingGladosKickoff.createdAt,
+    } : null,
+    activeAgents: activeAgentStatus(),
+    targetHealth: watchdogHealth.listHealth(),
+    plans: planSummary(),
+  });
+}
+
+async function runSlash(raw) {
+  const parsed = slash.parseSlashCommand(raw);
+  const events = [];
+  const emit = (text, kind = 'assistant-text', extra = {}) => {
+    const ev = transcriptEvent('glados', kind, text, { slash: true, ...extra });
+    events.push(ev);
+    return ev;
+  };
+
+  const commandEvent = recordUserTranscript('glados', `$ ${String(raw || '').trim()}`, { slash: true });
+  events.push(commandEvent);
+
+  if (!parsed.ok) {
+    emit(`${parsed.error} — try /help`);
+    return { ok: false, events };
+  }
+
+  const { cmd, arg } = parsed;
+  if (cmd === '/help') {
+    emit(slash.helpText());
+  } else if (cmd === '/agents') {
+    const agents = loadAgentRegistry().map(a => ({ ...a, active: !!currentSessionForAgent(a.id)?.live }));
+    emit(agents.map(a => `  ${a.active ? '●' : '○'} ${a.id.padEnd(18)} ${a.model || '?'}`).join('\n'));
+  } else if (cmd === '/halt') {
+    if (!arg) emit('usage: /halt <agent>');
+    else emit(JSON.stringify(await haltAgent(arg, 'slash command', 'slash'), null, 2));
+  } else if (cmd === '/halt-all') {
+    emit(JSON.stringify(await haltAll('slash command', null, 'slash'), null, 2));
+  } else if (cmd === '/resume') {
+    if (!arg) emit('usage: /resume <agent>');
+    else emit(JSON.stringify(await resumeAgent(arg, 'slash'), null, 2));
+  } else if (cmd === '/resume-all') {
+    emit(JSON.stringify(await resumeAll('slash'), null, 2));
+  } else if (cmd === '/probe') {
+    if (!arg) emit('usage: /probe <url>');
+    else emit(JSON.stringify(await probeTarget(arg), null, 2));
+  } else if (cmd === '/rps' || cmd === '/breaker') {
+    const r = await burpRps();
+    emit(`Burp RPS: ${r.rps ?? 'n/a'}\nAutomatic 5xx/429 halt breaker is disabled. Use Halt All when you want to stop the engagement.`);
+  } else if (cmd === '/status') {
+    emit(slash.formatStatus(controllerStatusPayload()));
+  } else if (cmd === '/goal' || cmd === '/investigate') {
+    if (!arg) {
+      emit(slash.targetUsage(cmd));
+    } else if (!slash.isUrlOrDomain(arg)) {
+      emit(`${slash.targetUsage(cmd)}\nTarget must be a URL or domain.`);
+    } else {
+      const target = normalizeTarget(arg);
+      const goal = controller.createWebGoal(target, { source: cmd });
+      const kickoff = createPendingGladosKickoff(target, raw, { goalId: goal.id, source: 'slash' });
+      if (kickoff.event) events.push(kickoff.event);
+    }
+  } else if (cmd === '/security-review') {
+    if (!arg) {
+      emit('usage: /security-review <url|domain|local-path>');
+    } else if (slash.isExistingLocalPath(arg)) {
+      const goal = controller.createSecurityReviewGoal(path.resolve(arg), { source: cmd, target_kind: 'local_path' });
+      const job = controller.enqueueSecurityReviewPath(arg, { goalId: goal.id, engagementId: goal.engagement_id });
+      emit(`Queued source-code security review for \`${job.target}\`.\nJob: ${job.id}`);
+    } else if (slash.isUrlOrDomain(arg)) {
+      const target = normalizeTarget(arg);
+      const goal = controller.createGoal({
+        type: 'security_review',
+        target,
+        status: 'pending_approval',
+        metadata: { source: cmd, target_kind: 'url_or_domain' },
+      });
+      const kickoff = createPendingGladosKickoff(target, raw, { goalId: goal.id, source: 'slash-security-review' });
+      if (kickoff.event) events.push(kickoff.event);
+    } else {
+      emit('usage: /security-review <url|domain|local-path>');
+    }
+  } else if (cmd === '/clear') {
+    return { ok: true, events, action: { type: 'clear-local-transcript' } };
+  }
+  return { ok: true, events };
+}
+
+app.post('/api/slash/run', async (req, res) => {
+  try {
+    const command = String(req.body?.command || '');
+    if (!command.trim()) return res.status(400).json({ ok: false, error: 'command required' });
+    res.json(await runSlash(command));
+  } catch (e) {
+    const ev = transcriptEvent('glados', 'assistant-text', `error: ${e.message}`, { slash: true, isError: true });
+    res.status(500).json({ ok: false, error: e.message, events: [ev] });
+  }
+});
+
+app.get('/api/controller/status', (req, res) => {
+  try { res.json({ ok: true, ...controllerStatusPayload() }); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.get('/api/controller/events', (req, res) => {
+  try { res.json({ ok: true, events: controller.eventsSince(req.query.since, req.query.limit) }); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/controller/goals', (req, res) => {
+  try {
+    const { type = 'webapp_goal', target, metadata = {} } = req.body || {};
+    if (!target) return res.status(400).json({ ok: false, error: 'target required' });
+    if (type === 'webapp_goal') return res.json({ ok: true, goal: controller.createWebGoal(target, metadata) });
+    if (type === 'security_review') return res.json({ ok: true, goal: controller.createSecurityReviewGoal(target, metadata) });
+    return res.status(400).json({ ok: false, error: 'unsupported goal type' });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/controller/jobs/:id/cancel', (req, res) => {
+  try { res.json(controller.cancelJob(req.params.id)); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 // --- Halt controls (wired to watchdog lib) ---
 app.post('/api/halt/:id', async (req, res) => {
   try {
-    const result = await watchdogHalt.agentHalt(
-      req.params.id,
-      req.body?.reason || 'dashboard halt',
-      { initiator: 'dashboard' }
-    );
-    broadcastLobby('halt', { agentId: req.params.id, reason: req.body?.reason });
-    res.json(result);
+    res.json(await haltAgent(req.params.id, req.body?.reason || 'dashboard halt', 'dashboard'));
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/resume/:id', async (req, res) => {
   try {
-    const result = await watchdogHalt.agentResume(req.params.id, { initiator: 'dashboard' });
-    broadcastLobby('resume', { agentId: req.params.id });
-    res.json(result);
+    res.json(await resumeAgent(req.params.id, 'dashboard'));
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/halt-all', async (req, res) => {
   try {
-    const result = await watchdogHalt.engagementHaltAll(
-      req.body?.engagement_id || null,
-      req.body?.reason || 'dashboard halt-all',
-      { initiator: 'dashboard' }
-    );
-    broadcastLobby('halt-all', {
-      reason: req.body?.reason,
-      haltedAgents: result.haltedAgents || [],
-    });
-    res.json(result);
+    res.json(await haltAll(req.body?.reason || 'dashboard halt-all', req.body?.engagement_id || null, 'dashboard'));
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 // v3.1: companion to /api/halt-all. Clears deny rules for every agent the
 // halt-all added, and re-enables the Burp scope.
 app.post('/api/resume-all', async (req, res) => {
   try {
-    const result = await watchdogHalt.engagementResumeAll({ initiator: 'dashboard' });
-    broadcastLobby('resume-all', { resumed: result.resumed || [] });
-    res.json(result);
+    res.json(await resumeAll('dashboard'));
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -1141,9 +1308,7 @@ app.post('/api/targets/probe', async (req, res) => {
   const { target_url } = req.body || {};
   if (!target_url) return res.status(400).json({ ok: false, error: 'target_url required' });
   try {
-    const result = await watchdogHealth.probe(target_url);
-    broadcastLobby('target-health', result);
-    res.json(result);
+    res.json(await probeTarget(target_url));
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.get('/api/targets', (req, res) => {
@@ -1152,8 +1317,7 @@ app.get('/api/targets', (req, res) => {
 
 // --- Burp RPS + gate indicator ---
 app.get('/api/burp/rps', async (req, res) => {
-  const rps = await getBurpRps({ windowSec: 10 });
-  res.json({ rps });
+  res.json(await burpRps());
 });
 
 // --- Burp extension passthrough (:1338 — GLaDOS Montoya extension) ---
@@ -1351,6 +1515,7 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
     });
     const failed = results.filter(r => !r.ok);
     if (failed.length) return res.status(500).json({ ok: false, agentId, cascade: agentId === 'glados', results });
+    try { transcriptStore.clearAgents(ids); } catch (e) { console.warn('[transcript-store] reset clear failed:', e.message); }
 
     let blackboard = null;
     let memories = null;
@@ -1359,7 +1524,6 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
     let rawStream = null;
     if (agentId === 'glados') {
       pendingGladosKickoff = null;
-      pendingGladosTargetRequest = null;
       blackboard = wipeBlackboard();
       memories = wipeAgentMemories();
       archivePrune = pruneArchivedSessions();
@@ -1419,19 +1583,7 @@ app.post('/api/agents/:id/enabled', (req, res) => {
 
 // --- Slash commands metadata for the chat autocomplete ---
 app.get('/api/slash-commands', (req, res) => {
-  res.json({
-    commands: [
-      { cmd: '/help', desc: 'List dashboard slash commands' },
-      { cmd: '/agents', desc: 'Show live subagents (curl /api/agents)' },
-      { cmd: '/halt <agent>', desc: 'Halt a single agent (writes deny rule + burp-gate halt-agent)' },
-      { cmd: '/halt-all', desc: 'Engagement-wide halt (Burp scope drop-all + deny-all)' },
-      { cmd: '/resume <agent>', desc: 'Resume a halted agent' },
-      { cmd: '/resume-all', desc: 'Resume all halted agents and restore Burp scope' },
-      { cmd: '/probe <url>', desc: 'Run watchdog target_probe against a URL' },
-      { cmd: '/rps', desc: 'Show Burp requests-per-second' },
-      { cmd: '/clear', desc: 'Clear the current transcript view (local only)' },
-    ],
-  });
+  res.json({ commands: slash.SLASH_COMMANDS });
 });
 
 app.get('/api/healthz', (req, res) => {
@@ -1569,6 +1721,11 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`GLaDOS Ops Dashboard on http://localhost:${PORT}`);
 });
 
-function shutdown() { try { watcher.stop(); } catch {} process.exit(0); }
+function shutdown() {
+  try { watcher.stop(); } catch {}
+  try { controller.close(); } catch {}
+  try { transcriptStore.close(); } catch {}
+  process.exit(0);
+}
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

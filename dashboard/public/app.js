@@ -3014,66 +3014,44 @@ function attachSlashMenu(textarea, container, onRun) {
 }
 
 async function runSlashCommand(raw, rec) {
-  const [cmd, ...rest] = raw.trim().split(/\s+/);
-  const arg = rest.join(' ');
-  const echo = (text, kind = 'assistant-text') => {
-    const ev = { kind, text, ts: Date.now(), _optimistic: true };
-    if (ev.kind === 'tool-call') removeRecentStreamedPreToolText(rec, ev.ts);
+  const [cmd] = raw.trim().split(/\s+/);
+  if (cmd === '/clear') {
+    rec.events.length = 0;
+    if (rec.el) rec.el.innerHTML = '';
+    return;
+  }
 
-	    rec.events.push(ev);
-    if (rec.el && rec.el.isConnected) appendEntry(rec.el, ev, rec);
+  const renderReturnedEvent = ev => {
+    if (!ev) return;
+    const inserted = insertTranscriptEvent(rec, ev);
+    if (!inserted.added) {
+      if (rec.el && rec.el.isConnected && inserted.index >= 0) renderTranscriptEvents(rec);
+      return;
+    }
+    if (rec.el && rec.el.isConnected) {
+      if (inserted.outOfOrder) renderTranscriptEvents(rec);
+      else appendEntry(rec.el, ev, rec);
+    }
   };
-  echo(`$ ${raw}`, 'user-message');
 
   try {
-    if (cmd === '/help') {
-      echo(slashCommands.map(c => `  ${c.cmd.padEnd(22)} ${c.desc}`).join('\n'));
-    } else if (cmd === '/agents') {
-      const j = await fetch('/api/agents').then(r => r.json());
-      const lines = (j.agents || []).map(a => `  ${a.active ? '●' : '○'} ${a.id.padEnd(18)} ${a.model || '?'}`);
-      echo(lines.join('\n'));
-    } else if (cmd === '/halt') {
-      if (!arg) return echo('usage: /halt <agent>');
-      const r = await fetch('/api/halt/' + encodeURIComponent(arg), {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: 'slash command' }),
-      }).then(r => r.json());
-      echo(JSON.stringify(r, null, 2));
-    } else if (cmd === '/halt-all') {
-      const r = await fetch('/api/halt-all', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: 'slash command' }),
-      }).then(r => r.json());
-      echo(JSON.stringify(r, null, 2));
-    } else if (cmd === '/resume-all') {
-      const r = await fetch('/api/resume-all', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-      }).then(r => r.json());
-      echo(JSON.stringify(r, null, 2));
-    } else if (cmd === '/resume') {
-      if (!arg) return echo('usage: /resume <agent>');
-      const r = await fetch('/api/resume/' + encodeURIComponent(arg), {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-      }).then(r => r.json());
-      echo(JSON.stringify(r, null, 2));
-    } else if (cmd === '/probe') {
-      if (!arg) return echo('usage: /probe <url>');
-      const r = await fetch('/api/targets/probe', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target_url: arg }),
-      }).then(r => r.json());
-      echo(JSON.stringify(r, null, 2));
-    } else if (cmd === '/rps' || cmd === '/breaker') {
-      const r = await fetch('/api/burp/rps').then(r => r.json());
-      echo(`Burp RPS: ${r.rps ?? 'n/a'}\nAutomatic 5xx/429 halt breaker is disabled. Use Halt All when you want to stop the engagement.`);
-    } else if (cmd === '/clear') {
+    const r = await fetch('/api/slash/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: raw }),
+    });
+    const j = await r.json();
+    if (j.action?.type === 'clear-local-transcript') {
       rec.events.length = 0;
       if (rec.el) rec.el.innerHTML = '';
-    } else {
-      echo(`unknown command: ${cmd} — try /help`);
+      return;
+    }
+    for (const ev of j.events || []) renderReturnedEvent(ev);
+    if (!r.ok && !(j.events || []).length) {
+      renderReturnedEvent({ kind: 'assistant-text', text: 'error: ' + (j.error || r.statusText), ts: Date.now(), _optimistic: true });
     }
   } catch (e) {
-    echo('error: ' + e.message);
+    renderReturnedEvent({ kind: 'assistant-text', text: 'error: ' + e.message, ts: Date.now(), _optimistic: true });
   }
 }
 

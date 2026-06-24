@@ -599,6 +599,69 @@ CREATE TABLE IF NOT EXISTS engagements (
   started_at TEXT DEFAULT (datetime('now')),
   completed_at TEXT
 );
+CREATE TABLE IF NOT EXISTS controller_goals (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  target TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  engagement_id TEXT REFERENCES engagements(id),
+  created_by TEXT NOT NULL DEFAULT 'operator',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_controller_goals_status ON controller_goals(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_controller_goals_engagement ON controller_goals(engagement_id);
+CREATE TABLE IF NOT EXISTS controller_jobs (
+  id TEXT PRIMARY KEY,
+  goal_id TEXT REFERENCES controller_goals(id) ON DELETE SET NULL,
+  engagement_id TEXT REFERENCES engagements(id),
+  agent_id TEXT NOT NULL,
+  instance_id TEXT,
+  job_type TEXT NOT NULL,
+  target TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  openclaw_session_id TEXT,
+  lease_owner TEXT,
+  lease_expires_at INTEGER,
+  heartbeat_at INTEGER,
+  cancel_requested INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  result_json TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at TEXT,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_controller_jobs_status ON controller_jobs(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_controller_jobs_agent_status ON controller_jobs(agent_id, status);
+CREATE INDEX IF NOT EXISTS idx_controller_jobs_goal ON controller_jobs(goal_id);
+CREATE TABLE IF NOT EXISTS controller_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  goal_id TEXT REFERENCES controller_goals(id) ON DELETE SET NULL,
+  job_id TEXT REFERENCES controller_jobs(id) ON DELETE SET NULL,
+  event_type TEXT NOT NULL,
+  message TEXT,
+  data_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_controller_events_goal ON controller_events(goal_id, id);
+CREATE INDEX IF NOT EXISTS idx_controller_events_job ON controller_events(job_id, id);
+CREATE TABLE IF NOT EXISTS dashboard_transcript_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id TEXT NOT NULL,
+  client_event_id TEXT,
+  kind TEXT NOT NULL,
+  text TEXT,
+  event_json TEXT NOT NULL,
+  ts TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_transcript_client_id ON dashboard_transcript_events(client_event_id) WHERE client_event_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_dashboard_transcript_agent_id ON dashboard_transcript_events(agent_id, id);
 CREATE TABLE IF NOT EXISTS findings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   engagement_id TEXT NOT NULL,

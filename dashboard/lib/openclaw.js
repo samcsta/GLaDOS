@@ -109,8 +109,13 @@ function sessionsDir(agentId) {
 const OPENCLAW_AGENT_TIMEOUT_MS = Number(process.env.OPENCLAW_AGENT_TIMEOUT_MS) || 15 * 60 * 1000;
 
 function sendMessageToAgent(agentId, message) {
-  return new Promise((resolve, reject) => {
-    execFile(
+  return sendMessageToAgentTracked(agentId, message).promise;
+}
+
+function sendMessageToAgentTracked(agentId, message) {
+  let child;
+  const promise = new Promise((resolve, reject) => {
+    child = execFile(
       OPENCLAW_BIN,
       ['agent', '--agent', agentId, '--message', message, '--json'],
       { timeout: OPENCLAW_AGENT_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
@@ -126,6 +131,7 @@ function sendMessageToAgent(agentId, message) {
       }
     );
   });
+  return { child, promise };
 }
 
 module.exports = {
@@ -136,4 +142,5 @@ module.exports = {
   currentSessionForAgent,
   sessionsDir,
   sendMessageToAgent,
+  sendMessageToAgentTracked,
 };
