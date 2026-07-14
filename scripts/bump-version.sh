@@ -6,10 +6,7 @@ set -euo pipefail
 # Format:
 #   v<major>.<minor>.<patch>
 #
-# Examples:
-#   v3.6.0
-#   v3.6.1
-#   v3.6.2
+# Example: v4.0.1
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION_FILE="$ROOT/VERSION"
@@ -26,14 +23,14 @@ fi
 current="$(cat "$VERSION_FILE" 2>/dev/null || true)"
 if [[ -n "$BASE" ]]; then
   if ! [[ "$BASE" =~ ^[0-9]+\.[0-9]+$ ]]; then
-    echo "ERROR: GLADOS_VERSION_BASE must look like 3.6" >&2
+    echo "ERROR: GLADOS_VERSION_BASE must look like 4.0" >&2
     exit 1
   fi
   prefix="v${BASE}."
   patch=0
 else
   if ! [[ "$current" =~ ^v([0-9]+\.[0-9]+)\.([0-9]+)$ ]]; then
-    echo "ERROR: current VERSION must look like v3.6.0" >&2
+    echo "ERROR: current VERSION must look like v4.0.0" >&2
     exit 1
   fi
   prefix="v${BASH_REMATCH[1]}."

@@ -11,6 +11,10 @@ const ROOTS = [
   { key: 'reports', name: 'reports', root: REPORTS_ROOT },
   { key: 'investigations', name: 'investigations', root: INVESTIGATIONS_ROOT },
 ];
+// The client renders directory contents lazily, so indexing the full operator
+// corpus is inexpensive and avoids a large evidence folder hiding later reports.
+const MAX_TREE_ENTRIES = Math.max(100, Number(process.env.GLADOS_REPORT_TREE_MAX_ENTRIES || 20000));
+const MAX_TREE_DEPTH = Math.max(1, Number(process.env.GLADOS_REPORT_TREE_MAX_DEPTH || 16));
 
 // Extensions previewed inline as text (syntax-highlighting is client-side / off).
 const TEXT_EXTS = new Set([
@@ -44,20 +48,30 @@ function kindForExt(ext) {
   return 'binary';
 }
 
-function walk(dir, rel = '') {
+function walk(dir, rel = '', state = { count: 0, truncated: false }, depth = 0) {
+  if (state.count >= MAX_TREE_ENTRIES || depth > MAX_TREE_DEPTH) {
+    state.truncated = true;
+    return [];
+  }
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch { return []; }
   const out = [];
   for (const e of entries) {
+    if (state.count >= MAX_TREE_ENTRIES) {
+      state.truncated = true;
+      break;
+    }
     if (e.name.startsWith('.')) continue;
     const full = path.join(dir, e.name);
     const r = rel ? `${rel}/${e.name}` : e.name;
     if (e.isDirectory()) {
-      const children = walk(full, r);
+      state.count += 1;
+      const children = walk(full, r, state, depth + 1);
       if (children.length) out.push({ type: 'dir', name: e.name, path: r, children });
     } else if (e.isFile()) {
+      state.count += 1;
       const ext = path.extname(e.name).toLowerCase();
       let size = 0, mtime = 0;
       try { const st = fs.statSync(full); size = st.size; mtime = st.mtimeMs; } catch {}
@@ -76,16 +90,21 @@ function tree() {
     path: `${key}/${n.path}`,
     children: n.children ? prefixNodes(n.children, key) : undefined,
   }));
-  const nodes = ROOTS.map(r => ({
-    type: 'dir',
-    name: r.name,
-    path: r.key,
-    children: prefixNodes(walk(r.root), r.key),
-  })).filter(n => n.children.length);
+  const rootStates = {};
+  const nodes = ROOTS.map(r => {
+    const state = { count: 0, truncated: false };
+    const children = prefixNodes(walk(r.root, '', state), r.key);
+    rootStates[r.key] = state;
+    return { type: 'dir', name: r.name, path: r.key, children };
+  }).filter(n => n.children.length);
+  const truncatedRoots = Object.entries(rootStates).filter(([, state]) => state.truncated).map(([key]) => key);
   return {
     root: `reports: ${REPORTS_ROOT} | investigations: ${INVESTIGATIONS_ROOT}`,
     roots: Object.fromEntries(ROOTS.map(r => [r.key, r.root])),
     tree: nodes,
+    truncated: truncatedRoots.length > 0,
+    truncatedRoots,
+    maxEntries: MAX_TREE_ENTRIES,
   };
 }
 

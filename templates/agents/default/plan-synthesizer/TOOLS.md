@@ -13,7 +13,7 @@ Pure reasoning agent. Reads Phase 1 blackboard state and emits one JSON plan. No
 
 ## Tool Rules
 
-- Do not use Bash, Browser, WebFetch, WebSearch, curl, Burp, scanners, or session/Task dispatch tools.
+- Do not use Bash, Browser, WebFetch, WebSearch, curl, GLaDOS proxy, scanners, or session/Task dispatch tools.
 - Do not create screenshots or evidence bundles; cite evidence references already produced by recon agents.
 - Output JSON only and match `PLAN_SCHEMA.md`.
 - Weight direct app recon and prior validated evidence above OSINT.

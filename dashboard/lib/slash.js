@@ -7,13 +7,9 @@ const SLASH_COMMANDS = [
   { cmd: '/security-review <url|domain|path>', desc: 'Start a security-review workflow; local paths queue source-code' },
   { cmd: '/status', desc: 'Show active goals, jobs, agents, plans, and target health' },
   { cmd: '/agents', desc: 'Show live subagents (curl /api/agents)' },
-  { cmd: '/halt <agent>', desc: 'Halt a single agent (use /halt-all for engagement-wide halt)' },
-  { cmd: '/halt-all', desc: 'Engagement-wide halt (Burp scope drop-all + deny-all)' },
+  { cmd: '/halt <agent>', desc: 'Halt one agent and interrupt its owning SDK turn' },
   { cmd: '/resume <agent>', desc: 'Resume a halted agent' },
-  { cmd: '/resume-all', desc: 'Resume all halted agents and restore Burp scope' },
   { cmd: '/probe <url>', desc: 'Run watchdog target_probe against a URL' },
-  { cmd: '/rps', desc: 'Show Burp requests-per-second' },
-  { cmd: '/breaker', desc: 'Alias for /rps' },
   { cmd: '/clear', desc: 'Clear the current transcript view (local only)' },
 ];
 
@@ -30,8 +26,8 @@ function parseSlashCommand(raw) {
 function helpText() {
   const groups = [
     ['Workflow', ['/goal <target>', '/investigate <target>', '/security-review <url|domain|path>', '/status']],
-    ['Safety', ['/halt <agent>', '/halt-all', '/resume <agent>', '/resume-all']],
-    ['Diagnostics', ['/agents', '/probe <url>', '/rps', '/help', '/clear']],
+    ['Safety', ['/halt <agent>', '/resume <agent>']],
+    ['Diagnostics', ['/agents', '/probe <url>', '/help', '/clear']],
   ];
   const byCmd = new Map(SLASH_COMMANDS.map(c => [c.cmd, c.desc]));
   const lines = [];
@@ -46,6 +42,10 @@ function helpText() {
 
 function targetUsage(cmd = '/goal') {
   return `usage: ${cmd} <url-or-domain>`;
+}
+
+function investigateReadyPrompt() {
+  return 'Ready. The local ROE, operator context, and local secret profiles are already configured. What target should we assess?';
 }
 
 function isUrlOrDomain(value) {
@@ -87,6 +87,7 @@ module.exports = {
   parseSlashCommand,
   helpText,
   targetUsage,
+  investigateReadyPrompt,
   isUrlOrDomain,
   isExistingLocalPath,
   formatStatus,

@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Backwards-compatible alias. The full, single-command update flow now lives in
-# scripts/update.sh (git pull + deps + migrations + config regen + gateway
-# restart + doctor, with --dry-run / --with-openclaw / --no-restart / --force).
+# macOS alias for the v4 source-checkout updater.
 exec "$(dirname "$0")/update.sh" "$@"

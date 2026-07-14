@@ -2,74 +2,62 @@
   {
     "id": "ad-expert",
     "name": "ad-expert",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "ad-validator",
     "name": "ad-validator",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "ai-specialist",
     "name": "ai-specialist (yosyp)",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "api-expert",
     "name": "api-expert",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "api-validator",
     "name": "api-validator",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
-  },
-  {
-    "id": "atlas",
-    "name": "atlas",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
-    "enabled": true,
-    "subagent": false,
-    "identity": {
-      "name": "Atlas",
-      "theme": "Sam personal assistant — not part of GLaDOS",
-      "emoji": "🗺️"
-    }
   },
   {
     "id": "c2-builder",
     "name": "c2-builder",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": false
   },
   {
     "id": "c2-validator",
     "name": "c2-validator",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": false
   },
   {
     "id": "cloud-exposure",
     "name": "cloud-exposure",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true,
     "dispatch": "conditional"
   },
   {
     "id": "evidence-curator",
     "name": "evidence-curator",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "glados",
     "name": "glados",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true,
     "identity": {
       "name": "GLaDOS",
@@ -80,59 +68,59 @@
   {
     "id": "graphql-specialist",
     "name": "graphql-specialist",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true,
     "dispatch": "conditional"
   },
   {
     "id": "js-reverser",
     "name": "js-reverser",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true,
     "dispatch": "conditional"
   },
   {
     "id": "mobile-api-recon",
     "name": "mobile-api-recon",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true,
     "dispatch": "conditional"
   },
   {
     "id": "net-recon",
     "name": "net-recon",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "origin-ip",
     "name": "origin-ip",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true,
     "dispatch": "conditional"
   },
   {
     "id": "osint",
     "name": "osint",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "phish-validator",
     "name": "phish-validator",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": false
   },
   {
     "id": "phisherman",
     "name": "phisherman",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": false
   },
   {
     "id": "plan-synthesizer",
     "name": "plan-synthesizer",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true,
     "identity": {
       "name": "Plan Synthesizer",
@@ -143,67 +131,67 @@
   {
     "id": "poc-coder",
     "name": "poc-coder",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "poc-validator",
     "name": "poc-validator",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "postex",
     "name": "postex",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": false
   },
   {
     "id": "postex-validator",
     "name": "postex-validator",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": false
   },
   {
     "id": "report-validator",
     "name": "report-validator",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "report-writer",
     "name": "report-writer",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "scope-guardian",
     "name": "scope-guardian",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "source-code",
     "name": "source-code",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "webapp-recon",
     "name": "webapp-recon",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "webapp-validator",
     "name": "webapp-validator",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   },
   {
     "id": "webapp-vuln",
     "name": "webapp-vuln",
-    "model": "custom-llmapi-redteamstuff-com/claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "enabled": true
   }
 ]

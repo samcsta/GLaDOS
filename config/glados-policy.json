@@ -1,0 +1,160 @@
+{
+  "version": 1,
+  "harness": {
+    "anthropicBaseUrl": "https://llmapi.redteamstuff.com",
+    "authTokenEnv": "ANTHROPIC_AUTH_TOKEN",
+    "defaultModel": "claude-sonnet-5",
+    "modelAliases": [
+      "claude-sonnet-5",
+      "claude-opus-4-8",
+      "claude-fable-5",
+      "claude-sonnet-4-6"
+    ],
+    "mcpServers": [
+      "blackboard",
+      "watchdog",
+      "glados-ops"
+    ]
+  },
+  "disabledByDefaultPrefixes": [
+    "c2-",
+    "phish",
+    "postex"
+  ],
+  "toolProfiles": {
+    "leader": [
+      "Task",
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash",
+      "mcp__blackboard",
+      "mcp__watchdog",
+      "mcp__glados-ops"
+    ],
+    "chain-capable-specialist": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash",
+      "WebSearch",
+      "Write",
+      "Edit",
+      "TodoWrite",
+      "mcp__blackboard",
+      "mcp__watchdog",
+      "mcp__glados-ops"
+    ],
+    "specialist": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash",
+      "WebSearch",
+      "Write",
+      "Edit",
+      "TodoWrite",
+      "mcp__blackboard",
+      "mcp__watchdog",
+      "mcp__glados-ops"
+    ],
+    "validator": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash",
+      "WebSearch",
+      "Write",
+      "TodoWrite",
+      "mcp__blackboard",
+      "mcp__watchdog",
+      "mcp__glados-ops"
+    ],
+    "planner": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash",
+      "WebSearch",
+      "Write",
+      "Edit",
+      "TodoWrite",
+      "mcp__blackboard",
+      "mcp__watchdog",
+      "mcp__glados-ops"
+    ],
+    "report": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash",
+      "WebSearch",
+      "Write",
+      "Edit",
+      "TodoWrite",
+      "mcp__blackboard",
+      "mcp__watchdog",
+      "mcp__glados-ops"
+    ]
+  },
+  "browserMcpProfiles": [
+    "chain-capable-specialist",
+    "specialist",
+    "validator",
+    "planner",
+    "report"
+  ],
+  "browserMcpAgents": [
+    "ai-specialist",
+    "api-expert",
+    "api-validator",
+    "graphql-specialist",
+    "mobile-api-recon",
+    "webapp-recon",
+    "webapp-validator",
+    "webapp-vuln"
+  ],
+  "agentToolProfiles": {
+    "glados": "leader",
+    "webapp-recon": "chain-capable-specialist",
+    "webapp-vuln": "chain-capable-specialist",
+    "api-expert": "chain-capable-specialist",
+    "poc-coder": "chain-capable-specialist",
+    "plan-synthesizer": "planner",
+    "report-writer": "report"
+  },
+  "taskDispatch": {
+    "allowAgents": [
+      "ad-expert",
+      "ad-validator",
+      "ai-specialist",
+      "api-expert",
+      "api-validator",
+      "cloud-exposure",
+      "evidence-curator",
+      "graphql-specialist",
+      "js-reverser",
+      "mobile-api-recon",
+      "net-recon",
+      "origin-ip",
+      "osint",
+      "plan-synthesizer",
+      "poc-coder",
+      "poc-validator",
+      "report-validator",
+      "report-writer",
+      "scope-guardian",
+      "source-code",
+      "webapp-recon",
+      "webapp-validator",
+      "webapp-vuln"
+    ]
+  },
+  "denyBeltAndSuspenders": [
+    "MultiEdit",
+    "NotebookEdit",
+    "AskUserQuestion",
+    "EnterPlanMode",
+    "ExitPlanMode"
+  ]
+}

@@ -1,4 +1,4 @@
-# Webapp Assessment Playbook — GLaDOS v3.1
+# Webapp Assessment Playbook — GLaDOS v4
 
 Authoritative 3-phase flow for every webapp engagement. GLaDOS and the operator
 both read this file; it defines the hard boundary between recon (no approval

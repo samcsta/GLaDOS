@@ -1,0 +1,133 @@
+{
+  "fixture": "golden-negative-events",
+  "sourceVersion": "v3.6.0",
+  "recording": {
+    "kind": "recorded-sdk-messages",
+    "sdkVersion": "0.3.207",
+    "sha256": "ea6e47e40cae298e6af1f4efac03a9773adf5a49b0770e7bc7a27bc97d54fa37"
+  },
+  "cases": [
+    {
+      "name": "disabled-task-dispatch",
+      "agentId": "glados",
+      "toolName": "Task",
+      "toolInput": {
+        "subagent_type": "postex"
+      },
+      "recordedSdkMessages": [
+        {
+          "type": "system",
+          "subtype": "permission_denied",
+          "tool_name": "Task",
+          "tool_use_id": "toolu_deny_postex",
+          "decision_reason": "Task dispatch to postex is not allowed",
+          "message": "Task dispatch to postex is not allowed",
+          "uuid": "deny-postex",
+          "session_id": "sess-v36-negative"
+        },
+        {
+          "type": "user",
+          "uuid": "user-deny-postex",
+          "session_id": "sess-v36-negative",
+          "parent_tool_use_id": null,
+          "message": {
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_deny_postex",
+                "content": "Task dispatch to postex is not allowed",
+                "is_error": true,
+                "permission_denials": [
+                  {
+                    "tool_name": "Task",
+                    "tool_use_id": "toolu_deny_postex",
+                    "tool_input": {
+                      "subagent_type": "postex"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "type": "result",
+          "subtype": "error_during_execution",
+          "is_error": true,
+          "errors": [
+            "Task dispatch to postex is not allowed"
+          ],
+          "permission_denials": [
+            {
+              "tool_name": "Task",
+              "tool_use_id": "toolu_deny_postex",
+              "tool_input": {
+                "subagent_type": "postex"
+              }
+            }
+          ],
+          "num_turns": 1,
+          "total_cost_usd": 0,
+          "uuid": "result-deny-postex",
+          "session_id": "sess-v36-negative"
+        }
+      ],
+      "expectedEvents": [
+        {
+          "agentId": "glados",
+          "kind": "permission-denied",
+          "toolName": "Task",
+          "toolCallId": "toolu_deny_postex",
+          "text": "Task dispatch to postex is not allowed"
+        },
+        {
+          "agentId": "glados",
+          "kind": "tool-result",
+          "toolCallId": "toolu_deny_postex",
+          "isError": true,
+          "text": "Task dispatch to postex is not allowed",
+          "permissionDenials": [
+            {
+              "tool_name": "Task",
+              "tool_use_id": "toolu_deny_postex",
+              "tool_input": {
+                "subagent_type": "postex"
+              }
+            }
+          ]
+        },
+        {
+          "agentId": "glados",
+          "kind": "error",
+          "isError": true,
+          "text": "Task dispatch to postex is not allowed",
+          "permissionDenials": [
+            {
+              "tool_name": "Task",
+              "tool_use_id": "toolu_deny_postex",
+              "tool_input": {
+                "subagent_type": "postex"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "halt-abort",
+      "agentId": "glados",
+      "toolName": "mcp__blackboard__blackboard_engagement_status",
+      "toolInput": {},
+      "expectedDecisionReason": "glados is halted by the operator"
+    },
+    {
+      "name": "unmounted-tool-deny",
+      "agentId": "webapp-validator",
+      "toolName": "NotebookEdit",
+      "toolInput": {
+        "notebook_path": "scratch.ipynb"
+      },
+      "expectedDecisionReason": "NotebookEdit is not mounted for webapp-validator"
+    }
+  ]
+}

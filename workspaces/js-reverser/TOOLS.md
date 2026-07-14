@@ -11,7 +11,7 @@ Conditional Phase 1 agent. Works from captured JS, source maps, and app recon ou
 - Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
 - glados-ops `js_endpoint_extract` for endpoint, route, GraphQL operation, and secret-like key extraction.
 - Local file tools (`rg`, `jq`, `python3`, beautifiers if installed) for static bundle review.
-- Browser/Burp only to retrieve in-scope JS assets assigned by GLaDOS.
+- browser/proxy only to retrieve in-scope JS assets assigned by GLaDOS.
 
 ## Tool Rules
 

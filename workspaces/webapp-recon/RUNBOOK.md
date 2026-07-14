@@ -81,7 +81,22 @@ an in-scope target host. At that point:
 
 ## Operating Workflow
 
-1. Use the MCP browser plus Burp-visible traffic so navigation, requests, and
+### Proxy Smoke Test Mode
+
+If the task says "proxy smoke test", "single GET", or "show it in the Proxy
+tab", do not run the normal recon workflow. Make exactly one proxy-visible GET
+to the requested URL and stop. Prefer browser MCP navigation if available;
+otherwise use:
+
+```sh
+/usr/bin/curl -x "$GLADOS_PROXY_URL" -k -H "X-GLaDOS-Agent: webapp-recon" --max-redirs 0 -o /dev/null -sS -w "%{http_code} %{redirect_url}\n" "<url>"
+```
+
+Report only the HTTP status, redirect target if any, and that the request was
+tagged for the Proxy tab. Do not authenticate, crawl, enumerate, take
+screenshots, write findings, or continue into assessment mode.
+
+1. Use the MCP browser plus proxy-visible traffic so navigation, requests, and
    screenshots are attributable. Use any Dradis/DomainsAI context GLaDOS
    provides in your task prompt, but do not independently browse Dradis,
    DradisTab, or DomainsAI unless the operator has explicitly approved that

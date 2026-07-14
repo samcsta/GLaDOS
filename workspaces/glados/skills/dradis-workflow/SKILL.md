@@ -7,7 +7,7 @@ description: Workflow for interacting with Dradis Professional and DradisTab dur
 
 ## Tools Required
 
-Use **OpenClaw Browser (MCP)** for all Dradis interactions. Simple `curl` is insufficient — both targets are session-based.
+Use **approved Agent SDK MCP browser tooling** for all Dradis interactions. Simple `curl` is insufficient — both targets are session-based.
 
 - **DradisTab** (metadata/tracking): `https://dradistab.redteamstuff.com` — no credentials needed
 - **Dradis Pro** (full findings): `https://dradis.redteamstuff.com` — auth required
@@ -96,7 +96,7 @@ Every finding must include:
 1. Navigate to `https://dradis.redteamstuff.com`
 2. Open the correct project (verify it belongs to the current authorized engagement)
 3. Create new finding with all required fields populated
-4. Attach evidence (screenshots, request captures from Burp)
+4. Attach evidence (screenshots, request captures from GLaDOS proxy)
 5. Confirm finding saved — notify analyst with Dradis confirmation
 
 ---

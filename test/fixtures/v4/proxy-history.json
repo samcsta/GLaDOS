@@ -1,0 +1,44 @@
+{
+  "fixture": "proxy-history",
+  "sourceVersion": "v3.6.0",
+  "rows": [
+    {
+      "id": 101,
+      "ts": 1783972800000,
+      "method": "GET",
+      "url": "https://example.com/api/profile?id=1001",
+      "host": "example.com",
+      "status": 200,
+      "mime": "JSON",
+      "reqLen": 0,
+      "respLen": 128,
+      "agentTag": "webapp-vuln"
+    },
+    {
+      "id": 102,
+      "ts": 1783972805000,
+      "method": "GET",
+      "url": "https://example.com/api/profile?id=1002",
+      "host": "example.com",
+      "status": 200,
+      "mime": "JSON",
+      "reqLen": 0,
+      "respLen": 128,
+      "agentTag": "webapp-validator"
+    }
+  ],
+  "details": {
+    "101": {
+      "requestLine": "GET /api/profile?id=1001 HTTP/1.1",
+      "statusLine": "HTTP/1.1 200 OK",
+      "requestHeaders": {
+        "X-GLaDOS-Agent": "webapp-vuln"
+      },
+      "responseHeaders": {
+        "Content-Type": "application/json"
+      },
+      "requestBody": "",
+      "responseBody": "{\"id\":1001,\"role\":\"user\"}"
+    }
+  }
+}

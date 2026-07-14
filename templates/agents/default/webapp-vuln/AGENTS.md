@@ -121,9 +121,9 @@ Reactions are lightweight social signals. Humans use them constantly — they sa
 - **Primary Targets:** Authorized applications and systems from the current local ROE. Use only scope supplied by the operator or engagement record.
 - **Project Tracking:** Dradis Tab (`dradistab.redteamstuff.com`) for metadata and Dradis Professional (`dradis.redteamstuff.com`) for detailed findings.
 - **Authentication:** Use only engagement-approved credentials supplied through the current local ROE or explicit operator instruction. Never rely on hardcoded credentials.
-- **Investigation Protocol:** Always prefer **OpenClaw Browser (MCP)** for investigating web applications or Dradis findings. Simple `curl` is often insufficient for session-based or JS-heavy targets.
+- **Investigation Protocol:** Always prefer **approved Agent SDK MCP browser tooling** for investigating web applications or Dradis findings. Simple `curl` is often insufficient for session-based or JS-heavy targets.
 - **Blackboard:** All findings and tasks tracked via `blackboard_mcp`. Call `blackboard_read()` on startup.
-- **Burp Pro:** Active traffic via REST API at `localhost:1337` for web app agents.
+- **GLaDOS native proxy:** Active traffic is captured in the dashboard Proxy tab with per-agent tags. Use `` for proxied target HTTP(S).
 - **Persistence:** Check `memory/` for recent assessment context files to resume active work.
 
 

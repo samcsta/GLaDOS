@@ -1,0 +1,267 @@
+{
+  "fixture": "golden-subagent-chain",
+  "sourceVersion": "v3.6.0",
+  "recording": {
+    "kind": "recorded-sdk-messages",
+    "sdkVersion": "0.3.207",
+    "sha256": "ab608e9e6775fe8f973623ac4228c5f4a0b08dd1776a6ad09f31f637459063b4"
+  },
+  "target": "https://example.com",
+  "assembledPromptFiles": [
+    "IDENTITY.md",
+    "SOUL.md",
+    "RUNBOOK.md",
+    "TOOLS.md",
+    "USER.md",
+    "AGENTS.md"
+  ],
+  "recordedSdkMessages": [
+    {
+      "type": "assistant",
+      "uuid": "asst-task-recon",
+      "session_id": "sess-v36-chain",
+      "parent_tool_use_id": null,
+      "message": {
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_recon_001",
+            "name": "Task",
+            "input": {
+              "subagent_type": "webapp-recon",
+              "description": "Map unauthenticated web routes"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "uuid": "asst-recon-text",
+      "session_id": "sess-v36-chain",
+      "parent_tool_use_id": "toolu_recon_001",
+      "subagent_type": "webapp-recon",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Mapped unauthenticated routes and identified one validator-ready hypothesis."
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "uuid": "asst-task-vuln",
+      "session_id": "sess-v36-chain",
+      "parent_tool_use_id": null,
+      "message": {
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_vuln_001",
+            "name": "Task",
+              "input": {
+                "subagent_type": "webapp-vuln",
+                "description": "Validate CWE-639 hypothesis",
+                "prompt": "Use the webapp-recon handoff: unauthenticated routes include /api/profile and the candidate is an authorization-boundary failure. Validate only that hypothesis."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "uuid": "asst-vuln-text",
+      "session_id": "sess-v36-chain",
+      "parent_tool_use_id": "toolu_vuln_001",
+      "subagent_type": "webapp-vuln",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Found an IDOR candidate with proxy evidence ids [101, 102]."
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "uuid": "asst-task-validator",
+      "session_id": "sess-v36-chain",
+      "parent_tool_use_id": null,
+      "message": {
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_validator_001",
+            "name": "Task",
+              "input": {
+                "subagent_type": "webapp-validator",
+                "description": "Independently validate evidence",
+                "prompt": "Independently validate the webapp-vuln handoff for CWE-639 using proxy evidence ids 101 and 102."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "uuid": "asst-validator-text",
+      "session_id": "sess-v36-chain",
+      "parent_tool_use_id": "toolu_validator_001",
+      "subagent_type": "webapp-validator",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Validated CWE-639 with independent replay and matching evidence."
+          }
+        ]
+      }
+    }
+  ],
+  "expectedEvents": [
+    {
+      "agentId": "glados",
+      "kind": "tool-call",
+      "toolName": "Task",
+      "toolCallId": "toolu_recon_001",
+      "parentToolUseId": null,
+      "toolInput": {
+        "subagent_type": "webapp-recon",
+        "description": "Map unauthenticated web routes"
+      }
+    },
+    {
+      "agentId": "webapp-recon",
+      "kind": "assistant-text",
+      "parentToolUseId": "toolu_recon_001",
+      "text": "Mapped unauthenticated routes and identified one validator-ready hypothesis."
+    },
+    {
+      "agentId": "glados",
+      "kind": "tool-call",
+      "toolName": "Task",
+      "toolCallId": "toolu_vuln_001",
+      "toolInput": {
+        "subagent_type": "webapp-vuln",
+        "description": "Validate CWE-639 hypothesis",
+        "prompt": "Use the webapp-recon handoff: unauthenticated routes include /api/profile and the candidate is an authorization-boundary failure. Validate only that hypothesis."
+      }
+    },
+    {
+      "agentId": "webapp-vuln",
+      "kind": "assistant-text",
+      "parentToolUseId": "toolu_vuln_001",
+      "text": "Found an IDOR candidate with proxy evidence ids [101, 102]."
+    },
+    {
+      "agentId": "glados",
+      "kind": "tool-call",
+      "toolName": "Task",
+      "toolCallId": "toolu_validator_001",
+      "toolInput": {
+        "subagent_type": "webapp-validator",
+        "description": "Independently validate evidence",
+        "prompt": "Independently validate the webapp-vuln handoff for CWE-639 using proxy evidence ids 101 and 102."
+      }
+    },
+    {
+      "agentId": "webapp-validator",
+      "kind": "assistant-text",
+      "parentToolUseId": "toolu_validator_001",
+      "text": "Validated CWE-639 with independent replay and matching evidence."
+    }
+  ],
+  "chain": [
+    {
+      "agentId": "webapp-recon",
+      "phase": "recon",
+      "spawnTool": "Task",
+      "tool_use_id": "toolu_recon_001",
+      "parent_tool_use_id": null,
+      "response_parent_tool_use_id": "toolu_recon_001",
+      "allowedBy": ["allowAgents", "phase1"],
+      "events": [
+        {
+          "kind": "tool-call",
+          "toolName": "mcp__blackboard__blackboard_recon_step_log",
+          "arguments": {
+            "engagement_id": "example.com-20260713",
+            "step": "webapp-recon",
+            "status": "running"
+          }
+        },
+        {
+          "kind": "assistant-text",
+          "text": "Mapped unauthenticated routes and identified one validator-ready hypothesis."
+        }
+      ],
+      "handoff": {
+        "routes": ["/", "/login", "/api/profile"],
+        "hypotheses": ["CWE-639 authorization boundary on /api/profile"]
+      }
+    },
+    {
+      "agentId": "webapp-vuln",
+      "phase": "vuln",
+      "spawnTool": "Task",
+      "tool_use_id": "toolu_vuln_001",
+      "parent_tool_use_id": null,
+      "response_parent_tool_use_id": "toolu_vuln_001",
+      "handoff_from_tool_use_id": "toolu_recon_001",
+      "allowedBy": ["approvedPlan", "scopeGuard", "haltClear"],
+      "events": [
+        {
+          "kind": "tool-call",
+          "toolName": "mcp__glados-ops__scope_guard_check",
+          "arguments": {
+            "agent_id": "webapp-vuln",
+            "target_url": "https://example.com/api/profile",
+            "risk_to_target": "low"
+          }
+        },
+        {
+          "kind": "assistant-text",
+          "text": "Found an IDOR candidate with proxy evidence ids [101, 102]."
+        }
+      ],
+      "handoff": {
+        "finding_type": "authorization",
+        "cwe_id": "CWE-639",
+        "proxy_ids": [101, 102]
+      }
+    },
+    {
+      "agentId": "webapp-validator",
+      "phase": "validator",
+      "spawnTool": "Task",
+      "tool_use_id": "toolu_validator_001",
+      "parent_tool_use_id": null,
+      "response_parent_tool_use_id": "toolu_validator_001",
+      "handoff_from_tool_use_id": "toolu_vuln_001",
+      "allowedBy": ["validatorPair", "haltClear"],
+      "events": [
+        {
+          "kind": "tool-call",
+          "toolName": "mcp__blackboard__blackboard_finding_validate",
+          "arguments": {
+            "finding_id": 1,
+            "validation_status": "validated",
+            "confidence_score": 0.92,
+            "enables_vectors": []
+          }
+        },
+        {
+          "kind": "assistant-text",
+          "text": "Validated CWE-639 with independent replay and matching evidence."
+        }
+      ],
+      "handoff": {
+        "validation_status": "validated",
+        "confidence_score": 0.92
+      }
+    }
+  ]
+}

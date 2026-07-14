@@ -1,5 +1,5 @@
 {
-  "_comment": "GLaDOS v3.1 per-agent fetch ACL. Copy to ~/.openclaw/glados-fetch-acl.json and edit per engagement. tag-injector.js reads this on every outbound call via an mtime-keyed cache, so edits take effect within ~1s. Leave enabled=false to keep v3.0 behavior (no ACL).",
+  "_comment": "GLaDOS v4 per-agent target ACL. Copy to ~/.glados/policy/glados-fetch-acl.json. The Agent SDK PreToolUse gate reads it for target-capable tools. Leave enabled=false until an operator-approved plan populates it.",
   "version": 1,
   "enabled": false,
   "default": "deny",

@@ -5,6 +5,10 @@ const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const crypto = require('node:crypto');
+const {
+  DEFAULT_BARE_MODEL,
+  bareModelAlias,
+} = require('./model-aliases');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const TEMPLATE_ROOT = path.join(REPO_ROOT, 'templates', 'agents', 'default');
@@ -12,10 +16,8 @@ const REGISTRY_PATH = path.join(REPO_ROOT, 'templates', 'agent-registry.json');
 const DOTENV_PATH = path.join(REPO_ROOT, '.env');
 const DEFAULT_OPERATOR_CONTEXT = path.join(REPO_ROOT, 'templates', 'operator-context', 'ford-redteam.json');
 const REPORTING_TEMPLATE_ROOT = path.join(REPO_ROOT, 'templates', 'reporting');
-const DEFAULT_PRIMARY_MODEL = 'custom-llmapi-redteamstuff-com/claude-sonnet-4-6';
+const DEFAULT_PRIMARY_MODEL = DEFAULT_BARE_MODEL;
 const OLLAMA_PROVIDER = 'ollama-local';
-const TOKEN_FIELD = ['to', 'ken'].join('');
-const OPENCLAW_REQUIRED_OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write'];
 
 function log(msg) { process.stdout.write(`${msg}\n`); }
 function warn(msg) { process.stderr.write(`WARN: ${msg}\n`); }
@@ -30,14 +32,14 @@ function ollamaDisabled() {
 }
 
 function primaryModel() {
-  return process.env.GLADOS_PRIMARY_MODEL || DEFAULT_PRIMARY_MODEL;
+  return bareModelAlias(process.env.GLADOS_PRIMARY_MODEL || DEFAULT_PRIMARY_MODEL);
 }
 
 function resolveAgentModel(model) {
   if (ollamaDisabled() && typeof model === 'string' && model.startsWith(`${OLLAMA_PROVIDER}/`)) {
     return primaryModel();
   }
-  return model || primaryModel();
+  return model && String(model).startsWith(`${OLLAMA_PROVIDER}/`) ? model : bareModelAlias(model || primaryModel());
 }
 
 function expandValue(value) {
@@ -69,11 +71,9 @@ function loadDotenv(file = DOTENV_PATH) {
 function localPaths() {
   loadDotenv();
   const runtimeDir = path.resolve(expandValue(process.env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), '.glados')));
-  const openclawHome = path.resolve(expandValue(process.env.OPENCLAW_HOME || path.join(os.homedir(), '.openclaw')));
   return {
     repoRoot: REPO_ROOT,
     runtimeDir,
-    openclawHome,
     agentsDir: path.resolve(expandValue(process.env.GLADOS_AGENT_WORKSPACES || path.join(runtimeDir, 'workspaces', 'agents'))),
     reportsDir: path.resolve(expandValue(process.env.GLADOS_REPORTS_DIR || path.join(runtimeDir, 'reports'))),
     investigationsDir: path.resolve(expandValue(process.env.GLADOS_INVESTIGATIONS_DIR || path.join(runtimeDir, 'investigations'))),
@@ -88,13 +88,19 @@ function localPaths() {
     modelOverridesPath: path.join(runtimeDir, 'model-overrides.json'),
     secretsDir: path.join(runtimeDir, 'secrets'),
     localAuthPath: path.join(runtimeDir, 'secrets', 'local-auth.json'),
-    openclawJson: path.join(openclawHome, 'openclaw.json'),
-    openclawAgentsDir: path.join(openclawHome, 'agents'),
+    sessionsDir: path.join(runtimeDir, 'sessions'),
+    trafficDir: path.join(runtimeDir, 'traffic'),
+    haltsDir: path.join(runtimeDir, 'halts'),
   };
 }
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
+}
+
+function ensureOwnerOnlyDir(dir) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(dir, 0o700); } catch {}
 }
 
 function readJson(file, fallback = null) {
@@ -190,10 +196,12 @@ function ensureRuntimeDirs(paths) {
     paths.investigationsDir,
     paths.blackboardDir,
     paths.watchdogDir,
-    paths.secretsDir,
-    paths.openclawHome,
-    paths.openclawAgentsDir,
+    paths.sessionsDir,
+    paths.trafficDir,
+    paths.haltsDir,
   ]) ensureDir(dir);
+  for (const dir of [paths.runtimeDir, paths.sessionsDir, paths.trafficDir, paths.haltsDir]) ensureOwnerOnlyDir(dir);
+  ensureOwnerOnlyDir(paths.secretsDir);
   if (!fs.existsSync(paths.customAgentsJson)) writeJson(paths.customAgentsJson, { version: 1, agents: [] });
   if (!fs.existsSync(paths.modelOverridesPath)) writeJson(paths.modelOverridesPath, {});
   if (!fs.existsSync(paths.operatorContextPath) && fs.existsSync(DEFAULT_OPERATOR_CONTEXT)) {
@@ -300,260 +308,6 @@ function updateAgentStatus(paths) {
   return status;
 }
 
-function localAgentEntries(paths) {
-  const registry = registryById();
-  // User-owned, update-surviving per-agent model assignments. This file lives in
-  // the runtime dir (outside the repo, gitignored) so `git pull` never touches it,
-  // and it is read on every config regen so a user's choices persist across
-  // updates instead of being wiped when openclaw.json is rebuilt. An override is
-  // applied verbatim and is intentionally EXEMPT from the ollama-disabled swap —
-  // an explicit user choice always wins. Precedence: override > agent.json > registry.
-  const modelOverrides = readJson(paths.modelOverridesPath, {}) || {};
-  const entries = [];
-  if (!fs.existsSync(paths.agentsDir)) return entries;
-  for (const d of fs.readdirSync(paths.agentsDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!d.isDirectory() || d.name.startsWith('.')) continue;
-    const workspace = path.join(paths.agentsDir, d.name);
-    const meta = readJson(path.join(workspace, 'agent.json'), {});
-    const upstream = registry.get(d.name) || {};
-    const enabled = meta.enabled !== undefined ? meta.enabled !== false : upstream.enabled !== false;
-    if (!enabled || fs.existsSync(path.join(workspace, '.disabled'))) continue;
-    const id = meta.id || upstream.id || d.name;
-    entries.push({
-      id,
-      name: meta.name || upstream.name || id,
-      workspace,
-      agentDir: path.join(paths.openclawAgentsDir, id, 'agent'),
-      model: modelOverrides[id] || resolveAgentModel(meta.model || upstream.model),
-      identity: meta.identity || upstream.identity,
-      subagent: meta.subagent !== undefined ? meta.subagent !== false : upstream.subagent !== false,
-    });
-  }
-  return entries;
-}
-
-function existingComputerUseServer(existing) {
-  const server = existing?.mcp?.servers?.['computer-use'];
-  if (server?.command) return server;
-  const candidates = [
-    '/opt/homebrew/lib/node_modules/computer-use-mcp/dist/main.js',
-    '/usr/local/lib/node_modules/computer-use-mcp/dist/main.js',
-  ];
-  const found = candidates.find(p => fs.existsSync(p));
-  return found ? { command: 'node', args: [found] } : null;
-}
-
-function providerModel(id) {
-  const model = { id, name: id.split('/').slice(1).join('/') || id };
-  // OpenClaw otherwise falls back to provider-generic output limits for our
-  // OpenAI-compatible gateway. Claude agents routinely emit file contents in
-  // tool arguments, so give them enough headroom to finish a single large
-  // write without leaving a syntactically valid but incomplete tool call.
-  if (id.startsWith('claude-')) {
-    model.contextWindow = 200000;
-    model.maxTokens = 16384;
-  }
-  return model;
-}
-
-const LLMAPI_MODELS = [
-  'gemini-2.5-flash',
-  'gemini-3.1-flash-lite-preview',
-  'gemini-2.5-flash-lite',
-  'gemini-3.1-pro-preview',
-  'gpt-5.3-codex',
-  'gpt-5.5-pro',
-  'gpt-5.5',
-  'claude-opus-4-6',
-  'gemini-3.5-flash',
-  'claude-opus-4-7',
-  'claude-opus-4-8',
-  'gemini-3-flash-preview',
-  'claude-sonnet-4-6',
-  'qwen3.6-27b-fp8',
-  'qwen3.6-35b-a3b-fp8',
-  'minimax-m2.7',
-  'gemma-4-31b-it-fp8',
-];
-
-function generateOpenClawConfig(paths) {
-  const existing = readJson(paths.openclawJson, {});
-  const agents = localAgentEntries(paths);
-  const subagentAllowAgents = agents
-    .filter(a => a.subagent !== false && a.id !== 'glados')
-    .map(a => a.id);
-  const openClawAgents = agents.map(({ subagent, ...agent }) => agent);
-  for (const a of agents) {
-    ensureDir(a.agentDir);
-    const sessionDir = path.join(paths.openclawAgentsDir, a.id, 'sessions');
-    ensureDir(sessionDir);
-    const sessionIndex = path.join(sessionDir, 'sessions.json');
-    if (!fs.existsSync(sessionIndex)) writeJson(sessionIndex, {});
-  }
-
-  const primary = process.env.GLADOS_PRIMARY_MODEL || existing?.agents?.defaults?.model?.primary || DEFAULT_PRIMARY_MODEL;
-  const llmApiKey = process.env.LLMAPI_API_KEY || existing?.models?.providers?.['custom-llmapi-redteamstuff-com']?.apiKey || 'replace-me';
-  const llmBaseUrl = process.env.LLMAPI_BASE_URL || existing?.models?.providers?.['custom-llmapi-redteamstuff-com']?.baseUrl || 'https://llmapi.redteamstuff.com/';
-  const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || existing?.models?.providers?.['ollama-local']?.baseUrl || 'http://localhost:11434/v1/';
-  const localModel = process.env.GLADOS_LOCAL_MODEL || 'glm-4.7-flash:latest';
-  const disableOllama = ollamaDisabled();
-  const burpProxy = process.env.BURP_PROXY || 'http://127.0.0.1:8080';
-  const burpExtApi = process.env.BURP_EXT_API || 'http://127.0.0.1:1338';
-  const burpApi = process.env.BURP_API || 'http://127.0.0.1:1337';
-  const gatewayToken = existing?.gateway?.auth?.token || crypto.randomBytes(24).toString('hex');
-  const hb = brewPrefix();
-  const toolPath = [
-    path.join(REPO_ROOT, 'tools', 'bin'),
-    path.join(os.homedir(), '.local', 'bin'),
-    path.join(hb, 'opt', 'node@22', 'bin'),
-    path.join(hb, 'bin'),
-    path.join(hb, 'sbin'),
-    '/usr/local/bin',
-    '/usr/bin',
-    '/bin',
-    '/usr/sbin',
-    '/sbin',
-  ].join(':');
-  const nodePath = [
-    path.join(REPO_ROOT, 'dashboard', 'node_modules'),
-    process.env.NODE_PATH,
-  ].filter(Boolean).join(':');
-
-  const mcpEnv = {
-    GLADOS_RUNTIME_DIR: paths.runtimeDir,
-    GLADOS_REPO_ROOT: REPO_ROOT,
-    GLADOS_AGENT_WORKSPACES: paths.agentsDir,
-    GLADOS_REPORTS_DIR: paths.reportsDir,
-    GLADOS_INVESTIGATIONS_DIR: paths.investigationsDir,
-    GLADOS_OPERATOR_CONTEXT: paths.operatorContextPath,
-    GLADOS_LOCAL_AUTH: paths.localAuthPath,
-    BLACKBOARD_DB: paths.blackboardDb,
-    WATCHDOG_DB: paths.watchdogDb,
-    OPENCLAW_HOME: paths.openclawHome,
-    BURP_PROXY: burpProxy,
-    BURP_API: burpApi,
-    BURP_EXT_API: burpExtApi,
-    PATH: toolPath,
-  };
-  const servers = {
-    watchdog: { command: 'node', args: [path.join(REPO_ROOT, 'watchdog', 'watchdog-mcp', 'index.js')], env: mcpEnv },
-    blackboard: { command: 'node', args: [path.join(REPO_ROOT, 'blackboard', 'blackboard-mcp', 'index.js')], env: mcpEnv },
-    'glados-ops': { command: 'node', args: [path.join(REPO_ROOT, 'tools', 'glados-ops-mcp', 'index.js')], env: mcpEnv },
-  };
-  const computerUse = existingComputerUseServer(existing);
-  if (computerUse) servers['computer-use'] = computerUse;
-
-  const meta = { ...(existing.meta || {}) };
-  delete meta.gladosLocalVersion;
-  meta.lastTouchedAt = new Date().toISOString();
-
-  const config = {
-    ...existing,
-    meta,
-    models: {
-      ...(existing.models || {}),
-      mode: 'merge',
-      providers: {
-        ...(existing.models?.providers || {}),
-        'custom-llmapi-redteamstuff-com': {
-          ...(existing.models?.providers?.['custom-llmapi-redteamstuff-com'] || {}),
-          baseUrl: llmBaseUrl,
-          ['api' + 'Key']: llmApiKey,
-          api: 'openai-completions',
-          models: LLMAPI_MODELS.map(providerModel),
-        },
-        'ollama-local': {
-          ...(existing.models?.providers?.['ollama-local'] || {}),
-          baseUrl: ollamaBaseUrl,
-          ['api' + 'Key']: existing.models?.providers?.['ollama-local']?.apiKey || 'ollama',
-          api: 'openai-completions',
-          models: [providerModel(localModel)],
-        },
-      },
-    },
-    agents: {
-      defaults: {
-        ...(existing.agents?.defaults || {}),
-        model: { primary },
-        models: { [primary]: {} },
-        workspace: paths.agentsDir,
-        compaction: { mode: 'safeguard' },
-        maxConcurrent: Number(process.env.GLADOS_MAX_CONCURRENT || existing.agents?.defaults?.maxConcurrent || 6),
-        subagents: {
-          maxConcurrent: Math.max(agents.length, Number(process.env.GLADOS_SUBAGENT_MAX || existing.agents?.defaults?.subagents?.maxConcurrent || 6)),
-          allowAgents: subagentAllowAgents,
-        },
-        llm: { idleTimeoutSeconds: Number(process.env.OPENCLAW_LLM_IDLE_TIMEOUT_SECONDS || existing.agents?.defaults?.llm?.idleTimeoutSeconds || 1200) },
-      },
-      list: openClawAgents,
-    },
-    tools: {
-      ...(existing.tools || {}),
-      profile: existing.tools?.profile || 'full',
-      sessions: existing.tools?.sessions || { visibility: 'all' },
-      agentToAgent: {
-        ...(existing.tools?.agentToAgent || {}),
-        enabled: true,
-        allow: subagentAllowAgents,
-      },
-      fs: existing.tools?.fs || { workspaceOnly: false },
-    },
-    gateway: {
-      ...(existing.gateway || {}),
-      port: Number(process.env.OPENCLAW_GATEWAY_PORT || existing.gateway?.port || 18789),
-      mode: existing.gateway?.mode || 'local',
-      bind: existing.gateway?.bind || 'loopback',
-      auth: { mode: 'token', ['to' + 'ken']: gatewayToken },
-      tailscale: existing.gateway?.tailscale || { mode: 'off', resetOnExit: false },
-      nodes: existing.gateway?.nodes || {
-        denyCommands: ['camera.snap', 'camera.clip', 'screen.record', 'contacts.add', 'calendar.add', 'reminders.add', 'sms.send'],
-      },
-    },
-    plugins: existing.plugins || { entries: { browser: { enabled: true } }, installs: {} },
-    mcp: { servers },
-    browser: {
-      ...(existing.browser || {}),
-      extraArgs: [
-        `--proxy-server=${burpProxy}`,
-        '--ignore-certificate-errors',
-        '--proxy-bypass-list=localhost;127.0.0.1;::1',
-      ],
-    },
-    env: {
-      ...(existing.env || {}),
-      GLADOS_RUNTIME_DIR: paths.runtimeDir,
-      GLADOS_REPO_ROOT: REPO_ROOT,
-      GLADOS_AGENT_WORKSPACES: paths.agentsDir,
-      GLADOS_REPORTS_DIR: paths.reportsDir,
-      GLADOS_INVESTIGATIONS_DIR: paths.investigationsDir,
-      GLADOS_OPERATOR_CONTEXT: paths.operatorContextPath,
-      GLADOS_LOCAL_AUTH: paths.localAuthPath,
-      BLACKBOARD_DB: paths.blackboardDb,
-      WATCHDOG_DB: paths.watchdogDb,
-      BURP_PROXY: burpProxy,
-      BURP_API: burpApi,
-      BURP_EXT_API: burpExtApi,
-      HTTPS_PROXY: burpProxy,
-      HTTP_PROXY: burpProxy,
-      NO_PROXY: 'localhost,127.0.0.1,::1,host.docker.internal,llmapi.redteamstuff.com',
-      OPENCLAW_RAW_STREAM: process.env.OPENCLAW_RAW_STREAM || '1',
-      NODE_PATH: nodePath,
-      PATH: toolPath,
-      JAVA_HOME: process.env.JAVA_HOME || existing.env?.JAVA_HOME || path.join(hb, 'opt', 'openjdk@21', 'libexec', 'openjdk.jdk', 'Contents', 'Home'),
-      DYLD_LIBRARY_PATH: process.env.DYLD_LIBRARY_PATH || existing.env?.DYLD_LIBRARY_PATH || path.join(hb, 'opt', 'expat', 'lib'),
-    },
-  };
-  delete config.env.OPENCLAW_HOME;
-  if (disableOllama) delete config.models.providers['ollama-local'];
-  if (fs.existsSync(paths.openclawJson)) {
-    const backup = `${paths.openclawJson}.bak-glados-local-${Date.now()}`;
-    fs.copyFileSync(paths.openclawJson, backup);
-  }
-  writeJson(paths.openclawJson, config);
-  chmodOwnerOnly(paths.openclawJson);
-  return { agents: openClawAgents.map(a => ({ id: a.id, model: a.model, workspace: a.workspace })), openclawJson: paths.openclawJson };
-}
-
 function which(cmd) {
   for (const dir of (process.env.PATH || '').split(':')) {
     const p = path.join(dir, cmd);
@@ -624,7 +378,7 @@ CREATE TABLE IF NOT EXISTS controller_jobs (
   prompt TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'queued',
   attempts INTEGER NOT NULL DEFAULT 0,
-  openclaw_session_id TEXT,
+  sdk_session_id TEXT,
   lease_owner TEXT,
   lease_expires_at INTEGER,
   heartbeat_at INTEGER,
@@ -775,6 +529,8 @@ CREATE INDEX IF NOT EXISTS idx_replan_state ON replan_proposals(state);
   const cols = sqliteTableColumns(paths.blackboardDb, 'findings');
   if (!cols.has('enables_vectors')) runSql(paths.blackboardDb, 'ALTER TABLE findings ADD COLUMN enables_vectors TEXT;', { ignoreError: true });
   if (!cols.has('confidence_score')) runSql(paths.blackboardDb, 'ALTER TABLE findings ADD COLUMN confidence_score REAL;', { ignoreError: true });
+  const jobCols = sqliteTableColumns(paths.blackboardDb, 'controller_jobs');
+  if (!jobCols.has('sdk_session_id')) runSql(paths.blackboardDb, 'ALTER TABLE controller_jobs ADD COLUMN sdk_session_id TEXT;', { ignoreError: true });
 }
 
 function ensureWatchdogDb(paths) {
@@ -796,13 +552,6 @@ CREATE TABLE IF NOT EXISTS halt_log (
   initiator TEXT,
   action TEXT NOT NULL,
   at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS breaker_trips (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  target_host TEXT NOT NULL,
-  tripped_at INTEGER NOT NULL,
-  sample_count INTEGER,
-  last_status INTEGER
 );
 `);
 }
@@ -846,221 +595,9 @@ function installDeps() {
   }
 }
 
-function restartGateway() {
-  if (process.argv.includes('--no-restart')) return { skipped: true };
-  const openclaw = process.env.OPENCLAW_BIN || 'openclaw';
-  const found = which(openclaw);
-  if (!found) return { skipped: true, reason: 'openclaw not found' };
-  const r = cp.spawnSync(found, ['daemon', 'restart'], { stdio: 'inherit' });
-  return { skipped: r.status !== 0, status: r.status };
-}
-
 function inside(parent, child) {
   const rel = path.relative(parent, child);
   return rel && !rel.startsWith('..') && !path.isAbsolute(rel);
-}
-
-function openClawIdentityFiles(paths) {
-  return {
-    devicePath: path.join(paths.openclawHome, 'identity', 'device.json'),
-    deviceAuthPath: path.join(paths.openclawHome, 'identity', 'device-auth.json'),
-    pairedPath: path.join(paths.openclawHome, 'devices', 'paired.json'),
-    pendingPath: path.join(paths.openclawHome, 'devices', 'pending.json'),
-  };
-}
-
-function normalizeScopes(scopes) {
-  if (Array.isArray(scopes)) return [...new Set(scopes.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim()))].sort();
-  if (typeof scopes === 'string') return normalizeScopes(scopes.split(/[,\s]+/));
-  return [];
-}
-
-function mergedScopes(...sources) {
-  return normalizeScopes(sources.flatMap(normalizeScopes));
-}
-
-function missingOperatorScopes(scopes) {
-  const set = new Set(normalizeScopes(scopes));
-  return OPENCLAW_REQUIRED_OPERATOR_SCOPES.filter(scope => !set.has(scope));
-}
-
-function hasRequiredOperatorScopes(scopes) {
-  return missingOperatorScopes(scopes).length === 0;
-}
-
-function pairedEntries(paired) {
-  if (Array.isArray(paired)) return paired.map((record, index) => [String(index), record]);
-  if (paired && typeof paired === 'object') return Object.entries(paired);
-  return [];
-}
-
-function findPairedDeviceRecord(paired, deviceId) {
-  const entries = pairedEntries(paired);
-  const exact = entries.find(([key, record]) => {
-    if (!record || typeof record !== 'object') return false;
-    return key === deviceId || record.deviceId === deviceId || record.id === deviceId;
-  });
-  if (exact) return exact[1];
-  if (!deviceId && entries.length === 1) return entries[0][1];
-  return null;
-}
-
-function operatorCredentialFromRecord(record) {
-  if (!record || typeof record !== 'object') return null;
-  const candidates = [];
-  if (record.tokens?.operator) candidates.push(record.tokens.operator);
-  if (record.operator) candidates.push(record.operator);
-  if (record[TOKEN_FIELD]) candidates.push(record);
-  if (record.tokens && typeof record.tokens === 'object') {
-    for (const [name, value] of Object.entries(record.tokens)) {
-      if (name !== 'operator' && value?.role === 'operator') candidates.push(value);
-    }
-  }
-  return candidates.find(value => value && typeof value[TOKEN_FIELD] === 'string') || null;
-}
-
-function approvedOperatorScopes(record, credential) {
-  return mergedScopes(record?.scopes, record?.approvedScopes, credential?.scopes);
-}
-
-function checkOpenClawDeviceAuth(paths = localPaths()) {
-  const files = openClawIdentityFiles(paths);
-  const result = {
-    ok: false,
-    status: 'unknown',
-    required_scopes: OPENCLAW_REQUIRED_OPERATOR_SCOPES,
-    path: files.deviceAuthPath,
-    paired_path: files.pairedPath,
-    exists: fs.existsSync(files.deviceAuthPath),
-    paired_exists: fs.existsSync(files.pairedPath),
-    has_device_id: false,
-    has_operator_credential: false,
-    has_required_scopes: false,
-    paired: false,
-    paired_has_operator_credential: false,
-    paired_has_required_scopes: false,
-    token_matches_paired: false,
-    repairable: false,
-    problems: [],
-  };
-
-  if (!result.exists) {
-    result.status = 'missing';
-    result.problems.push('device-auth cache is missing');
-    return result;
-  }
-
-  const auth = readJson(files.deviceAuthPath, null);
-  if (!auth || typeof auth !== 'object') {
-    result.status = 'invalid';
-    result.problems.push('device-auth cache is not valid JSON');
-    return result;
-  }
-
-  const device = readJson(files.devicePath, {}) || {};
-  const deviceId = auth.deviceId || device.deviceId;
-  result.has_device_id = typeof deviceId === 'string' && deviceId.length > 0;
-  if (!result.has_device_id) result.problems.push('device id is missing');
-
-  const authCredential = auth.tokens?.operator;
-  const authCredentialValue = authCredential?.[TOKEN_FIELD];
-  const authScopes = normalizeScopes(authCredential?.scopes);
-  result.has_operator_credential = typeof authCredentialValue === 'string' && authCredentialValue.length > 0;
-  result.has_required_scopes = hasRequiredOperatorScopes(authScopes);
-  if (!result.has_operator_credential) result.problems.push('operator credential is missing from device-auth cache');
-  if (result.has_operator_credential && !result.has_required_scopes) {
-    result.problems.push(`device-auth operator scopes missing: ${missingOperatorScopes(authScopes).join(', ')}`);
-  }
-
-  const paired = readJson(files.pairedPath, null);
-  const record = findPairedDeviceRecord(paired, deviceId);
-  result.paired = Boolean(record);
-  if (!record) {
-    result.problems.push('paired device record is missing');
-  } else {
-    const pairedCredential = operatorCredentialFromRecord(record);
-    const pairedCredentialValue = pairedCredential?.[TOKEN_FIELD];
-    const pairedScopes = approvedOperatorScopes(record, pairedCredential);
-    result.paired_has_operator_credential = typeof pairedCredentialValue === 'string' && pairedCredentialValue.length > 0;
-    result.paired_has_required_scopes = hasRequiredOperatorScopes(pairedScopes);
-    result.token_matches_paired = result.has_operator_credential && result.paired_has_operator_credential && authCredentialValue === pairedCredentialValue;
-    if (!result.paired_has_operator_credential) result.problems.push('operator credential is missing from paired device store');
-    if (!result.paired_has_required_scopes) {
-      result.problems.push(`paired operator scopes missing: ${missingOperatorScopes(pairedScopes).join(', ')}`);
-    }
-    if (result.paired_has_operator_credential && result.paired_has_required_scopes) {
-      result.repairable = !result.has_operator_credential || !result.has_required_scopes || !result.token_matches_paired;
-      if (result.has_operator_credential && !result.token_matches_paired) {
-        result.problems.push('device-auth cache does not match paired operator credential');
-      }
-    }
-  }
-
-  result.ok = result.problems.length === 0;
-  result.status = result.ok ? 'ok' : (result.repairable ? 'repairable' : 'failed');
-  return result;
-}
-
-function repairOpenClawDeviceAuth({ dryRun = false } = {}) {
-  const paths = localPaths();
-  const files = openClawIdentityFiles(paths);
-  const existing = readJson(files.deviceAuthPath, {});
-  const device = readJson(files.devicePath, {}) || {};
-  const deviceId = existing?.deviceId || device.deviceId;
-  if (!deviceId) throw new Error(`OpenClaw device id not found in ${files.deviceAuthPath} or ${files.devicePath}`);
-
-  const paired = readJson(files.pairedPath, null);
-  const record = findPairedDeviceRecord(paired, deviceId);
-  if (!record) throw new Error(`OpenClaw device is not paired in ${files.pairedPath}. Run: env -u OPENCLAW_HOME openclaw devices approve --latest`);
-
-  const credential = operatorCredentialFromRecord(record);
-  const credentialValue = credential?.[TOKEN_FIELD];
-  if (!credentialValue) throw new Error(`paired OpenClaw device record has no operator credential in ${files.pairedPath}`);
-
-  const scopes = approvedOperatorScopes(record, credential);
-  const missing = missingOperatorScopes(scopes);
-  if (missing.length) {
-    throw new Error(`paired OpenClaw operator credential lacks required scopes: ${missing.join(', ')}. Run: env -u OPENCLAW_HOME openclaw devices approve --latest`);
-  }
-
-  const currentCredential = existing?.tokens?.operator || {};
-  const currentScopes = normalizeScopes(currentCredential.scopes);
-  const changed = existing?.deviceId !== deviceId ||
-    currentCredential?.[TOKEN_FIELD] !== credentialValue ||
-    !hasRequiredOperatorScopes(currentScopes);
-
-  if (!dryRun && changed) {
-    const next = {
-      ...(existing && typeof existing === 'object' ? existing : {}),
-      version: existing?.version || 1,
-      deviceId,
-      tokens: {
-        ...((existing && typeof existing === 'object' && existing.tokens) || {}),
-        operator: {
-          ...currentCredential,
-          ...credential,
-          [TOKEN_FIELD]: credentialValue,
-          role: credential.role || currentCredential.role || 'operator',
-          scopes,
-          updatedAtMs: Date.now(),
-        },
-      },
-    };
-    writeJson(files.deviceAuthPath, next);
-    chmodOwnerOnly(files.deviceAuthPath);
-  } else if (!dryRun) {
-    chmodOwnerOnly(files.deviceAuthPath);
-  }
-
-  return {
-    ok: true,
-    changed,
-    dryRun,
-    path: files.deviceAuthPath,
-    paired_path: files.pairedPath,
-    required_scopes: OPENCLAW_REQUIRED_OPERATOR_SCOPES,
-    synchronized_scopes: scopes,
-  };
 }
 
 function doctor({ json = false } = {}) {
@@ -1068,6 +605,9 @@ function doctor({ json = false } = {}) {
   const issues = [];
   const warnings = [];
   const checks = {};
+  const { checkMitmCaPermissions } = require('../../dashboard/lib/proxy/mitm-ca');
+  const { fallbackSecretStatus, loadLlmAuthToken } = require('../../dashboard/lib/secrets/llm-secrets');
+  const { toolStatus } = require('./redteam-tools');
   checks.runtime_outside_repo = !inside(REPO_ROOT, paths.runtimeDir);
   checks.agents_outside_repo = !inside(REPO_ROOT, paths.agentsDir);
   checks.reports_outside_repo = !inside(REPO_ROOT, paths.reportsDir);
@@ -1075,23 +615,53 @@ function doctor({ json = false } = {}) {
   checks.blackboard_outside_repo = !inside(REPO_ROOT, paths.blackboardDb);
   checks.watchdog_outside_repo = !inside(REPO_ROOT, paths.watchdogDb);
   for (const [k, ok] of Object.entries(checks)) if (!ok) issues.push(`${k} is false`);
-  const openClawDeviceAuth = checkOpenClawDeviceAuth(paths);
-  checks.openclaw_device_auth = openClawDeviceAuth.ok;
-  if (openClawDeviceAuth.status === 'missing') {
-    warnings.push('openclaw_device_auth is missing; pair OpenClaw before using GLaDOS subagents');
-  } else if (!openClawDeviceAuth.ok) {
-    const hint = openClawDeviceAuth.repairable ? ' (run scripts/repair-openclaw-device-auth.sh)' : '';
-    issues.push(`openclaw_device_auth is false: ${openClawDeviceAuth.problems.join('; ')}${hint}`);
-  }
-  for (const p of [paths.runtimeDir, paths.agentsDir, paths.reportsDir, paths.investigationsDir, paths.blackboardDb, paths.watchdogDb, paths.openclawJson]) {
+  for (const p of [paths.runtimeDir, paths.agentsDir, paths.reportsDir, paths.investigationsDir, paths.blackboardDb, paths.watchdogDb]) {
     if (!fs.existsSync(p)) warnings.push(`missing ${p}`);
   }
-  const cfg = readJson(paths.openclawJson, {});
-  const badAgents = (cfg?.agents?.list || []).filter(a => a.workspace && inside(REPO_ROOT, a.workspace));
-  if (badAgents.length) issues.push(`OpenClaw agents still point inside repo: ${badAgents.map(a => a.id).join(', ')}`);
+  for (const dir of [paths.runtimeDir, paths.secretsDir, paths.sessionsDir, paths.trafficDir, paths.haltsDir]) {
+    if (!fs.existsSync(dir)) continue;
+    if ((fs.statSync(dir).mode & 0o077) !== 0) issues.push(`${dir} must be chmod 700`);
+  }
+  const registry = [...registryById().values()];
+  const enabledAgents = registry.filter(agent => agent.enabled !== false && !fs.existsSync(path.join(paths.agentsDir, agent.id, '.disabled')));
+  const mcpEntrypoints = [
+    path.join(REPO_ROOT, 'blackboard', 'blackboard-mcp', 'index.js'),
+    path.join(REPO_ROOT, 'watchdog', 'watchdog-mcp', 'index.js'),
+    path.join(REPO_ROOT, 'tools', 'glados-ops-mcp', 'index.js'),
+  ];
+  checks.mcp_entrypoints = mcpEntrypoints.every(file => fs.existsSync(file));
+  if (!checks.mcp_entrypoints) issues.push('one or more v4 MCP entrypoints are missing');
+  let sdkVersion = null;
+  try { sdkVersion = require('../../dashboard/node_modules/@anthropic-ai/claude-agent-sdk/package.json').version; } catch {}
+  checks.agent_sdk = !!sdkVersion;
+  if (!sdkVersion) issues.push('@anthropic-ai/claude-agent-sdk is not installed under dashboard');
   const secretResult = secretScan({ quiet: true });
   if (!secretResult.ok) issues.push(`secret scan found ${secretResult.issues.length} issue(s)`);
-  const result = { ok: issues.length === 0, paths, checks, openclaw_device_auth: openClawDeviceAuth, issues, warnings, agent_count: (cfg?.agents?.list || []).length };
+  const mitmCa = checkMitmCaPermissions(process.env);
+  checks.mitm_ca_permissions = mitmCa.ok;
+  if (!mitmCa.ok) issues.push(...mitmCa.issues);
+  const llmSecret = fallbackSecretStatus(process.env);
+  checks.llm_secret_fallback_permissions = !llmSecret.exists || llmSecret.ownerOnly === true;
+  if (llmSecret.exists && !llmSecret.ownerOnly) issues.push(`${llmSecret.path} must be chmod 600`);
+  try { checks.llm_auth_available = !!loadLlmAuthToken(process.env); }
+  catch (error) { checks.llm_auth_available = false; issues.push(error.message); }
+  if (!checks.llm_auth_available) issues.push('LiteLLM key is unavailable; run scripts/setup-llm-secret.sh');
+  const redteamTools = toolStatus({ tier: 'core' });
+  checks.required_tools = redteamTools.missingRequired.length === 0;
+  if (redteamTools.missingRequired.length) issues.push(`missing required tools: ${redteamTools.missingRequired.join(', ')}`);
+  if (redteamTools.missing.length) warnings.push(`optional/core tools unavailable: ${redteamTools.missing.join(', ')}`);
+  const result = {
+    ok: issues.length === 0,
+    paths,
+    checks,
+    agent_sdk_version: sdkVersion,
+    redteam_tools: redteamTools,
+    mitm_ca: mitmCa,
+    llm_secret_fallback: llmSecret,
+    issues,
+    warnings,
+    agent_count: enabledAgents.length,
+  };
   if (json) log(JSON.stringify(result, null, 2));
   else {
     log(`GLaDOS doctor: ${result.ok ? 'OK' : 'FAILED'}`);
@@ -1101,9 +671,11 @@ function doctor({ json = false } = {}) {
     log(`investigations: ${paths.investigationsDir}`);
     log(`blackboard: ${paths.blackboardDb}`);
     log(`watchdog: ${paths.watchdogDb}`);
-    log(`openclaw: ${paths.openclawJson}`);
     log(`agent count: ${result.agent_count}`);
-    log(`openclaw_device_auth: ${openClawDeviceAuth.ok ? 'true' : openClawDeviceAuth.status}`);
+    log(`agent_sdk: ${sdkVersion || 'missing'}`);
+    log(`required_tools: ${checks.required_tools ? 'true' : 'false'}`);
+    log(`mitm_ca_permissions: ${mitmCa.ok ? 'true' : 'false'}`);
+    log(`llm_secret_fallback_permissions: ${checks.llm_secret_fallback_permissions ? 'true' : 'false'}`);
     if (warnings.length) warnings.forEach(w => warn(w));
     if (issues.length) issues.forEach(i => warn(i));
   }
@@ -1111,8 +683,9 @@ function doctor({ json = false } = {}) {
 }
 
 const SOURCE_SKIP_DIRS = new Set([
-  '.git', '.glados', '.openclaw', 'node_modules', 'Reports', 'reports', 'investigations',
-  'memory', 'target-hunting', 'build', 'dist', '.gradle',
+  '.git', '.glados', 'node_modules', 'Reports', 'reports', 'investigations',
+  'memory', 'target-hunting', 'build', 'dist', 'dist-verify', '.gradle', '.venv',
+  '.playwright-mcp', 'tmp',
 ]);
 const SOURCE_SKIP_PATHS = [
   /^workspaces\/glados\/MEMORY\.md$/,
@@ -1126,7 +699,6 @@ const SOURCE_SKIP_PATHS = [
   /^watchdog\/node_modules\//,
   /^watchdog\/watchdog-mcp\/node_modules\//,
   /^tools\/glados-ops-mcp\/node_modules\//,
-  /^tools\/burp-ext-glados-proxy-api\/build\//,
 ];
 const BINARY_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.jar', '.class', '.db', '.der', '.mp3', '.zip', '.gz', '.tar']);
 
@@ -1166,7 +738,6 @@ function secretScan({ quiet = false } = {}) {
     /^investigations\//,
     /^blackboard\/.*\.db/,
     /^watchdog\/.*\.db/,
-    /\.burp(state)?$/i,
     /\.har$/i,
     /\.jsonl$/i,
   ];
@@ -1174,7 +745,7 @@ function secretScan({ quiet = false } = {}) {
     { name: 'blocked-user-id', rx: new RegExp(['sco', 'sta44'].join(''), 'i') },
     { name: 'blocked-known-secret', rx: new RegExp(['Yellow14', 'doG'].join(''), 'i') },
     { name: 'api-key-looking-value', rx: /\bsk-[A-Za-z0-9_-]{12,}\b/ },
-    { name: 'secret-assignment', rx: /\b(api[_-]?key|secret|token|password)\b\s*[:=]\s*["']?[A-Za-z0-9_./+=:@!-]{12,}/i },
+    { name: 'secret-assignment', rx: /\b(api[_-]?key|secret|token|password)\b["']?\s*[:=]\s*["'][A-Za-z0-9_./+=:@!-]{12,}["']/i },
     { name: 'bearer-token', rx: /\bBearer\s+[A-Za-z0-9_./+=-]{16,}/i },
   ];
   for (const rel of files) {
@@ -1223,13 +794,11 @@ function bootstrap() {
   ensureBlackboardDb(paths);
   ensureWatchdogDb(paths);
   const agentResult = bootstrapAgents(paths);
-  const oc = generateOpenClawConfig(paths);
   updateAgentStatus(paths);
   log(`bootstrap complete`);
   log(`installed agents: ${agentResult.installed.length}`);
   log(`existing agents left untouched: ${agentResult.skipped.length}`);
-  log(`openclaw config: ${oc.openclawJson}`);
-  if (!fs.existsSync(DOTENV_PATH)) warn('no .env found; copy .env.example to .env and set your local LLMAPI_API_KEY');
+  if (!fs.existsSync(DOTENV_PATH)) warn('no .env found; copy .env.example to .env and configure non-secret runtime paths');
 }
 
 function update() {
@@ -1238,7 +807,6 @@ function update() {
   ensureBlackboardDb(paths);
   ensureWatchdogDb(paths);
   const status = updateAgentStatus(paths);
-  const oc = generateOpenClawConfig(paths);
   log('update complete');
   log(`new upstream agents: ${status.new_upstream_agents.length}`);
   log(`changed upstream templates: ${status.upstream_template_changed.length}`);
@@ -1246,7 +814,6 @@ function update() {
   log(`local agents removed by user: ${status.local_agent_removed.length}`);
   log(`custom agents: ${status.custom_agents.length}`);
   log(`status file: ${paths.upstreamStatusPath}`);
-  log(`openclaw config: ${oc.openclawJson}`);
 }
 
 function main() {
@@ -1260,22 +827,13 @@ function main() {
         process.exit(result.ok ? 0 : 1);
       }
       case 'install-deps': return installDeps();
-      case 'restart-gateway': return log(JSON.stringify(restartGateway(), null, 2));
-      case 'repair-openclaw-device-auth': {
-        const result = repairOpenClawDeviceAuth({ dryRun: process.argv.includes('--dry-run') });
-        log(`openclaw_device_auth repair: ${result.changed ? (result.dryRun ? 'would update' : 'updated') : 'already synchronized'}`);
-        log(`device-auth cache: ${result.path}`);
-        log(`paired device store: ${result.paired_path}`);
-        if (!result.dryRun) log('restart OpenClaw with: env -u OPENCLAW_HOME openclaw daemon restart');
-        return;
-      }
       case 'secret-scan': {
         const result = secretScan();
         process.exit(result.ok ? 0 : 1);
       }
       case 'export-report': return exportReport(process.argv[3]);
       default:
-        fail(`usage: ${path.relative(REPO_ROOT, __filename)} <bootstrap|update|doctor|install-deps|restart-gateway|repair-openclaw-device-auth|secret-scan|export-report>`);
+        fail(`usage: ${path.relative(REPO_ROOT, __filename)} <bootstrap|update|doctor|install-deps|secret-scan|export-report>`);
     }
   } catch (e) {
     fail(e.stack || e.message);
@@ -1288,11 +846,9 @@ module.exports = {
   localPaths,
   bootstrapAgents,
   updateAgentStatus,
-  generateOpenClawConfig,
   ensureBlackboardDb,
   ensureWatchdogDb,
   doctor,
-  checkOpenClawDeviceAuth,
-  repairOpenClawDeviceAuth,
   secretScan,
+  bareModelAlias,
 };

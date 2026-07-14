@@ -1,8 +1,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { OPENCLAW_JSON, MODEL_OVERRIDES_JSON, GLADOS_AGENT_WORKSPACES } = require('./config');
-const { loadAgentRegistry } = require('./openclaw');
-const gladosLocal = require('../../scripts/lib/glados-local');
+const { MODEL_OVERRIDES_JSON, GLADOS_AGENT_WORKSPACES } = require('./config');
+const { loadRegistry: loadAgentRegistry, loadPolicy, buildMcpServers } = require('./harness/agent-sdk');
+const { LLMAPI_BARE_MODELS, bareModelAlias } = require('../../scripts/lib/model-aliases');
 
 function safeRead(p) {
   try { return fs.readFileSync(p, 'utf8'); } catch { return null; }
@@ -29,12 +29,7 @@ function extractDescription(skillFile) {
 }
 
 function listMcpServers() {
-  try {
-    const raw = fs.readFileSync(OPENCLAW_JSON, 'utf8');
-    const parsed = JSON.parse(raw);
-    const mcp = parsed?.mcp?.servers || parsed?.mcpServers || {};
-    return Object.keys(mcp);
-  } catch { return []; }
+  return Object.keys(buildMcpServers(process.env));
 }
 
 function readJson(p, fallback = {}) {
@@ -68,16 +63,16 @@ function workspaceMeta(agentId) {
 }
 
 function activeEntryById(agentId) {
-  return loadAgentRegistry().find(a => a.id === agentId) || null;
+  return loadAgentRegistry().find(a => a.id === agentId && a.enabled !== false) || null;
 }
 
 function isSubagent(agentId, meta, upstream) {
-  if (agentId === 'glados' || agentId === 'atlas') return false;
+  if (agentId === 'glados') return false;
   return meta.subagent !== undefined ? meta.subagent !== false : upstream.subagent !== false;
 }
 
 function listSettingsAgents() {
-  const active = new Map(loadAgentRegistry().map(a => [a.id, a]));
+  const active = new Map(loadAgentRegistry().filter(a => a.enabled !== false).map(a => [a.id, a]));
   const upstream = templateRegistryById();
   const ids = new Set([...active.keys(), ...upstream.keys()]);
   try {
@@ -95,7 +90,7 @@ function listSettingsAgents() {
       registered: !!entry,
       subagent: isSubagent(id, local.meta, local.upstream),
       dispatch: local.meta.dispatch || local.upstream.dispatch || null,
-      model: entry?.model || local.meta.model || local.upstream.model || null,
+      model: bareModelAlias(entry?.model || local.meta.model || local.upstream.model || null, { fallback: null }),
       workspace: local.workspace,
       disabledFile: local.disabledFile,
     };
@@ -110,7 +105,7 @@ function agentDetails(agentId) {
   return {
     id: entry?.id || agentId,
     name: local.meta.name || local.upstream.name || entry?.name || agentId,
-    model: entry?.model || local.meta.model || local.upstream.model,
+    model: bareModelAlias(entry?.model || local.meta.model || local.upstream.model, { fallback: null }),
     enabled: local.enabled,
     registered: !!entry,
     subagent: isSubagent(agentId, local.meta, local.upstream),
@@ -126,15 +121,12 @@ function agentDetails(agentId) {
   };
 }
 
-// Persist the model choice to the durable override store so it survives the next
-// `glados update` (which fully regenerates openclaw.json), then patch the live
-// openclaw.json for immediate effect. Writing both means: the dashboard change
-// takes effect now, AND the override file is what config regen reads back — so
-// the assignment is no longer wiped on every update.
+// Persist the model choice to the durable v4 override store. Agent SDK turns
+// read this store when the next prompt is assembled.
 function persistModelOverride(agentId, newModel) {
   let overrides = {};
   try { overrides = JSON.parse(fs.readFileSync(MODEL_OVERRIDES_JSON, 'utf8')) || {}; } catch {}
-  if (newModel) overrides[agentId] = newModel;
+  if (newModel) overrides[agentId] = bareModelAlias(newModel, { fallback: null });
   else delete overrides[agentId];
   fs.mkdirSync(path.dirname(MODEL_OVERRIDES_JSON), { recursive: true });
   const tmp = MODEL_OVERRIDES_JSON + '.tmp';
@@ -143,20 +135,20 @@ function persistModelOverride(agentId, newModel) {
 }
 
 function updateAgentModel(agentId, newModel) {
-  const raw = fs.readFileSync(OPENCLAW_JSON, 'utf8');
-  const parsed = JSON.parse(raw);
-  const list = parsed?.agents?.list;
-  if (!Array.isArray(list)) throw new Error('openclaw.json has no agents.list');
-  const entry = list.find(a => a.id === agentId);
-  if (!entry) throw new Error(`agent not found: ${agentId}`);
-  const old = entry.model;
-  entry.model = newModel;
-  const backup = OPENCLAW_JSON + `.bak.${Date.now()}`;
-  fs.copyFileSync(OPENCLAW_JSON, backup);
-  fs.writeFileSync(OPENCLAW_JSON, JSON.stringify(parsed, null, 2));
-  // Durable store so the choice persists across `glados update` regenerations.
-  persistModelOverride(agentId, newModel);
-  return { agentId, oldModel: old, newModel, backup };
+  const durableModel = bareModelAlias(newModel, { fallback: null });
+  if (!durableModel) throw new Error('model required');
+  const local = workspaceMeta(agentId);
+  if (!local.upstream.id && !fs.existsSync(local.workspace)) throw new Error(`agent not found: ${agentId}`);
+  const old = bareModelAlias(local.meta.model || local.upstream.model || activeEntryById(agentId)?.model, { fallback: null });
+  persistModelOverride(agentId, durableModel);
+  const next = {
+    id: local.meta.id || local.upstream.id || agentId,
+    name: local.meta.name || local.upstream.name || agentId,
+    ...local.meta,
+    model: durableModel,
+  };
+  writeJsonAtomic(path.join(local.workspace, 'agent.json'), next);
+  return { agentId, oldModel: old, newModel: durableModel, runtime: 'agent-sdk', requiresRestart: false };
 }
 
 function updateAgentEnabled(agentId, enabled) {
@@ -172,17 +164,15 @@ function updateAgentEnabled(agentId, enabled) {
     ...meta,
     enabled: !!enabled,
   };
-  if (agentId === 'atlas' || agentId === 'glados') next.subagent = false;
+  if (agentId === 'glados') next.subagent = false;
   writeJsonAtomic(path.join(workspace, 'agent.json'), next);
-  const paths = gladosLocal.localPaths();
-  const config = gladosLocal.generateOpenClawConfig(paths);
   return {
     agentId,
     enabled: !!enabled,
     workspace,
-    openclawJson: config.openclawJson,
     registered: !!activeEntryById(agentId),
-    requiresRestart: true,
+    runtime: 'agent-sdk',
+    requiresRestart: false,
   };
 }
 
@@ -207,26 +197,8 @@ async function fetchOllamaModels() {
 
 async function listKnownModels() {
   const registry = loadAgentRegistry();
-  const models = new Set(registry.map(a => a.model).filter(Boolean));
-  for (const m of [
-    'custom-llmapi-redteamstuff-com/gemini-2.5-flash',
-    'custom-llmapi-redteamstuff-com/gemini-3.1-flash-lite-preview',
-    'custom-llmapi-redteamstuff-com/gemini-2.5-flash-lite',
-    'custom-llmapi-redteamstuff-com/gemini-3.1-pro-preview',
-    'custom-llmapi-redteamstuff-com/gpt-5.3-codex',
-    'custom-llmapi-redteamstuff-com/gpt-5.5-pro',
-    'custom-llmapi-redteamstuff-com/gpt-5.5',
-    'custom-llmapi-redteamstuff-com/claude-opus-4-6',
-    'custom-llmapi-redteamstuff-com/gemini-3.5-flash',
-    'custom-llmapi-redteamstuff-com/claude-opus-4-7',
-    'custom-llmapi-redteamstuff-com/claude-opus-4-8',
-    'custom-llmapi-redteamstuff-com/gemini-3-flash-preview',
-    'custom-llmapi-redteamstuff-com/claude-sonnet-4-6',
-    'custom-llmapi-redteamstuff-com/qwen3.6-27b-fp8',
-    'custom-llmapi-redteamstuff-com/qwen3.6-35b-a3b-fp8',
-    'custom-llmapi-redteamstuff-com/minimax-m2.7',
-    'custom-llmapi-redteamstuff-com/gemma-4-31b-it-fp8',
-  ]) models.add(m);
+  const models = new Set(registry.map(a => bareModelAlias(a.model, { fallback: null })).filter(Boolean));
+  for (const m of LLMAPI_BARE_MODELS) models.add(m);
   for (const m of await fetchOllamaModels()) models.add(m);
   return [...models].sort();
 }

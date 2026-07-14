@@ -28,6 +28,9 @@ class DashboardTranscriptStore {
     this.deleteByAgent = this.db.prepare(`
       DELETE FROM dashboard_transcript_events WHERE agent_id = ?
     `);
+    this.deleteAll = this.db.prepare(`
+      DELETE FROM dashboard_transcript_events
+    `);
   }
 
   record(agentId, event) {
@@ -53,16 +56,16 @@ class DashboardTranscriptStore {
     return this.listByAgent.all(agentId).map(row => {
       let ev = null;
       try { ev = JSON.parse(row.event_json); } catch {}
-      return {
+      return normalizeEvent(row.agent_id, {
         ...(ev && typeof ev === 'object' ? ev : {}),
         agentId: row.agent_id,
-        kind: row.kind,
-        text: row.text,
+        kind: ev?.kind || row.kind,
+        text: ev?.text ?? row.text,
         ts: ev?.ts || row.ts,
         id: ev?.id || row.client_event_id || `dashboard:${row.id}`,
         dashboardEventId: row.id,
         sseId: `dashboard:${row.id}`,
-      };
+      });
     });
   }
 
@@ -74,6 +77,10 @@ class DashboardTranscriptStore {
     tx();
   }
 
+  clearAll() {
+    this.deleteAll.run();
+  }
+
   close() {
     try { this.db.close(); } catch {}
   }
@@ -83,7 +90,34 @@ function normalizeEvent(agentId, event) {
   const ev = { ...(event || {}) };
   ev.agentId = ev.agentId || agentId;
   ev.kind = ev.kind || 'meta';
+  if (ev.kind === 'assistant-partial') {
+    ev.kind = 'text-stream';
+    ev.evtType = ev.evtType || 'text_delta';
+    ev.delta = ev.delta ?? ev.text ?? '';
+    ev.runId = ev.runId || ev.sessionId || ev.parentToolUseId || 'nosession';
+  } else if (ev.kind === 'assistant-thinking-partial') {
+    ev.kind = 'thinking-stream';
+    ev.evtType = ev.evtType || 'thinking_delta';
+    ev.delta = ev.delta ?? ev.text ?? '';
+    ev.runId = ev.runId || ev.sessionId || ev.parentToolUseId || 'nosession';
+  } else if ((ev.kind === 'text-stream' || ev.kind === 'thinking-stream') && !ev.runId) {
+    ev.runId = ev.sessionId || ev.parentToolUseId || 'nosession';
+  } else if (ev.kind === 'error' || (ev.kind === 'result' && ev.isError)) {
+    ev.kind = 'prompt-error';
+    ev.error = ev.error || ev.text || (Array.isArray(ev.errors) ? ev.errors.join('\n') : '') || 'Agent SDK turn failed';
+    ev.provider = ev.provider || 'LiteLLM Anthropic Messages';
+    ev.api = ev.api || '/v1/messages';
+  }
   ev.ts = normalizeTs(ev.ts);
+  return ev;
+}
+
+function dashboardTranscriptEvent(event, options = {}) {
+  const ev = normalizeEvent(event?.agentId, event);
+  const includeStream = options.includeStream !== false;
+  if (!includeStream && (ev.kind === 'text-stream' || ev.kind === 'thinking-stream')) return null;
+  if (ev.kind === 'result' && !ev.isError && !includeStream) return null;
+  if (ev.kind === 'harness-init' || ev.kind === 'liveness') return null;
   return ev;
 }
 
@@ -128,7 +162,11 @@ function mergeTranscriptEvents(...groups) {
   const seen = new Set();
   const out = [];
   for (const group of groups) {
-    for (const ev of group || []) {
+    const events = Array.isArray(group) ? group : group?.events;
+    const options = Array.isArray(group) ? {} : (group?.options || {});
+    for (const raw of events || []) {
+      const ev = dashboardTranscriptEvent(raw, options);
+      if (!ev) continue;
       const key = eventDedupKey(ev);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -148,14 +186,18 @@ function afterLastEventId(events, lastEventId) {
   return idx >= 0 ? events.slice(idx + 1) : events;
 }
 
-function sseFrame(ev) {
-  const id = eventSseId(ev);
-  return `${id ? `id: ${id}\n` : ''}data: ${JSON.stringify(ev)}\n\n`;
+function sseFrame(ev, options = {}) {
+  const out = dashboardTranscriptEvent(ev, options);
+  if (!out) return '';
+  const id = eventSseId(out);
+  return `${id ? `id: ${id}\n` : ''}data: ${JSON.stringify(out)}\n\n`;
 }
 
 module.exports = {
   DashboardTranscriptStore,
   eventSseId,
+  normalizeEvent,
+  dashboardTranscriptEvent,
   mergeTranscriptEvents,
   afterLastEventId,
   sseFrame,

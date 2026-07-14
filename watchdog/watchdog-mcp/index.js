@@ -5,7 +5,7 @@ const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio
 const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
 
 const { probe, getHealth, listHealth, markHealth } = require('../lib/health');
-const { agentHalt, agentResume, agentStatus, engagementHaltAll } = require('../lib/halt');
+const { agentHalt, agentResume, agentStatus } = require('../lib/halt');
 const { planCheckDispatch } = require('../lib/plan-gate');
 
 const TOOLS = [
@@ -54,19 +54,19 @@ const TOOLS = [
   {
     name: 'agent_halt',
     description:
-      'Halt an agent: write deny rules to ~/.openclaw/exec-approvals.json for all network-capable tools AND call burp-gate.sh halt-agent. The agent\'s next tool call will be rejected.',
+      'Halt one GLaDOS Agent SDK agent. Writes an owner-only marker under ~/.glados/halts that the authoritative PreToolUse hook checks before every tool call.',
     inputSchema: {
       type: 'object',
       required: ['agent_id'],
       properties: {
-        agent_id: { type: 'string', description: 'OpenClaw agent id (e.g. webapp-recon)' },
+        agent_id: { type: 'string', description: 'GLaDOS agent id (e.g. webapp-recon)' },
         reason: { type: 'string' },
       },
     },
   },
   {
     name: 'agent_resume',
-    description: 'Remove deny rules for an agent and re-enable its network tools.',
+    description: 'Resume one halted GLaDOS Agent SDK agent by removing its owner-only halt marker.',
     inputSchema: {
       type: 'object',
       required: ['agent_id'],
@@ -75,7 +75,7 @@ const TOOLS = [
   },
   {
     name: 'agent_status',
-    description: 'Report whether an agent currently has deny rules active.',
+    description: 'Report whether a per-agent GLaDOS halt marker is active.',
     inputSchema: {
       type: 'object',
       required: ['agent_id'],
@@ -83,26 +83,14 @@ const TOOLS = [
     },
   },
   {
-    name: 'engagement_halt_all',
-    description:
-      'Operator halt for every agent: call burp-gate.sh halt-all (flips Burp scope to drop-all). This is a manual kill switch used by the dashboard HALT ALL button or explicit operator instruction.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        engagement_id: { type: 'string' },
-        reason: { type: 'string' },
-      },
-    },
-  },
-  {
     name: 'plan_check_dispatch',
     description:
-      'v3.1 HARD DISPATCH GATE. Call this before dispatching any exploitation-tier agent (webapp-vuln, poc-coder, postex, ad-expert, phisherman, api-expert, c2-builder, data-exfil). Returns {allowed, reason, phase, plan_id?, engagement_id?}. Phase-1 recon agents (osint, origin-ip, net-recon, webapp-recon, source-code, plan-synthesizer) always pass. Meta agents (glados, validators, report-writer) always pass. Exploitation agents require an approved plan on the blackboard whose agent_chain or proposed_vectors.agents contains the agent_id.',
+      'Hard dispatch gate for GLaDOS v4. Call before dispatching an exploitation-tier agent. Returns {allowed, reason, phase, plan_id?, engagement_id?}. Recon and meta agents pass; exploitation agents require an approved blackboard plan whose agent chain or proposed vectors include the agent.',
     inputSchema: {
       type: 'object',
       required: ['agent_id'],
       properties: {
-        agent_id: { type: 'string', description: 'OpenClaw agent id to check (e.g. webapp-vuln)' },
+        agent_id: { type: 'string', description: 'GLaDOS Agent SDK agent id to check (e.g. webapp-vuln)' },
         engagement_id: { type: 'string', description: 'Optional engagement id. If omitted, the most recent active engagement is used.' },
       },
     },
@@ -138,9 +126,6 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
         break;
       case 'agent_status':
         result = agentStatus(args.agent_id);
-        break;
-      case 'engagement_halt_all':
-        result = await engagementHaltAll(args.engagement_id, args.reason, { initiator: 'mcp' });
         break;
       case 'plan_check_dispatch':
         result = planCheckDispatch(args.agent_id, args.engagement_id);

@@ -1,506 +1,94 @@
 # GLaDOS
 
-GLaDOS is a supervised local red team assessment framework built around OpenClaw agents, a local operator dashboard, Burp Suite observability, MCP tools, and local SQLite state. Each red teamer runs their own copy on their own workstation. Nothing is shared between users unless an operator explicitly exports and shares a report.
+GLaDOS v4.0.0 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
 
-## Local-Only Model
+The application has no OpenClaw or Burp Suite runtime dependency. HTTP capture, replay, history, metrics, and per-agent attribution are provided by a supervised local mitmproxy process behind `/api/proxy/*`.
 
-The Git repo contains application code, scripts, docs, default agent seed templates, and MCP tooling. Runtime data belongs to the operator and lives outside the repo.
+## Operator Data
+
+Application code is replaceable. Operator data is not.
 
 | Data | Location |
 | --- | --- |
-| Default upstream agent seeds | `templates/agents/default/<agent-id>/` |
-| User-owned editable agents | `~/.glados/workspaces/agents/<agent-id>/` |
-| Reports | `~/.glados/reports/<engagement>/` |
-| Evidence | `~/.glados/investigations/<target>/evidence/` |
-| Blackboard DB | `~/.glados/blackboard/blackboard.db` |
-| Watchdog DB | `~/.glados/watchdog/watchdog.db` |
-| OpenClaw config, sessions, memory | `~/.openclaw/` |
-| Operator context | `~/.glados/operator-context.json` |
-| Local secrets | `.env` and `~/.glados/secrets/local-auth.json` |
+| Editable agent workspaces | `~/.glados/workspaces/agents/<agent-id>/` |
+| Agent SDK resume registry | `~/.glados/sessions/agent-sdk-sessions.json` |
+| Reports | `~/.glados/reports/` |
+| Investigations and evidence | `~/.glados/investigations/` |
+| Blackboard | `~/.glados/blackboard/blackboard.db` |
+| Watchdog and halt audit | `~/.glados/watchdog/`, `~/.glados/halts/` |
+| Redacted proxy traffic | `~/.glados/traffic/` |
+| MITM CA and fallback secrets | `~/.glados/secrets/` |
+| Per-agent model overrides | `~/.glados/model-overrides.json` |
 
-Updates never overwrite local agents, reports, investigations, blackboards, watchdog state, `.env`, or OpenClaw sessions.
+Updates never include or delete `~/.glados`. The LiteLLM key is stored in macOS Keychain, with a `0600` file fallback; it does not belong in `.env`.
 
-## First Install
+## Install
 
-### 1. Install Prerequisites
-
-On a fresh MacBook, install Apple Command Line Tools, Homebrew, and the
-GLaDOS workstation dependencies. Use Node 22 LTS; Homebrew's latest `node`
-can be too new for native dashboard dependencies.
+Prerequisites are macOS, Apple Command Line Tools, Homebrew, and Node 20 or 22.
 
 ```bash
 xcode-select --install
-
-if [[ -x /opt/homebrew/bin/brew ]]; then
-  eval "$(/opt/homebrew/bin/brew shellenv)"
-else
-  eval "$(/usr/local/bin/brew shellenv)"
-fi
-BREW_PREFIX="$(brew --prefix)"
-
-brew install node@22 git openjdk@21 openjdk@17 gradle jq ripgrep sqlite ffuf nmap nuclei jadx apktool
-brew install --cask ghidra
-
+brew install node@22 git
 brew link --overwrite --force node@22
 
-echo "export JAVA_HOME=\"$BREW_PREFIX/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home\"" >> ~/.zshrc
-echo "export PATH=\"$BREW_PREFIX/opt/node@22/bin:$BREW_PREFIX/opt/openjdk@21/bin:$BREW_PREFIX/bin:\$PATH\"" >> ~/.zshrc
-source ~/.zshrc
-
-sudo mkdir -p /Library/Java/JavaVirtualMachines
-sudo ln -sfn "$BREW_PREFIX/opt/openjdk@17/libexec/openjdk.jdk" /Library/Java/JavaVirtualMachines/openjdk-17.jdk
-```
-
-Do not install Ollama for the standard HPC/LiteLLM workstation path.
-GLaDOS uses the remote LiteLLM-compatible provider configured in `.env`.
-
-Install Burp Suite Professional separately, then launch it at least once so
-the extensions UI and user-level configuration exist.
-
-### 2. Clone And Bootstrap
-
-Use the private Gitea repo when available. If the operator cannot access
-Gitea, use the public GitHub mirror.
-
-```bash
-cd ~/Desktop
 git clone https://github.com/samcsta/GLaDOS.git
 cd GLaDOS
-
-cp .env.example .env
-# edit .env and set LLMAPI_API_KEY to the workstation's HPC/LiteLLM key
 scripts/bootstrap-macos.sh
+scripts/setup-llm-secret.sh
+scripts/glados-ca.sh trust
 scripts/glados-doctor.sh
 ```
 
-Bootstrap copies the default agent seeds once into `~/.glados/workspaces/agents`, creates local runtime directories and DBs, installs Node dependencies, and generates `~/.openclaw/openclaw.json` so OpenClaw points at the local editable agents.
+Bootstrap installs the app/MCP dependencies, the required core CLI set, seeds missing agent workspaces without overwriting operator edits, creates the runtime databases, and generates a unique local MITM CA. `scripts/setup-redteam-tools.sh --all --install` installs the wider specialist tool set.
 
-Bootstrap also installs a non-secret starter operator context from `templates/operator-context/ford-redteam.json` into `~/.glados/operator-context.json`. That file can contain background knowledge such as Ford-owned domain indicators, ADFS/SSO hosts, Dradis hosts, and reporting paths. It does not grant active testing scope by itself.
-
-Credentials are local-only. Use `scripts/setup-local-secrets.sh` to create `~/.glados/secrets/local-auth.json` with workstation-specific credential profiles. GLaDOS can check which profiles exist, but the MCP status tool intentionally never returns usernames, passwords, tokens, or secret values.
-
-The canonical report-writing template lives in Git at:
-
-```text
-templates/reporting/REPORT-TEMPLATE.md
-```
-
-Bootstrap also installs a neutral local fallback copy at:
-
-```text
-~/.glados/reports/REPORT-TEMPLATE.md
-```
-
-Report-writing agents prefer the repo template path and use the local fallback
-only if the repo path is unavailable.
-
-### 3. OpenClaw Setup
-
-GLaDOS currently pins OpenClaw to the version compatible with
-`tools/patch-openclaw-bundle.sh` and installs older optional channel
-dependencies that OpenClaw 2026.4.5 expects at runtime.
+## Launch
 
 ```bash
-scripts/setup-openclaw-macos.sh --no-start
+npm start --prefix desktop
 ```
 
-Important: do not export `OPENCLAW_HOME=$HOME/.openclaw` before running
-OpenClaw CLI commands. OpenClaw interprets that as a base directory and will
-look for `~/.openclaw/.openclaw/openclaw.json`. If in doubt, run OpenClaw
-commands as:
+The app is named `GLaDOS.app`; the in-window title is `GLaDOS Ops`. Electron allocates a dynamic loopback port for the dashboard. For server-only development, run `npm start --prefix dashboard` and use the URL printed by the server.
+
+## Runtime
+
+- `@anthropic-ai/claude-agent-sdk@0.3.207` streams partial messages directly to the dashboard.
+- `ANTHROPIC_BASE_URL` defaults to `https://llmapi.redteamstuff.com`; models use bare aliases such as `claude-sonnet-5`.
+- Every enabled agent mounts Bash plus its role tools. Only GLaDOS mounts Task/Agent dispatch.
+- The authoritative `PreToolUse` gate enforces agent enablement, operator halt, tool existence, dispatch policy, plan phase, scope, target health, proxy attribution, and secret boundaries.
+- Browser-capable agents receive isolated Playwright MCP servers with an immutable per-agent header. The proxy records and strips that header before forwarding upstream.
+- Halt is per agent. A halt marker immediately interrupts that agent's root turn or its parent GLaDOS turn and is shown to GLaDOS on the next turn.
+
+## Proxy
+
+The desktop supervisor starts mitmproxy on `127.0.0.1:18080`. Captured events are redacted, rotated, and retained for 14 days by default. Sensitive headers and common JSON/form secret fields are replaced with `[REDACTED]`. Raw mitmproxy flow files are disabled unless `GLADOS_PROXY_RAW_FLOWS=1` is explicitly set.
+
+Manage the per-operator CA with:
 
 ```bash
-env -u OPENCLAW_HOME openclaw gateway status --deep
+scripts/glados-ca.sh status
+scripts/glados-ca.sh trust
+scripts/glados-ca.sh untrust
+scripts/glados-ca.sh rotate
 ```
 
-### 4. Burp Suite Integration
+## Updates
 
-GLaDOS expects Burp to be listening as the operator HTTP workbench:
+Source checkouts use the operator-initiated Settings update button or `scripts/update.sh`. The app blocks normal updates while agents are active or the tree is dirty, streams progress over SSE, then asks the Electron supervisor to restart the dashboard child.
 
-```text
-Burp Proxy:            127.0.0.1:8080
-GLaDOS Burp extension: 127.0.0.1:1338
-Optional Burp API:     127.0.0.1:1337
-```
+Packaged instances use signed GitHub release artifacts through `electron-updater`. Each operator chooses when to check, download, and install. Developer ID signing, hardened runtime, and notarization are release-time requirements; no Apple service is contacted at app runtime except when the operator requests an update.
 
-Build the GLaDOS Montoya extension:
+## Models And Agents
+
+Edit agent behavior under `~/.glados/workspaces/agents/<agent-id>/`. Prompt assembly order is `IDENTITY.md`, `SOUL.md`, `USER.md`, `AGENTS.md`, `RUNBOOK.md`, `TOOLS.md`, followed by discovered `skills/` metadata.
+
+Use the Settings model picker or edit `~/.glados/model-overrides.json`. Overrides must contain bare gateway aliases. High-risk `c2-*`, `phish-*`/`phisherman`, and `postex*` agents remain disabled until the operator explicitly enables them.
+
+## Verification
 
 ```bash
-cd tools/burp-ext-glados-proxy-api
-export JAVA_HOME=$(/usr/libexec/java_home -v 17)
-./gradlew shadowJar
-```
-
-Load the extension in Burp:
-
-1. Burp Suite → Extensions → Installed → Add.
-2. Extension type: Java.
-3. Extension file:
-   `tools/burp-ext-glados-proxy-api/build/libs/glados-proxy-api-1.0.0-all.jar`
-4. Confirm Burp output says the extension is listening on
-   `http://127.0.0.1:1338`.
-
-Verify:
-
-```bash
-curl -s http://127.0.0.1:1338/health | jq .
-```
-
-Then patch OpenClaw's runtime bundle so agent HTTP traffic is attributed and
-routed through Burp:
-
-```bash
-cd ~/Desktop/GLaDOS
-scripts/setup-openclaw-macos.sh
-```
-
-The setup script installs the compatible OpenClaw version, re-applies the
-GLaDOS bundle patches, writes the gateway LaunchAgent `NODE_OPTIONS` preload
-for `tools/tag-injector.js`, and restarts the gateway.
-
-Verify:
-
-```bash
-env -u OPENCLAW_HOME openclaw gateway status --deep
-cat ~/.openclaw/logs/tag-injector-health.json | jq .
-jq -r '.models.providers | keys[]' ~/.openclaw/openclaw.json
-jq '.agents.list | length' ~/.openclaw/openclaw.json
-jq -r '[.agents.list[].id | select(test("^(c2|phish|postex)"))] | join(",")' ~/.openclaw/openclaw.json
-jq -r '[.agents.defaults.subagents.allowAgents[] | select(.=="atlas" or .=="glados")] | join(",")' ~/.openclaw/openclaw.json
-jq -r '.agents.list[].model' ~/.openclaw/openclaw.json | sort | uniq -c
-```
-
-Expected stable values:
-
-- Provider output includes `custom-llmapi-redteamstuff-com`.
-- Active agent count is `25`.
-- The high-risk active-agent check returns an empty string because `c2-*`,
-  `phish-*`, and `postex-*` are disabled by default.
-- The subagent allow-list check returns an empty string because neither `atlas`
-  nor `glados` is dispatchable as a subagent.
-
-Exact model counts can vary because local per-agent model overrides are
-preserved across updates.
-
-#### Pairing repair for subagent dispatch
-
-If a fresh install can chat with GLaDOS but cannot dispatch a subagent such as
-`source-code`, OpenClaw may report:
-
-```text
-gateway closed (1008): pairing required
-```
-
-This usually means the local OpenClaw device was originally paired with a
-read-only operator credential, then OpenClaw approved a broader local
-operator credential while `~/.openclaw/identity/device-auth.json` still cached
-the old one. GLaDOS doctor now checks this state as `openclaw_device_auth`.
-
-Repair it without printing or manually copying credentials:
-
-```bash
-cd ~/Desktop/GLaDOS
-env -u OPENCLAW_HOME openclaw devices approve --latest
-scripts/repair-openclaw-device-auth.sh
-env -u OPENCLAW_HOME openclaw daemon restart
+npm test --prefix dashboard
 scripts/glados-doctor.sh
+npm run pack --prefix desktop
 ```
 
-The repair command only synchronizes an already-approved local OpenClaw
-operator credential from the paired-device store into the private
-device-auth cache. It refuses to run if the device is not paired or the
-approved credential lacks the operator scopes GLaDOS needs for agent and
-subagent operations.
-
-### 5. MCP Servers And Agent Tools
-
-No separate MCP registration step is required. `scripts/bootstrap-macos.sh`
-installs the MCP server dependencies and writes them into
-`~/.openclaw/openclaw.json`:
-
-- `blackboard` MCP — findings, tasks, baseline recon, plans, approvals
-- `watchdog` MCP — target health, manual halt/resume, plan gate
-- `glados-ops` MCP — operator context, local auth status, scope guard,
-  browser/auth helpers, evidence helpers
-- `computer-use` MCP — included if already installed on the workstation
-
-The Homebrew tools above are available to agents through the generated OpenClaw
-`PATH`. `ffuf`, `nmap`, and `nuclei` support web/API recon and validation.
-`jadx`, `apktool`, and `Ghidra` support mobile/binary/reversing workflows when
-those agents are used.
-
-### 6. Start GLaDOS
-
-```bash
-cd dashboard
-npm start
-```
-
-Open:
-
-```text
-http://localhost:4280
-```
-
-If the dashboard Terminal tab is unavailable on a fresh Mac, the rest of
-GLaDOS can still run. `dashboard/scripts/ensure-pty-binary.js` treats the
-`node-pty` native rebuild as optional unless `GLADOS_STRICT_PTY=1` is set.
-
-## Updating
-
-One command does everything — `git pull origin main`, install deps for **all** packages
-(dashboard + the 4 MCP servers), run DB migrations, regenerate the OpenClaw config, restart the
-gateway, and run the doctor:
-
-```bash
-scripts/update.sh
-```
-
-On macOS the updater prefers `/usr/bin/git` to avoid Homebrew Git/libcurl
-linkage issues seen on fresh Intel Macs. If you need a different Git binary,
-run with `GLADOS_GIT=/path/to/git scripts/update.sh`.
-
-Flags:
-
-- `--dry-run` — show the incoming commits and what would change, then exit (no changes).
-- `--with-openclaw` — also reinstall/patch OpenClaw and the gateway LaunchAgent (use when the pinned
-  OpenClaw version bumps).
-- `--no-restart` — skip restarting the gateway daemon.
-- `--force` — proceed even if the working tree is dirty or you're not on `main`.
-
-It is idempotent (re-running with no new commits is a no-op) and preserves all local state: agents,
-reports, investigations, blackboard, watchdog, operator-context, local-auth, `.env`, **per-agent
-model overrides** (see [Customizing Agents](#customizing-agents)), and OpenClaw sessions.
-`scripts/update-macos.sh` is a backwards-compatible alias for `scripts/update.sh`.
-
-The update regenerates OpenClaw registration from local agents. It does not copy changed seed files
-over local agents. If upstream templates changed, status is written to:
-
-```text
-~/.glados/upstream-agent-status.json
-```
-
-That file can show:
-
-- New upstream agent available
-- Upstream template changed
-- Local agent differs from installed seed
-- Local agent removed by user
-- Custom local agent detected
-
-Applying upstream agent changes is an operator decision, not an automatic update.
-
-Updates do not overwrite `~/.glados/operator-context.json` or `~/.glados/secrets/local-auth.json`. If the committed operator context template changes, teammates can review it and refresh their local copy intentionally with:
-
-```bash
-scripts/setup-operator-context.sh --force
-```
-
-## Versioning
-
-The dashboard Settings tab displays the repo `VERSION` file. GLaDOS release
-markers use:
-
-```text
-v<major>.<minor>.<patch>
-```
-
-Example: `v3.6.0`. Future patch updates on the same release line bump the final
-number: `v3.6.1`, `v3.6.2`, `v3.6.3`.
-
-Use the helper before committing a release update:
-
-```bash
-scripts/bump-version.sh
-```
-
-## Customizing Agents
-
-Each operator owns their local agents:
-
-```text
-~/.glados/workspaces/agents/<agent-id>/
-```
-
-Common editable files:
-
-- `IDENTITY.md`
-- `SOUL.md`
-- `RUNBOOK.md`
-- `TOOLS.md`
-- `USER.md`
-- `AGENTS.md`
-- `skills/`
-- `agent.json`
-
-To disable an agent, set `"enabled": false` in `agent.json` or add a `.disabled` file in the agent folder, then run:
-
-```bash
-scripts/update-macos.sh
-```
-
-To add a custom agent, create a new folder under `~/.glados/workspaces/agents/<new-id>/` with an `agent.json` file. The updater will register it without touching upstream seeds.
-
-### Per-agent model assignments (survive updates)
-
-A fresh install runs every agent on the default Sonnet model. To offset cost you can move
-individual agents to a cheaper HPC-hosted model (e.g. `minimax-m2.7`, `qwen3.6-27b-fp8`) — and those
-choices now **persist across every `git pull` + update**.
-
-Assign models either way:
-
-- **Dashboard** — use the model picker in the agent panel / ChatBot tab. It writes your choice to the
-  durable store automatically.
-- **By hand** — edit `~/.glados/model-overrides.json` (a flat `{"<agent-id>": "<provider/model>"}`
-  map). Seed it with `scripts/setup-model-overrides.sh`; see
-  `templates/model-overrides.example.json` for the format. Apply with `scripts/update.sh`.
-
-This file lives outside the repo (gitignored), is read on every config regen, and **always wins**
-over the registry default (it is applied verbatim and is not affected by `GLADOS_DISABLE_OLLAMA`).
-Do **not** hand-edit `~/.openclaw/openclaw.json` — it is generated and will be overwritten.
-
-#### Response speed: pick the right model
-
-Some cheap HPC reasoning models (e.g. `minimax-m2.7`) are slow on the LiteLLM gateway and **always**
-emit reasoning regardless of any thinking/level setting — so they make a poor conversational
-assistant (20s+ for a trivial reply). For a snappy agent like Atlas, switch it (via the model
-picker) to a fast **non-reasoning** model such as `gemini-2.5-flash-lite`, `gemini-3.1-flash-lite-preview`,
-or `gemma-4-31b-it-fp8`. For smart **and** fast, `claude-sonnet-4-6` reasons *adaptively* (it scales
-effort per message). Sonnet agents like GLaDOS already get adaptive reasoning by default. See
-[docs/model-customization.md](docs/model-customization.md).
-
-## Architecture
-
-```mermaid
-flowchart TD
-  Operator["Operator"] --> Dashboard["GLaDOS Dashboard :4280"]
-  Dashboard --> OpenClaw["OpenClaw Gateway ~/.openclaw"]
-  OpenClaw --> Agents["Local Agents ~/.glados/workspaces/agents"]
-  Agents --> MCPBlackboard["blackboard MCP"]
-  Agents --> MCPWatchdog["watchdog MCP"]
-  Agents --> MCPOps["glados-ops MCP"]
-  Agents --> Browser["Browser / computer-use MCP"]
-  MCPBlackboard --> BlackboardDB["~/.glados/blackboard/blackboard.db"]
-  MCPWatchdog --> WatchdogDB["~/.glados/watchdog/watchdog.db"]
-  MCPOps --> Evidence["~/.glados/investigations"]
-  Agents --> Burp["Burp Proxy :8080"]
-  Burp --> BurpExt["GLaDOS Burp Extension :1338"]
-  BurpExt --> Dashboard
-  Dashboard --> Reports["~/.glados/reports"]
-```
-
-Core pieces:
-
-- Dashboard: chat, live transcripts, Proxy tab, Reports tab, health banners, halt/resume controls.
-- OpenClaw: runs GLaDOS and subagents, stores local sessions, streams JSONL and raw token events.
-- Agents: editable local workspaces that define identity, runbook, tools, and skills.
-- Blackboard MCP: shared local SQLite state for findings, tasks, baseline recon, plans, approvals, and replans.
-- Watchdog MCP: target health, manual halts/resumes, and deterministic plan dispatch checks.
-- GLaDOS ops MCP: scope guard checks, evidence bundle creation, JS/OpenAPI extraction, and safe command planning.
-- Operator context: non-secret background knowledge available to GLaDOS through `glados-ops.operator_context`.
-- Local auth status: redacted credential-profile availability through `glados-ops.local_auth_status`; credential values stay local and are not returned to agents.
-- Burp integration: routes active web traffic through Burp, attributes requests per agent, and exposes proxy history/metrics to the dashboard.
-
-## Web App Assessment Flow
-
-```mermaid
-flowchart TD
-  Start["Operator starts assessment for https://example.com"] --> Scope["Confirm scope and ROE"]
-  Scope --> Health["Probe target health"]
-  Health --> Baseline["Phase 1 baseline recon"]
-  Baseline --> DirectRecon["Browser recon, endpoints, forms, auth, JS"]
-  Baseline --> Prior["Prior report/tracker lookup if available"]
-  Baseline --> DnsTls["DNS/TLS/CDN/WAF fingerprint"]
-  Baseline --> Osint["OSINT as lower-weight support"]
-  DirectRecon --> Summary["Write baseline summary to blackboard"]
-  Prior --> Summary
-  DnsTls --> Summary
-  Osint --> Summary
-  Summary --> Plan["plan-synthesizer proposes attack plan"]
-  Plan --> Review["Operator reviews in GLaDOS chat"]
-  Review --> Approved{"Approved?"}
-  Approved -- "No" --> Revise["Modify, reject, or gather more recon"]
-  Revise --> Plan
-  Approved -- "Yes" --> ACL["Generate per-agent fetch ACL"]
-  ACL --> Execute["Phase 3 approved agent execution"]
-  Execute --> Candidate["Suspected finding"]
-  Candidate --> Validate["Validator agent checks evidence"]
-  Validate --> Manual["Operator manually inspects important findings"]
-  Manual --> Replan{"Unlocks new vectors?"}
-  Replan -- "Yes" --> Plan
-  Replan -- "No" --> Report["report-writer creates local report"]
-```
-
-## Simulated Example: `https://example.com/`
-
-1. The operator tells GLaDOS: assess `https://example.com/`.
-2. GLaDOS confirms scope and probes target health through watchdog.
-3. Phase 1 begins. `webapp-recon` opens the site with the browser MCP, maps pages and forms, records headers and cookies, and identifies a search endpoint at `/search?q=`.
-4. DNS/TLS data is recorded. Prior report lookup finds no prior findings. OSINT finds public references, but GLaDOS treats that as lower-weight support.
-5. GLaDOS writes a baseline summary to the blackboard.
-6. `plan-synthesizer` proposes a plan:
-   - Test search/query parameters for SQL injection, CWE-89.
-   - Test object IDs for IDOR, CWE-639.
-   - Review JavaScript endpoints for API exposure.
-   - Keep testing low-rate and route active traffic through Burp.
-7. GLaDOS tells the operator the plan in chat and waits for approve, selected approve, modify, or reject.
-8. The operator approves the SQL injection validation vector.
-9. The approved plan generates a fetch ACL so only the selected agents can touch the scoped hosts.
-10. `webapp-vuln` tests the approved parameter and observes SQL error behavior. It reports evidence, confidence, endpoint, request/response summary, and risk.
-11. `webapp-validator` independently checks the behavior with safe negative controls.
-12. GLaDOS asks the operator to manually inspect the evidence before treating it as confirmed.
-13. If confirmed, GLaDOS records the finding in the blackboard and asks whether follow-on testing is allowed. If the finding unlocks a new vector, GLaDOS halts and proposes a replan.
-14. `report-writer` writes the report under `~/.glados/reports/example-com-YYYYMMDD/`.
-15. `report-validator` reviews it before handoff.
-
-## Reports
-
-Reports are local-only:
-
-```text
-~/.glados/reports/<engagement>/
-```
-
-Evidence bundles and screenshots are local-only:
-
-```text
-~/.glados/investigations/<target>/evidence/
-```
-
-The dashboard Reports tab reads from the local reports and investigations roots. To export a report:
-
-```bash
-scripts/export-report.sh <engagement>
-```
-
-The export is written under:
-
-```text
-~/.glados/exports/
-```
-
-## Repo Hygiene
-
-Before pushing:
-
-```bash
-scripts/prepush-secret-scan.sh
-```
-
-The scan blocks common credential patterns and runtime artifacts such as `.env`, reports, investigations, DBs, sessions, Burp exports, and known private identifiers. Keep operator data in `~/.glados` and `~/.openclaw`, not in Git.
-
-## Production Readiness Checks
-
-```bash
-scripts/glados-doctor.sh
-```
-
-Doctor verifies:
-
-- Runtime paths are outside the repo.
-- OpenClaw agents point at `~/.glados/workspaces/agents`.
-- `openclaw_device_auth` is synchronized and has the local operator scopes
-  needed for subagent dispatch, when OpenClaw has been paired.
-- Reports and investigations are local.
-- Local DB paths exist.
-- Secret scan passes for distributable source.
+The release marker is `v4.0.0`. Build artifacts use the product name `GLaDOS`, so the bundle remains `GLaDOS.app`.

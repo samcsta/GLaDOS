@@ -20,7 +20,7 @@ GLaDOS is installed as a customizable local framework:
 - Evidence lives under `~/.glados/investigations/<target>/evidence/`.
 - Blackboard DB lives under `~/.glados/blackboard/blackboard.db`.
 - Watchdog DB lives under `~/.glados/watchdog/watchdog.db`.
-- OpenClaw runtime state lives under `~/.openclaw/`.
+- Agent SDK runtime state lives under `~/.agent-sdk/`.
 
 `git pull` and `scripts/update-macos.sh` must never overwrite those runtime paths. Upstream agent changes are optional seed updates only.
 
@@ -31,7 +31,6 @@ The installed default roster is described by `templates/agent-registry.json`. Op
 High-level groups:
 
 - Supervisor: `glados`
-- Atlas: separate personal ChatBot assistant. It is not part of the GLaDOS assessment roster and must not be dispatched as a subagent.
 - Core Phase 1 recon: `webapp-recon`, `source-code`, `net-recon`
 - Conditional Phase 1 recon: `origin-ip`, `js-reverser`, `mobile-api-recon`
 - Manual-only Phase 1 support: `osint` (dispatch only when the operator explicitly asks for OSINT/passive public-source recon)
@@ -53,7 +52,7 @@ External project trackers, report systems, LLM providers, VPNs, and customer por
 - `glados-ops`: scope guard checks, evidence bundles, JS/OpenAPI extraction, safe command planning.
 - `computer-use` / browser integrations: interactive inspection where configured.
 
-Burp is accessed through the local proxy and the GLaDOS Burp extension, not through a dedicated `burp_mcp` server.
+GLaDOS proxy capture is accessed through the native `/api/proxy/*` surface and per-agent `X-GLaDOS-Agent` attribution.
 
 ## Webapp Assessment Protocol
 

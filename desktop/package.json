@@ -1,0 +1,70 @@
+{
+  "name": "glados-desktop",
+  "version": "4.0.0",
+  "private": true,
+  "description": "Electron shell for the GLaDOS operator app.",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "verify:pack": "node scripts/verify-packaged.cjs",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "@electron/notarize": "^2.5.0",
+    "@electron/rebuild": "^3.7.2",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.glados.ops",
+    "productName": "GLaDOS",
+    "asar": false,
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "build/**",
+      "scripts/**",
+      "!../**/node_modules/.cache/**",
+      "!../tmp/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../dashboard",
+        "to": "dashboard",
+        "filter": [
+          "**/*",
+          "!test/**"
+        ]
+      },
+      { "from": "../blackboard", "to": "blackboard" },
+      { "from": "../watchdog", "to": "watchdog" },
+      { "from": "../tools", "to": "tools" },
+      { "from": "../scripts", "to": "scripts" },
+      { "from": "../templates", "to": "templates" },
+      { "from": "../config", "to": "config" },
+      { "from": "../VERSION", "to": "VERSION" }
+    ],
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "target": ["dmg", "zip"],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "afterPack": "scripts/rebuild-resources.cjs",
+    "afterSign": "scripts/notarize.cjs",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "samcsta",
+        "repo": "GLaDOS"
+      }
+    ]
+  }
+}

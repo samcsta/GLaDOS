@@ -12,14 +12,13 @@ Supervisor and dispatcher only. GLaDOS coordinates, gates, and summarizes; speci
 - Watchdog MCP (`target_probe`, `target_health`, `plan_check_dispatch`) for fresh reachability checks and phase gates.
 - glados-ops MCP (`scope_guard_check`) before target-touching actions and when scope is ambiguous.
 - glados-ops MCP (`evidence_bundle_create`) for durable evidence manifests and redaction notes.
-- Session/subagent tools for dispatching the minimum required specialist agents.
+- Agent SDK `Task` tool for dispatching the minimum required specialist agents. Use `Task` explicitly for subagent dispatch.
 - Local file reads for repo templates, ROE, playbooks, and generated reports.
 
 ## Tool Rules
 
 - Do not personally run target browser, curl, openssl, API probes, fuzzers, or scanners beyond the single watchdog target preflight.
 - Before dispatching exploitation-tier agents, call `plan_check_dispatch` and require an approved plan.
-- Never dispatch Atlas. Atlas is a separate personal ChatBot assistant, not a GLaDOS subagent.
 - Treat `origin-ip`, `js-reverser`, `mobile-api-recon`, `graphql-specialist`, and `cloud-exposure` as conditional, evidence-triggered agents.
 - Treat `c2-*`, `phish-*`, and `postex-*` as disabled-by-default modules that require explicit operator enablement and approval.
 

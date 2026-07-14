@@ -1,128 +1,98 @@
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
-const { execFile } = require('node:child_process');
-const { EXEC_APPROVALS_FILE, NETWORK_TOOL_NAMES, BURP_GATE_SH, OPENCLAW_HOME } = require('./config');
 const { db } = require('./db');
 
-// v3.1: enumerate every agent registered in openclaw config. Used by
-// engagementHaltAll so a global halt writes a deny row per agent, not just a
-// burp-gate flip. The openclaw config layout is `agents.list[]` with either
-// `id` or `agentId` fields; we read it best-effort and fall back to the empty
-// list, so a malformed/missing config degrades to the old behavior rather
-// than throwing during halt-all.
-function listRegisteredAgentIds() {
+const GLADOS_RUNTIME_DIR = path.resolve(
+  process.env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), '.glados')
+);
+const HALTS_DIR = path.join(GLADOS_RUNTIME_DIR, 'halts');
+
+function safeAgentId(agentId) {
+  const id = String(agentId || '').trim();
+  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(id)) throw new Error(`invalid agent id: ${agentId}`);
+  return id;
+}
+
+function ensureHaltsDir() {
+  fs.mkdirSync(HALTS_DIR, { recursive: true, mode: 0o700 });
+  fs.chmodSync(HALTS_DIR, 0o700);
+  return HALTS_DIR;
+}
+
+function haltPath(agentId) {
+  return path.join(HALTS_DIR, `${safeAgentId(agentId)}.json`);
+}
+
+function readMarker(agentId) {
+  const file = haltPath(agentId);
   try {
-    const raw = fs.readFileSync(path.join(OPENCLAW_HOME, 'openclaw.json'), 'utf8');
-    const d = JSON.parse(raw);
-    const list = d?.agents?.list;
-    if (!Array.isArray(list)) return [];
-    return list
-      .map(a => (a && (a.id || a.agentId || a.name)) || null)
-      .filter(Boolean);
-  } catch { return []; }
-}
-
-function readApprovals() {
-  try { return JSON.parse(fs.readFileSync(EXEC_APPROVALS_FILE, 'utf8')); }
-  catch { return { version: 1, defaults: {}, agents: {} }; }
-}
-
-function writeApprovals(obj) {
-  const tmp = EXEC_APPROVALS_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
-  fs.renameSync(tmp, EXEC_APPROVALS_FILE);
-}
-
-function addAgentDenyRules(agentId, reason) {
-  const data = readApprovals();
-  data.agents = data.agents || {};
-  data.agents[agentId] = data.agents[agentId] || {};
-  data.agents[agentId].denied = data.agents[agentId].denied || {};
-  const mark = { by: 'watchdog', reason: reason || 'halted', at: Date.now() };
-  for (const tool of NETWORK_TOOL_NAMES) {
-    data.agents[agentId].denied[tool] = mark;
+    const marker = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return { ...marker, path: file };
+  } catch {
+    return null;
   }
-  writeApprovals(data);
 }
 
-function removeAgentDenyRules(agentId) {
-  const data = readApprovals();
-  if (data.agents && data.agents[agentId] && data.agents[agentId].denied) {
-    for (const tool of NETWORK_TOOL_NAMES) delete data.agents[agentId].denied[tool];
-    if (Object.keys(data.agents[agentId].denied).length === 0) delete data.agents[agentId].denied;
-    if (Object.keys(data.agents[agentId]).length === 0) delete data.agents[agentId];
-  }
-  writeApprovals(data);
+function writeMarker(agentId, marker) {
+  ensureHaltsDir();
+  const file = haltPath(agentId);
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, `${JSON.stringify(marker, null, 2)}\n`, { mode: 0o600 });
+  fs.chmodSync(tmp, 0o600);
+  fs.renameSync(tmp, file);
+  fs.chmodSync(file, 0o600);
+  return file;
 }
 
-function runBurpGate(action, arg) {
-  return new Promise(resolve => {
-    execFile(BURP_GATE_SH, [action, ...(arg ? [arg] : [])], { timeout: 10_000 }, (err, stdout, stderr) => {
-      resolve({ ok: !err, stdout: stdout?.toString() || '', stderr: stderr?.toString() || '' });
-    });
-  });
-}
-
-async function agentHalt(agentId, reason, { initiator = 'watchdog' } = {}) {
-  addAgentDenyRules(agentId, reason);
-  const burp = await runBurpGate('halt-agent', agentId);
+async function agentHalt(agentId, reason, { initiator = 'operator' } = {}) {
+  const id = safeAgentId(agentId);
+  const marker = {
+    version: 1,
+    agentId: id,
+    reason: String(reason || 'halted by operator').slice(0, 500),
+    initiator: String(initiator || 'operator').slice(0, 100),
+    haltedAt: new Date().toISOString(),
+    haltedAtMs: Date.now(),
+  };
+  const file = writeMarker(id, marker);
   db.prepare(`INSERT INTO halt_log (agent_id, reason, initiator, action, at) VALUES (?, ?, ?, 'halt', ?)`)
-    .run(agentId, reason || null, initiator, Date.now());
-  return { ok: true, agentId, reason, burp };
+    .run(id, marker.reason, marker.initiator, marker.haltedAtMs);
+  return { ok: true, agentId: id, haltActive: true, marker: { ...marker, path: file } };
 }
 
-async function agentResume(agentId, { initiator = 'watchdog' } = {}) {
-  removeAgentDenyRules(agentId);
-  const burp = await runBurpGate('resume-agent', agentId);
+async function agentResume(agentId, { initiator = 'operator' } = {}) {
+  const id = safeAgentId(agentId);
+  const file = haltPath(id);
+  const wasHalted = fs.existsSync(file);
+  try { fs.rmSync(file, { force: true }); } catch {}
   db.prepare(`INSERT INTO halt_log (agent_id, initiator, action, at) VALUES (?, ?, 'resume', ?)`)
-    .run(agentId, initiator, Date.now());
-  return { ok: true, agentId, burp };
-}
-
-async function engagementHaltAll(engagementId, reason, { initiator = 'watchdog' } = {}) {
-  // v3.1: halt-all was previously only a burp-gate flip + log row, which left
-  // a gap where an agent mid-call could still hit network tools because the
-  // deny map was never updated. Now we enumerate every registered agent and
-  // add deny rules for each, in addition to the burp flip.
-  const agentIds = listRegisteredAgentIds();
-  const haltedAgents = [];
-  for (const agentId of agentIds) {
-    try {
-      addAgentDenyRules(agentId, reason || 'halt-all');
-      haltedAgents.push(agentId);
-    } catch (e) {
-      // Keep going on per-agent failures; we want halt-all to be best-effort.
-    }
-  }
-  const burp = await runBurpGate('halt-all');
-  db.prepare(`INSERT INTO halt_log (engagement_id, reason, initiator, action, at) VALUES (?, ?, ?, 'halt-all', ?)`)
-    .run(engagementId || null, reason || null, initiator, Date.now());
-  return { ok: true, engagementId, reason, burp, haltedAgents };
-}
-
-// v3.1: counterpart to engagementHaltAll — clears deny rules for every agent
-// that the halt-all added. Callable via /api/resume-all.
-async function engagementResumeAll({ initiator = 'watchdog' } = {}) {
-  const agentIds = listRegisteredAgentIds();
-  const resumed = [];
-  for (const agentId of agentIds) {
-    try { removeAgentDenyRules(agentId); resumed.push(agentId); } catch {}
-  }
-  const burp = await runBurpGate('resume-all');
-  db.prepare(`INSERT INTO halt_log (initiator, action, at) VALUES (?, 'resume-all', ?)`)
-    .run(initiator, Date.now());
-  return { ok: true, burp, resumed };
+    .run(id, String(initiator || 'operator').slice(0, 100), Date.now());
+  return { ok: true, agentId: id, haltActive: false, wasHalted };
 }
 
 function agentStatus(agentId) {
-  const data = readApprovals();
-  const denied = data.agents?.[agentId]?.denied || null;
-  const lastHaltRow = db.prepare(`SELECT * FROM halt_log WHERE agent_id = ? ORDER BY at DESC LIMIT 1`).get(agentId);
-  return { agentId, haltActive: !!denied, denied, lastAction: lastHaltRow };
+  const id = safeAgentId(agentId);
+  const marker = readMarker(id);
+  const lastAction = db.prepare(`SELECT * FROM halt_log WHERE agent_id = ? ORDER BY at DESC LIMIT 1`).get(id);
+  return { agentId: id, haltActive: !!marker, marker, lastAction };
+}
+
+function listHaltedAgents() {
+  ensureHaltsDir();
+  return fs.readdirSync(HALTS_DIR)
+    .filter(name => name.endsWith('.json'))
+    .map(name => readMarker(name.slice(0, -5)))
+    .filter(Boolean)
+    .sort((a, b) => Number(b.haltedAtMs || 0) - Number(a.haltedAtMs || 0));
 }
 
 module.exports = {
-  agentHalt, agentResume, engagementHaltAll, engagementResumeAll, agentStatus,
-  addAgentDenyRules, removeAgentDenyRules, readApprovals,
-  listRegisteredAgentIds,
+  GLADOS_RUNTIME_DIR,
+  HALTS_DIR,
+  haltPath,
+  agentHalt,
+  agentResume,
+  agentStatus,
+  listHaltedAgents,
 };

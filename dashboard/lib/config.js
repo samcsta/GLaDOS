@@ -2,7 +2,6 @@ const path = require('node:path');
 const os = require('node:os');
 
 const GLADOS_RUNTIME_DIR = path.resolve(process.env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), '.glados'));
-const OPENCLAW_HOME = process.env.OPENCLAW_HOME || path.join(os.homedir(), '.openclaw');
 const GLADOS_AGENT_WORKSPACES = path.resolve(
   process.env.GLADOS_AGENT_WORKSPACES || path.join(GLADOS_RUNTIME_DIR, 'workspaces', 'agents')
 );
@@ -21,10 +20,6 @@ module.exports = {
   GLADOS_INVESTIGATIONS_DIR,
   BLACKBOARD_DB,
   WATCHDOG_DB,
-  OPENCLAW_HOME,
-  AGENTS_DIR: path.join(OPENCLAW_HOME, 'agents'),
-  OPENCLAW_JSON: path.join(OPENCLAW_HOME, 'openclaw.json'),
   MODEL_OVERRIDES_JSON: path.join(GLADOS_RUNTIME_DIR, 'model-overrides.json'),
   GLADOS_AGENT_ID: process.env.GLADOS_AGENT_ID || 'glados',
-  OPENCLAW_BIN: process.env.OPENCLAW_BIN || 'openclaw',
 };

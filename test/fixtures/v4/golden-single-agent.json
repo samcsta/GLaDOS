@@ -1,0 +1,94 @@
+{
+  "fixture": "golden-single-agent",
+  "sourceVersion": "v3.6.0",
+  "recording": {
+    "kind": "recorded-sdk-messages",
+    "sdkVersion": "0.3.207",
+    "sha256": "31394d3a5b8b02280e6c572c77218b14efc6e33afe2073e8761fc1ec418036f0"
+  },
+  "agentId": "glados",
+  "turn": {
+    "operatorPrompt": "Summarize current engagement state.",
+    "assembledPromptFiles": [
+      "IDENTITY.md",
+      "SOUL.md",
+      "RUNBOOK.md",
+      "TOOLS.md",
+      "USER.md",
+      "AGENTS.md"
+    ],
+    "recordedSdkMessages": [
+      {
+        "type": "assistant",
+        "uuid": "asst-status-001",
+        "session_id": "sess-v36-single",
+        "parent_tool_use_id": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_status_001",
+              "name": "mcp__blackboard__blackboard_engagement_status",
+              "input": {
+                "engagement_id": "example.com-20260713"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "type": "user",
+        "uuid": "user-status-001",
+        "session_id": "sess-v36-single",
+        "parent_tool_use_id": null,
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_status_001",
+              "content": "{\"configured\":true,\"findings\":0,\"tasks\":0}",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "uuid": "asst-status-002",
+        "session_id": "sess-v36-single",
+        "parent_tool_use_id": null,
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "No findings are recorded yet; the engagement is ready for scoped reconnaissance."
+            }
+          ]
+        }
+      }
+    ],
+    "expectedEvents": [
+      {
+        "agentId": "glados",
+        "kind": "tool-call",
+        "toolName": "mcp__blackboard__blackboard_engagement_status",
+        "toolCallId": "toolu_status_001",
+        "toolInput": {
+          "engagement_id": "example.com-20260713"
+        }
+      },
+      {
+        "agentId": "glados",
+        "kind": "tool-result",
+        "toolCallId": "toolu_status_001",
+        "isError": false,
+        "text": "{\"configured\":true,\"findings\":0,\"tasks\":0}"
+      },
+      {
+        "agentId": "glados",
+        "kind": "assistant-text",
+        "text": "No findings are recorded yet; the engagement is ready for scoped reconnaissance."
+      }
+    ]
+  }
+}

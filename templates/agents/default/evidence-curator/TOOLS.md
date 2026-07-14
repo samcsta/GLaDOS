@@ -11,7 +11,7 @@ Evidence-only support agent. It normalizes existing artifacts and does not creat
 - Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
 - glados-ops MCP (`evidence_bundle_create`) for durable evidence manifests and redaction notes.
 - Local filesystem reads under investigation evidence/report directories.
-- Burp history exports only when already captured and explicitly referenced by the finding.
+- proxy history exports only when already captured and explicitly referenced by the finding.
 
 ## Tool Rules
 

@@ -63,23 +63,6 @@ function request(port, method, pathname, body = null) {
 async function startServer() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-slash-api-'));
   const runtime = path.join(root, 'runtime');
-  const openclawHome = path.join(root, 'openclaw');
-  const burpGate = path.join(root, 'burp-gate.sh');
-  fs.mkdirSync(path.join(openclawHome, 'agents', 'glados', 'sessions'), { recursive: true });
-  fs.mkdirSync(path.join(openclawHome, 'logs'), { recursive: true });
-  fs.writeFileSync(path.join(openclawHome, 'agents', 'glados', 'sessions', 'sessions.json'), '{}\n');
-  fs.writeFileSync(path.join(openclawHome, 'logs', 'raw-stream.jsonl'), '');
-  fs.writeFileSync(path.join(openclawHome, 'openclaw.json'), JSON.stringify({
-    agents: {
-      list: [
-        { id: 'glados', name: 'glados', model: 'test' },
-        { id: 'webapp-vuln', name: 'webapp-vuln', model: 'test' },
-        { id: 'source-code', name: 'source-code', model: 'test' },
-      ],
-    },
-  }, null, 2));
-  fs.writeFileSync(burpGate, '#!/usr/bin/env bash\necho "stub burp-gate $*"\n');
-  fs.chmodSync(burpGate, 0o755);
 
   const port = await freePort();
   const env = {
@@ -88,8 +71,6 @@ async function startServer() {
     GLADOS_RUNTIME_DIR: runtime,
     BLACKBOARD_DB: path.join(runtime, 'blackboard', 'blackboard.db'),
     WATCHDOG_DB: path.join(runtime, 'watchdog', 'watchdog.db'),
-    OPENCLAW_HOME: openclawHome,
-    BURP_GATE_SH: burpGate,
     GLADOS_CONTROLLER_WORKER: '0',
   };
   const child = cp.spawn(process.execPath, ['dashboard/server.js'], {
@@ -104,7 +85,6 @@ async function startServer() {
   return {
     root,
     runtime,
-    openclawHome,
     port,
     child,
     env,
@@ -136,8 +116,11 @@ test('POST /api/slash/run executes workflow and safety commands through server w
 
     const usage = await slashRun(srv.port, '/investigate');
     assert.equal(usage.ok, true);
-    assert.match(usage.events.at(-1).text, /usage: \/investigate <url-or-domain>/);
-    assert.doesNotMatch(usage.events.at(-1).text, /Ready\. The local ROE/);
+    assert.match(usage.events.at(-1).text, /Ready\. The local ROE/);
+
+    const removedRps = await slashRun(srv.port, '/rps');
+    assert.equal(removedRps.ok, false);
+    assert.match(removedRps.events.at(-1).text, /unknown command: \/rps/);
 
     const localRepo = path.join(srv.root, 'repo');
     fs.mkdirSync(localRepo);
@@ -153,9 +136,26 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     assert.equal(halt.ok, true);
     assert.match(halt.events.at(-1).text, /"agentId": "webapp-vuln"/);
 
-    const haltAll = await slashRun(srv.port, '/halt-all');
-    assert.equal(haltAll.ok, true);
-    assert.match(haltAll.events.at(-1).text, /"haltedAgents"/);
+    const haltDb = new Database(path.join(srv.runtime, 'blackboard', 'blackboard.db'), { readonly: true });
+    try {
+      const notices = haltDb.prepare(`
+        SELECT agent_id, kind, text
+        FROM dashboard_transcript_events
+        WHERE kind = 'operator-event' AND text LIKE '%Operator halted webapp-vuln%'
+        ORDER BY id ASC
+      `).all();
+      assert.deepEqual(notices.map(row => row.agent_id), ['webapp-vuln', 'glados']);
+    } finally {
+      haltDb.close();
+    }
+
+    const resume = await slashRun(srv.port, '/resume webapp-vuln');
+    assert.equal(resume.ok, true);
+    assert.match(resume.events.at(-1).text, /"agentId": "webapp-vuln"/);
+
+    const removedHaltAll = await slashRun(srv.port, '/halt-all');
+    assert.equal(removedHaltAll.ok, false);
+    assert.match(removedHaltAll.events.at(-1).text, /unknown command: \/halt-all/);
 
     const db = new Database(path.join(srv.runtime, 'blackboard', 'blackboard.db'), { readonly: true });
     try {

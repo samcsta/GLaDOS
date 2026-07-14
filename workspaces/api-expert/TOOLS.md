@@ -11,9 +11,9 @@ Exploitation-tier API tester for approved REST/JSON/OpenAPI/business-logic vecto
 - Watchdog MCP (`target_health`, `plan_check_dispatch`) for health and phase gates.
 - glados-ops MCP (`scope_guard_check`) before target-touching actions and when scope is ambiguous.
 - Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
-- Burp proxy/extension for request and response evidence; keep target HTTP(S) observable unless the operator approves an exception.
+- GLaDOS native proxy for request and response evidence; keep target HTTP(S) observable unless the operator approves an exception.
 - glados-ops `openapi_inventory` for OpenAPI documents.
-- Browser/Burp traffic captures from `webapp-recon`; proxied `/usr/bin/curl` only when necessary.
+- Browser/proxy traffic captures from `webapp-recon`; proxied `/usr/bin/curl` only when necessary.
 
 ## Tool Rules
 

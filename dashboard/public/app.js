@@ -5,6 +5,8 @@ const state = {
   currentTab: null,
   transcripts: new Map(), // tabId -> { es, el, events[], sending }
   agentsLoadedOnce: false,
+  update: { lines: [], running: false, es: null, autoStart: false },
+  reports: { query: '', scope: 'all', selectedPath: null },
 };
 
 const tabsEl = document.getElementById('tabs');
@@ -13,125 +15,6 @@ const agentListEl = document.getElementById('agent-list');
 const eventsEl = document.getElementById('events');
 const errorsOnlyEl = document.getElementById('errors-only');
 const debugModeEl = document.getElementById('debug-mode');
-const haltOneBtn = document.getElementById('halt-one');
-const haltAllBtn = document.getElementById('halt-all');
-const resumeAllBtn = document.getElementById('resume-all');
-
-const COLOR_PROFILE_KEY = 'glados-dash.color-profile';
-const DENSITY_KEY = 'glados-dash.density';
-const FONT_SIZE_KEY = 'glados-dash.font-size';
-const COLOR_PROFILES = [
-  { id: 'classic', label: 'Classic', swatches: ['#0c0f14', '#5aa6ff', '#4ade80'] },
-  { id: 'purple', label: 'Purple', swatches: ['#100c18', '#a879ff', '#71e6a6'] },
-  { id: 'red', label: 'Red', swatches: ['#130d0f', '#ff6f7d', '#ffd16b'] },
-  { id: 'green', label: 'Green', swatches: ['#0b120f', '#58d68d', '#74e49b'] },
-  { id: 'bw', label: 'Black+White', swatches: ['#000000', '#f2f2f2', '#6f6f6f'] },
-];
-const DENSITY_OPTIONS = [
-  { id: 'comfortable', label: 'Comfortable' },
-  { id: 'compact', label: 'Compact' },
-];
-const FONT_SIZE_OPTIONS = [
-  { id: 'small', label: 'Small' },
-  { id: 'default', label: 'Default' },
-  { id: 'large', label: 'Large' },
-];
-
-function currentOption(storageKey, options, fallback) {
-  try {
-    const saved = localStorage.getItem(storageKey);
-    if (options.some(p => p.id === saved)) return saved;
-  } catch {}
-  return fallback;
-}
-
-function currentColorProfile() {
-  return currentOption(COLOR_PROFILE_KEY, COLOR_PROFILES, 'classic');
-}
-
-function currentDensity() {
-  return currentOption(DENSITY_KEY, DENSITY_OPTIONS, 'comfortable');
-}
-
-function currentFontSize() {
-  return currentOption(FONT_SIZE_KEY, FONT_SIZE_OPTIONS, 'default');
-}
-
-function applyColorProfile(profileId, { persist = true } = {}) {
-  const id = COLOR_PROFILES.some(p => p.id === profileId) ? profileId : 'classic';
-  document.documentElement.dataset.colorProfile = id;
-  if (persist) {
-    try { localStorage.setItem(COLOR_PROFILE_KEY, id); } catch {}
-  }
-  updateColorProfileButtons(id);
-}
-
-function applyDensity(densityId, { persist = true } = {}) {
-  const id = DENSITY_OPTIONS.some(p => p.id === densityId) ? densityId : 'comfortable';
-  document.documentElement.dataset.density = id;
-  if (persist) {
-    try { localStorage.setItem(DENSITY_KEY, id); } catch {}
-  }
-  updateSegmentedButtons('density', id);
-}
-
-function applyFontSize(fontSizeId, { persist = true } = {}) {
-  const id = FONT_SIZE_OPTIONS.some(p => p.id === fontSizeId) ? fontSizeId : 'default';
-  document.documentElement.dataset.fontSize = id;
-  if (persist) {
-    try { localStorage.setItem(FONT_SIZE_KEY, id); } catch {}
-  }
-  updateSegmentedButtons('font-size', id);
-}
-
-function updateColorProfileButtons(activeId = currentColorProfile()) {
-  document.querySelectorAll('.color-profile-option').forEach(btn => {
-    const selected = btn.dataset.profile === activeId;
-    btn.setAttribute('aria-checked', selected ? 'true' : 'false');
-  });
-}
-
-function updateSegmentedButtons(group, activeId) {
-  document.querySelectorAll(`.appearance-option[data-group="${group}"]`).forEach(btn => {
-    const selected = btn.dataset.value === activeId;
-    btn.setAttribute('aria-checked', selected ? 'true' : 'false');
-  });
-}
-
-function renderColorProfileControl() {
-  const el = document.getElementById('color-profile-options');
-  if (!el) return;
-  const active = currentColorProfile();
-  el.innerHTML = COLOR_PROFILES.map(profile => {
-    const swatches = profile.swatches
-      .map(color => `<span class="color-profile-swatch" style="background:${color}"></span>`)
-      .join('');
-    const checked = profile.id === active ? 'true' : 'false';
-    return `<button type="button" class="color-profile-option" role="radio" aria-checked="${checked}" data-profile="${profile.id}">
-      <span class="color-profile-swatches" aria-hidden="true">${swatches}</span>
-      <span>${profile.label}</span>
-    </button>`;
-  }).join('');
-  el.querySelectorAll('.color-profile-option').forEach(btn => {
-    btn.addEventListener('click', () => applyColorProfile(btn.dataset.profile));
-  });
-}
-
-function renderSegmentedControl(containerId, group, options, activeId, onSelect) {
-  const el = document.getElementById(containerId);
-  if (!el) return;
-  el.innerHTML = options.map(option => {
-    const checked = option.id === activeId ? 'true' : 'false';
-    return `<button type="button" class="appearance-option" role="radio" aria-checked="${checked}" data-group="${group}" data-value="${option.id}">${option.label}</button>`;
-  }).join('');
-  el.querySelectorAll('.appearance-option').forEach(btn => {
-    btn.addEventListener('click', () => onSelect(btn.dataset.value));
-  });
-}
-
-applyColorProfile(currentColorProfile(), { persist: false });
-applyDensity(currentDensity(), { persist: false });
-applyFontSize(currentFontSize(), { persist: false });
 
 errorsOnlyEl.addEventListener('change', () => {
   document.body.classList.toggle('errors-only', errorsOnlyEl.checked);
@@ -145,39 +28,118 @@ function applyDebugMode() {
 debugModeEl.addEventListener('change', applyDebugMode);
 applyDebugMode();
 
-haltAllBtn.addEventListener('click', async () => {
-  if (!confirm('Halt all agents now?')) return;
-  const r = await fetch('/api/halt-all', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ reason: 'dashboard halt-all' }),
-  });
-  const j = await r.json();
-  logEvent('ended', `halt-all -> ${j.ok ? 'ok' : (j.error || 'error')}`);
-});
+function selectedAgentForControls() {
+  const tabId = state.currentTab;
+  const tab = state.openTabs.find(t => t.id === tabId);
+  if (tab?.kind === 'chat') return 'glados';
+  if (tab?.kind === 'agent') return tab.id;
+  return null;
+}
 
-resumeAllBtn.addEventListener('click', async () => {
-  if (!confirm('Resume all agents and restore Burp scope now?')) return;
-  const r = await fetch('/api/resume-all', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: '{}',
-  });
-  const j = await r.json();
-  const count = Array.isArray(j.resumed) ? ` (${j.resumed.length} agents)` : '';
-  logEvent('started', `resume-all -> ${j.ok ? 'ok' + count : (j.error || 'error')}`);
-});
+function syncOperationControls() {
+  const haltBtn = document.getElementById('halt-one');
+  const resumeBtn = document.getElementById('resume-one');
+  const resetBtn = document.getElementById('reset-session');
+  const agentId = selectedAgentForControls();
+  const selected = state.agents.find(agent => agent.id === agentId);
+  if (haltBtn) haltBtn.disabled = !agentId || !!selected?.halted;
+  if (resumeBtn) resumeBtn.disabled = !agentId || !selected?.halted;
+  if (resetBtn) resetBtn.disabled = !agentId;
+}
 
-haltOneBtn.addEventListener('click', async () => {
-  if (!state.currentTab || state.currentTab === 'glados-chat') return;
-  const r = await fetch('/api/halt/' + encodeURIComponent(state.currentTab), {
+async function fetchJson(url, { timeoutMs = 10000, ...options } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
+    return json;
+  } catch (e) {
+    if (e?.name === 'AbortError') throw new Error(`timed out loading ${url}`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function handleHaltSelectedAgent() {
+  const agentId = selectedAgentForControls();
+  if (!agentId) return;
+  const r = await fetch('/api/halt/' + encodeURIComponent(agentId), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reason: 'dashboard halt' }),
   });
   const j = await r.json();
-  logEvent('ended', `halt ${state.currentTab} -> ${j.ok ? 'ok' : (j.error || 'error')}`);
-});
+  logEvent('ended', `halt ${agentId} -> ${j.ok ? 'ok' : (j.error || 'error')}`);
+  await loadAgents();
+  syncOperationControls();
+}
+
+async function handleResumeSelectedAgent() {
+  const agentId = selectedAgentForControls();
+  if (!agentId) return;
+  const r = await fetch('/api/resume/' + encodeURIComponent(agentId), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  const j = await r.json();
+  logEvent('started', `resume ${agentId} -> ${j.ok ? 'ok' : (j.error || 'error')}`);
+  await loadAgents();
+  syncOperationControls();
+}
+
+async function handleRefreshRuntime() {
+  if (!confirm('Restart the local Agent SDK runtime state? This stops in-flight turns and clears every agent transcript/chat pane.')) return;
+  const btn = document.getElementById('refresh-runtime');
+  const orig = btn?.textContent || 'Refresh runtime';
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing...'; }
+  try {
+    const r = await fetch('/api/gateway/restart', { method: 'POST' });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'refresh failed');
+    if (btn) {
+      btn.textContent = 'Refreshed';
+      setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1500);
+    }
+  } catch (e) {
+    alert('runtime refresh failed: ' + e.message);
+    if (btn) { btn.textContent = orig; btn.disabled = false; }
+  }
+}
+
+async function handleResetSession() {
+  const tabId = state.currentTab;
+  const tab = state.openTabs.find(t => t.id === tabId);
+  const agentId = selectedAgentForControls();
+  if (!agentId) { alert('Select an agent or GLaDOS chat tab first.'); return; }
+  const resetMsg = agentId === 'glados'
+    ? 'Clear the current GLaDOS transcript state and every assessment agent transcript, wipe the blackboard (engagements, findings, tasks, plans, recon state), AND clear short-term memory caches (memory/.dreams/) for every agent? Curated MEMORY.md, evidence files, and exported reports are kept. The next message starts a fresh investigation.'
+    : `Clear the current transcript state for "${agentId}"? The next message starts fresh.`;
+  if (!confirm(resetMsg)) return;
+  try {
+    const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/reset-session`, { method: 'POST' });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'reset failed');
+    const rec = state.transcripts.get(tabId);
+    if (rec) {
+      try { rec.es && rec.es.close(); } catch {}
+      state.transcripts.delete(tabId);
+    }
+    renderPane();
+  } catch (e) { alert('reset-session failed: ' + e.message); }
+}
+
+function wireOperationControls(root = document) {
+  root.querySelector('#update-app')?.addEventListener('click', () => openUpdatePane({ autoStart: true }));
+  root.querySelector('#refresh-runtime')?.addEventListener('click', handleRefreshRuntime);
+  root.querySelector('#reset-session')?.addEventListener('click', handleResetSession);
+  root.querySelector('#halt-one')?.addEventListener('click', handleHaltSelectedAgent);
+  root.querySelector('#resume-one')?.addEventListener('click', handleResumeSelectedAgent);
+  syncOperationControls();
+}
 
 async function loadAgents() {
   const res = await fetch('/api/agents');
@@ -189,7 +151,7 @@ async function loadAgents() {
     if (a.active) state.active.set(a.id, { sessionId: a.session?.sessionId });
   }
   for (const a of state.agents) {
-    if (!a.active || a.id === 'glados' || a.id === 'atlas') continue;
+    if (!a.active || a.id === 'glados' ) continue;
     if (state.openTabs.find(t => t.id === a.id)) continue;
     // If the lobby SSE missed session-started, polling still notices the live
     // agent and opens/subscribes to its transcript. First load also subscribes
@@ -200,15 +162,11 @@ async function loadAgents() {
   renderAgentList();
 }
 
-// Agents not considered part of the GLaDOS red-team roster. Atlas is a personal
-// assistant that lives under the ChatBot tab — it should NOT appear alongside
-// osint, webapp-recon, etc. in the sidebar "Agents" list.
-const HIDDEN_FROM_ROSTER = new Set(['atlas']);
 
 function renderAgentList() {
   agentListEl.innerHTML = '';
   for (const a of state.agents) {
-    if (HIDDEN_FROM_ROSTER.has(a.id)) continue;
+    if (a.id === 'glados') continue;
     const li = document.createElement('li');
     li.dataset.id = a.id;
     li.className = (state.active.has(a.id) ? 'live ' : '') + (state.currentTab === a.id ? 'active' : '');
@@ -227,8 +185,8 @@ function openGladosChat() {
 }
 
 function openAgentTab(agentId) {
-  if (agentId === 'atlas') {
-    openChatBot();
+  if (agentId === 'glados') {
+    openGladosChat();
     return;
   }
   const id = agentId;
@@ -250,13 +208,42 @@ function closeTab(id) {
   renderPane();
 }
 
+function tabIdForAgent(agentId) {
+  return agentId === 'glados' ? 'glados-chat' : agentId;
+}
+
+function clearTranscriptTab(tabId) {
+  const rec = state.transcripts.get(tabId);
+  if (rec?.es) {
+    try { rec.es.close(); } catch {}
+  }
+  state.transcripts.delete(tabId);
+  if (rec?.el) rec.el.innerHTML = '';
+}
+
+function clearRuntimeTranscriptState(agentIds = []) {
+  const ids = agentIds.length ? agentIds.map(tabIdForAgent) : [...state.transcripts.keys()];
+  for (const id of ids) clearTranscriptTab(id);
+  state.active.clear();
+  for (const tab of state.openTabs) {
+    const rec = state.transcripts.get(tab.id);
+    if (rec) {
+      rec.sending = false;
+      rec.activity = null;
+      rec.turnStartedAt = null;
+      rec.completedAt = null;
+    }
+  }
+  renderAgentList();
+  renderPane();
+}
+
 function setCurrentTab(id) {
   state.currentTab = id;
-  const tab = state.openTabs.find(t => t.id === id);
-  haltOneBtn.disabled = !tab || tab.kind !== 'agent';
   renderTabs();
   renderAgentList();
   renderPane();
+  syncOperationControls();
 }
 
 function renderTabs() {
@@ -286,15 +273,15 @@ function openReports() {
   setCurrentTab(id);
 }
 
-function openSettings() {
-  const id = 'settings';
-  if (!state.openTabs.find(t => t.id === id)) state.openTabs.push({ id, kind: 'settings', label: 'Settings' });
+function openPlans() {
+  const id = 'plans';
+  if (!state.openTabs.find(t => t.id === id)) state.openTabs.push({ id, kind: 'plans', label: 'Plans' });
   setCurrentTab(id);
 }
 
-function openAbout() {
-  const id = 'about';
-  if (!state.openTabs.find(t => t.id === id)) state.openTabs.push({ id, kind: 'about', label: 'About' });
+function openSettings() {
+  const id = 'settings';
+  if (!state.openTabs.find(t => t.id === id)) state.openTabs.push({ id, kind: 'settings', label: 'Settings' });
   setCurrentTab(id);
 }
 
@@ -310,9 +297,10 @@ function openProxy() {
   setCurrentTab(id);
 }
 
-function openChatBot() {
-  const id = 'chatbot';
-  if (!state.openTabs.find(t => t.id === id)) state.openTabs.push({ id, kind: 'chatbot', label: 'ChatBot' });
+function openUpdatePane({ autoStart = false } = {}) {
+  const id = 'update';
+  state.update.autoStart = autoStart;
+  if (!state.openTabs.find(t => t.id === id)) state.openTabs.push({ id, kind: 'update', label: 'Update' });
   setCurrentTab(id);
 }
 
@@ -326,13 +314,50 @@ function renderPane() {
   const tab = state.openTabs.find(t => t.id === id);
   if (!tab) return;
   if (tab.kind === 'chat') renderChatPane();
-  else if (tab.kind === 'chatbot') renderChatBotPane();
+  else if (tab.kind === 'plans') renderPlansPane();
   else if (tab.kind === 'reports') renderReportsPane();
   else if (tab.kind === 'settings') renderSettingsPane();
-  else if (tab.kind === 'about') renderAboutPane();
   else if (tab.kind === 'terminal') renderTerminalPane();
   else if (tab.kind === 'proxy') renderProxyPane();
+  else if (tab.kind === 'update') renderUpdatePane();
   else renderAgentPane(id);
+}
+
+function normalizeIncomingTranscriptEvent(ev) {
+  if (!ev || typeof ev !== 'object') return ev;
+  if (ev.kind === 'assistant-partial') {
+    return {
+      ...ev,
+      kind: 'text-stream',
+      evtType: ev.evtType || 'text_delta',
+      delta: ev.delta ?? ev.text ?? '',
+      runId: ev.runId || ev.sessionId || ev.parentToolUseId || 'nosession',
+    };
+  }
+  if (ev.kind === 'assistant-thinking-partial') {
+    return {
+      ...ev,
+      kind: 'thinking-stream',
+      evtType: ev.evtType || 'thinking_delta',
+      delta: ev.delta ?? ev.text ?? '',
+      runId: ev.runId || ev.sessionId || ev.parentToolUseId || 'nosession',
+    };
+  }
+  if ((ev.kind === 'text-stream' || ev.kind === 'thinking-stream') && !ev.runId) {
+    return { ...ev, runId: ev.sessionId || ev.parentToolUseId || 'nosession' };
+  }
+  return ev;
+}
+
+function sdkResultToPromptError(ev) {
+  return {
+    ...ev,
+    kind: 'prompt-error',
+    error: ev.error || ev.text || (Array.isArray(ev.errors) ? ev.errors.join('\n') : '') || 'Agent SDK turn failed',
+    provider: ev.provider || 'LiteLLM Anthropic Messages',
+    model: ev.model || '',
+    api: ev.api || '/v1/messages',
+  };
 }
 
 // Ensure a transcript record exists for this tabId and is subscribed to the
@@ -350,10 +375,9 @@ function ensureTranscript(tabId, agentId) {
 	    activity: null,
 	    thinkingLevel: null,
 	    autoScroll: true,
-    // Live-streaming state (from raw-stream.jsonl deltas). Each runId gets its
-    // own growing entry per kind. After the stream ends we remember the final
-    // text briefly so we can suppress the duplicate JSONL event that lands
-    // moments later (same content, arriving through the session log).
+    // Live-streaming state from SDK partial-message deltas. Each runId gets a
+    // growing entry per kind; after stream end, remember final text briefly so
+    // durable transcript echoes do not duplicate the live bubble.
 	    streamEntries: new Map(),        // key "<runId>:<kind>" -> { el, textNode, content }
 	    recentlyStreamed: [],            // [{ kind: 'thinking'|'text', content, ts }]
 	    streamedTextKeys: new Map(),     // normalized "kind:text" -> ts; robust JSONL duplicate suppression
@@ -364,12 +388,26 @@ function ensureTranscript(tabId, agentId) {
 	    completedAt: null,
 	  };
   state.transcripts.set(tabId, rec);
-  const es = new EventSource(`/api/agents/${encodeURIComponent(agentId)}/transcript`);
+  const es = new EventSource(`/api/agents/${encodeURIComponent(agentId)}/transcript?stream=v4`);
   es.onmessage = e => {
     let ev;
     try { ev = JSON.parse(e.data); } catch { return; }
+    ev = normalizeIncomingTranscriptEvent(ev);
+    if (!ev) return;
 
-    // Raw-stream deltas: don't buffer, don't push to events list, just update
+    // The SDK result object is control metadata. The assistant answer already
+    // arrives as assistant-text, so success results should not become chat
+    // bubbles. Error results are rendered as explicit prompt failures.
+    if (ev.kind === 'result' && !ev.isError) {
+      finalizeActiveStreamEntries(rec);
+      if (rec.sending && eventBelongsToCurrentTurn(rec, ev)) finishTranscriptTurn(rec, tabId);
+      return;
+    }
+    if (ev.kind === 'error' || (ev.kind === 'result' && ev.isError)) {
+      ev = sdkResultToPromptError(ev);
+    }
+
+    // SDK partial deltas: don't buffer, don't push to events list, just update
     // the live entry. They arrive many-per-second and would blow out memory.
     if (ev.kind === 'thinking-stream' || ev.kind === 'text-stream') {
       const isText = ev.kind === 'text-stream';
@@ -380,10 +418,11 @@ function ensureTranscript(tabId, agentId) {
       return;
     }
 
-    // Suppress the JSONL thinking/assistant-text entry if we just finished
+    // Suppress durable thinking/assistant-text echoes if we just finished
     // streaming the same content live. Keeps the UI clean.
     if (ev.kind === 'thinking' || ev.kind === 'assistant-text') {
       const matchKind = ev.kind === 'thinking' ? 'thinking' : 'text';
+      removeActiveStreamEntries(rec, ev.kind);
       if (wasRecentlyStreamed(rec, matchKind, ev.text)) {
         reconcileStreamedEvent(rec, ev);
         if (ev.kind === 'assistant-text' && rec.sending && eventBelongsToCurrentTurn(rec, ev)) {
@@ -394,7 +433,7 @@ function ensureTranscript(tabId, agentId) {
       }
     }
 
-    // Ack the durable JSONL user-message against the optimistic local bubble
+    // Ack the durable user-message against the optimistic local bubble
     // instead of appending a duplicate. This keeps Sam's input visible during
     // the slow first-token/tool-call gap and removes the faded optimistic style
     // once the gateway has persisted the message.
@@ -456,7 +495,7 @@ function stripSessionTimestampPrefix(value) {
   );
 }
 
-function stripOpenClawControlTags(value) {
+function stripHarnessControlTags(value) {
   return String(value || '')
     .replace(/\[\[\s*\/?reply_to_current\s*\]\]\s*/gi, '')
     .replace(/\[\s*\/?reply_to_current\s*\]\s*/gi, '')
@@ -465,18 +504,18 @@ function stripOpenClawControlTags(value) {
 }
 
 function displayTranscriptText(value) {
-  return stripOpenClawControlTags(value);
+  return stripHarnessControlTags(value);
 }
 
 function normalizeTranscriptText(value) {
-  return stripOpenClawControlTags(stripSessionTimestampPrefix(value))
+  return stripHarnessControlTags(stripSessionTimestampPrefix(value))
     .replace(/\r\n/g, '\n')
     .replace(/[ \t]+$/gm, '')
     .trim();
 }
 
-// Rough equality — OpenClaw sometimes appends a trailing newline or strips
-// leading whitespace when finalizing a message, so we compare normalized content.
+// Rough equality: streamed and durable transcript text can differ by trailing
+// newlines or leading whitespace, so compare normalized content.
 function textsMatch(a, b) {
   if (!a || !b) return false;
   const x = normalizeTranscriptText(a);
@@ -632,6 +671,57 @@ function removeRecentStreamedPreToolText(rec, toolTs) {
   }
 }
 
+function removeActiveStreamEntries(rec, entryKind) {
+  if (!rec?.streamEntries) return false;
+  let removed = false;
+  for (const [key, entry] of rec.streamEntries) {
+    if (!key.endsWith(`:${entryKind}`)) continue;
+    entry.el?.remove();
+    rec.streamEntries.delete(key);
+    removed = true;
+  }
+  return removed;
+}
+
+function finalizeActiveStreamEntries(rec) {
+  if (!rec?.streamEntries) return false;
+  let finalized = false;
+  for (const [key, entry] of [...rec.streamEntries]) {
+    if (!entry || !entry.el) {
+      rec.streamEntries.delete(key);
+      continue;
+    }
+    const isThinking = key.endsWith(':thinking');
+    const durableKind = isThinking ? 'thinking' : 'assistant-text';
+    const content = displayTranscriptText(entry.rawContent || entry.content || '');
+    if (entry.el) {
+      entry.el.classList.remove('streaming');
+      const cursor = entry.el.querySelector('.stream-cursor');
+      if (cursor) cursor.remove();
+      if (!isThinking && entry.textNode && entry.textNode.parentNode) {
+        try {
+          const ts = entry.el.querySelector('.ts')?.outerHTML || '';
+          entry.el.innerHTML = `${ts}${renderMarkdown(content)}`;
+          enhanceMarkdownContent(entry.el);
+        } catch (_) { /* keep plain text on error */ }
+      }
+    }
+    if (content && findEventIndexByText(rec, durableKind, content) < 0) {
+      rec.events.push({
+        kind: durableKind,
+        text: content,
+        ts: Date.now(),
+        _streamed: true,
+      });
+    }
+    if (content) markRecentlyStreamed(rec, isThinking ? 'thinking' : 'text', content);
+    rec.streamEntries.delete(key);
+    finalized = true;
+  }
+  pruneRecentlyStreamed(rec);
+  return finalized;
+}
+
 function findVisibleUserMessage(rec, text) {
   if (!rec?.el || !rec.el.isConnected) return null;
   const candidates = [...rec.el.querySelectorAll('.entry.user-message')];
@@ -692,6 +782,7 @@ function transcriptStatusText(rec, label) {
   if (activity === 'thinking') return `${base} is thinking live${ageText}…`;
   if (activity === 'responding') return `${base} is responding live${ageText}…`;
 	  if (activity === 'working') return `${base} is working${ageText}…`;
+	  if (activity === 'stopping') return `${base} is stopping the current response…`;
 	  if (activity === 'finalizing') return `${base} is finalizing the answer…`;
 	  if (activity === 'waiting' && rec?.thinkingLevel === 'off') return `${base} is waiting for the first token${ageText} (thinking stream off)…`;
 	  if (activity === 'waiting' && age >= 60_000) return `${base} is still waiting for the first token${ageText}…`;
@@ -760,7 +851,6 @@ async function refreshChatTurnStatus(tabId, agentId) {
 
 function refreshVisibleChatTurnStatuses() {
   if (state.transcripts.has('glados-chat')) refreshChatTurnStatus('glados-chat', 'glados');
-  if (state.transcripts.has('chatbot')) refreshChatTurnStatus('chatbot', 'atlas');
 }
 
 function handleStreamDelta(rec, ev) {
@@ -775,8 +865,7 @@ function handleStreamDelta(rec, ev) {
   const nextContent = displayTranscriptText(nextRawContent);
   const meaningfulThinking = normalizeTranscriptText(nextContent).length >= 80;
 
-  // Raw thinking can arrive as one-token scratch fragments, especially when the
-  // gateway replays/compacts a turn. Those fragments are status signal, not
+  // Thinking can arrive as one-token scratch fragments. Those fragments are status signal, not
   // useful transcript. Hold them in memory; only render/persist a thinking
   // bubble once it becomes a real paragraph.
   if (isThinking && !meaningfulThinking) {
@@ -791,6 +880,14 @@ function handleStreamDelta(rec, ev) {
     } else if (!isEnd) {
       rec.streamEntries.set(streamKey, { el: null, textNode: null, rawContent: nextRawContent, content: nextContent });
     }
+    return;
+  }
+
+  // The durable assistant-text event can win the race against text_end and
+  // remove the live stream entry first. A trailing end event must never create
+  // a new timestamp-only bubble when there is no stream left to finalize.
+  if (isEnd && !entry) {
+    if (rec.autoScroll !== false) scheduleStickyScroll(rec.el, rec);
     return;
   }
 
@@ -851,7 +948,7 @@ function handleStreamDelta(rec, ev) {
     entry.el?.classList.remove('streaming');
     const cursor = entry.el?.querySelector('.stream-cursor');
     if (cursor) cursor.remove();
-    // v3.1: upgrade finalized assistant-text from plain text to rendered markdown.
+    // v4: upgrade finalized assistant-text from plain text to rendered markdown.
     // Thinking blocks stay plain (they're notes, not formatted output).
     if (!isThinking && entry.textNode && entry.textNode.parentNode) {
       try {
@@ -916,11 +1013,11 @@ function renderAgentPane(agentId) {
   scrollToBottom(wrap, rec);
 }
 
-// v3.1 — Chat input history + retry.
+// v4 — Chat input history + retry.
 // Per-chat ring buffer of user messages, persisted to localStorage. Arrow-up /
 // Arrow-down in an empty textarea (or one whose value matches the currently
 // recalled entry) scrolls back/forward through history. Separate keys per chat
-// surface so GLaDOS history doesn't bleed into Atlas.
+// surface so GLaDOS history does not bleed between panes.
 const CHAT_HISTORY_MAX = 50;
 function chatHistoryKey(histKey) { return `glados-dash.chat-history.${histKey}`; }
 function loadChatHistory(histKey) {
@@ -940,7 +1037,7 @@ function pushChatHistory(histKey, msg) {
   while (list.length > CHAT_HISTORY_MAX) list.shift();
   try { localStorage.setItem(chatHistoryKey(histKey), JSON.stringify(list)); } catch {}
 }
-// v3.1 Tier 3 #10 — auto-growing textarea. Grows up to `maxVh` viewport height
+// v4 Tier 3 #10 — auto-growing textarea. Grows up to `maxVh` viewport height
 // fraction before inner scroll kicks in. Shrinks as content is removed.
 function attachAutoGrow(ta, { minHeightPx = 60, maxVh = 0.4 } = {}) {
   const resize = () => {
@@ -999,7 +1096,7 @@ function attachChatHistoryNav(ta, histKey) {
   ta._gladosHistoryReset = () => { navState.index = null; navState.draft = ''; };
 }
 
-// v3.1 — Retry: re-post a prior user message. Both chat surfaces register a
+// v4 — Retry: re-post a prior user message. Both chat surfaces register a
 // retrier here keyed by their agentId; the context-menu handler on a rendered
 // .user-message entry calls the right one.
 const chatRetriers = new Map(); // agentId -> (msg: string) => void
@@ -1045,8 +1142,9 @@ function renderChatPane() {
   const inputRow = document.createElement('div');
   inputRow.className = 'chat-input';
   inputRow.innerHTML = `
-    <textarea id="chat-text" placeholder="Talk to GLaDOS (Cmd+Enter to send)…"></textarea>
+    <textarea id="chat-text" placeholder="Talk to GLaDOS (Enter to send, Shift+Enter for newline)…"></textarea>
     <button id="chat-send">Send</button>
+    <button id="chat-stop" class="secondary" title="Stop the current response" disabled>Stop</button>
   `;
   chat.appendChild(transcript);
   chat.appendChild(sendingEl);
@@ -1107,7 +1205,7 @@ function renderChatPane() {
     updateSendingIndicator(tabId);
 
     // Fire-and-forget. The assistant's response streams back via SSE as soon
-    // as openclaw writes it to the JSONL — we do not need to await the POST.
+    // as the Agent SDK emits partial messages; we do not need to await the POST.
     fetch('/api/chat/glados', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1126,264 +1224,66 @@ function renderChatPane() {
     });
   };
   const send = () => dispatch();
+  const stop = () => stopChatTurnFromUi(tabId, 'glados');
   chatRetriers.set('glados', (msg) => dispatch(msg));
   document.getElementById('chat-send').addEventListener('click', send);
+  document.getElementById('chat-stop').addEventListener('click', stop);
   const ta = document.getElementById('chat-text');
-  ta.addEventListener('keydown', ev => {
-    if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); send(); }
-  });
   attachChatHistoryNav(ta, 'glados');
   attachAutoGrow(ta, {});
   attachSlashMenu(ta, inputRow, line => { ta.value = line; send(); });
+  ta.addEventListener('keydown', ev => {
+    if (ev.defaultPrevented) return;
+    if (ev.key === 'Enter' && !ev.shiftKey) {
+      ev.preventDefault();
+      send();
+    }
+  });
 }
 
-// --- ChatBot (Atlas) pane --------------------------------------------------
-// Personal assistant on local Ollama. Same streaming transcript as the other
-// agent tabs, plus a model picker (ollama only), clear-session, and an
-// image-upload button. Posts to /api/chat/atlas; responses arrive over the
-// same SSE transcript stream as every other agent.
-function renderChatBotPane() {
-  const tabId = 'chatbot';
-  const chat = document.createElement('div');
-  chat.className = 'chat-pane';
-
-  // Header: title + model selector + clear
-  const header = document.createElement('div');
-  header.className = 'chatbot-header';
-  header.innerHTML = `
-    <div class="chatbot-title">
-      <span class="chatbot-name">Atlas</span>
-      <span class="chatbot-hint">assistant · <span id="chatbot-model-label">—</span></span>
-    </div>
-    <div class="chatbot-controls">
-      <select id="chatbot-model" title="Switch model (restarts the gateway — takes ~3s)"></select>
-      <button id="chatbot-clear" title="Archive the current Atlas session and start fresh">Clear</button>
-    </div>
-  `;
-
-  const transcript = document.createElement('div');
-  transcript.className = 'transcript';
-
-  const sendingEl = document.createElement('div');
-  sendingEl.className = 'sending-indicator';
-  sendingEl.id = 'chatbot-sending';
-  sendingEl.style.display = 'none';
-  sendingEl.textContent = 'Atlas is thinking…';
-
-  const inputRow = document.createElement('div');
-  inputRow.className = 'chat-input chatbot-input';
-  inputRow.innerHTML = `
-    <textarea id="chatbot-text" placeholder="Talk to Atlas (Cmd+Enter to send)…"></textarea>
-    <div class="chatbot-input-actions">
-      <input id="chatbot-image-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none" />
-      <button id="chatbot-attach" title="Attach image" class="icon-btn">📎</button>
-      <button id="chatbot-send">Send</button>
-    </div>
-    <div id="chatbot-attached" class="chatbot-attached"></div>
-  `;
-
-  chat.appendChild(header);
-  chat.appendChild(transcript);
-  chat.appendChild(sendingEl);
-  chat.appendChild(inputRow);
-  paneEl.appendChild(chat);
-
-  const rec = ensureTranscript(tabId, 'atlas');
-  rec.el = transcript;
-  rec.autoScroll = true;
-  attachScrollTracker(transcript, rec);
-  for (const ev of rec.events) appendEntry(transcript, ev, rec);
-  scrollToBottom(transcript, rec);
-  updateChatBotSendingIndicator();
-  refreshChatTurnStatus(tabId, 'atlas');
-
-  // --- Model selector: fetch known models + current atlas model ---
-  const modelSel = document.getElementById('chatbot-model');
-  const modelLabel = document.getElementById('chatbot-model-label');
-  async function populateModels() {
-    try {
-      const [models, details] = await Promise.all([
-        fetch('/api/models').then(r => r.json()),
-        fetch('/api/agents/atlas/details').then(r => r.json()),
-      ]);
-      const displayModel = m => String(m || '')
-        .replace(/^ollama-local\//, '')
-        .replace(/^custom-llmapi-redteamstuff-com\//, '');
-      modelSel.innerHTML = (models.models || [])
-        .map(m => `<option value="${escapeHtml(m)}">${escapeHtml(displayModel(m))}</option>`)
-        .join('');
-      const current = details?.model || 'ollama-local/glm-4.7-flash:latest';
-      modelSel.value = current;
-      modelLabel.textContent = displayModel(current);
-    } catch (e) { modelLabel.textContent = '(model list unavailable)'; }
+async function stopChatTurnFromUi(tabId, agentId) {
+  const rec = state.transcripts.get(tabId);
+  if (!rec?.sending) return;
+  rec.activity = 'stopping';
+  updateSendingIndicator(tabId);
+  const btn = document.getElementById('chat-stop');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Stopping...';
   }
-  populateModels();
-
-  modelSel.addEventListener('change', async () => {
-    const newModel = modelSel.value;
-    if (!newModel) return;
-    modelSel.disabled = true;
-    const origLabel = modelLabel.textContent;
-    modelLabel.textContent = 'switching…';
-    try {
-      const r = await fetch('/api/agents/atlas/model', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: newModel }),
-      });
-      const j = await r.json();
-      if (!j.ok) throw new Error(j.error || 'model change failed');
-      // Model change requires a gateway restart to take effect (openclaw caches
-      // agent config in-memory). Restart now — takes ~3s.
-      modelLabel.textContent = 'restarting gateway…';
-      const rr = await fetch('/api/gateway/restart', { method: 'POST' });
-      const rj = await rr.json();
-      if (!rj.ok) throw new Error(rj.error || 'gateway restart failed');
-      modelLabel.textContent = newModel
-        .replace(/^ollama-local\//, '')
-        .replace(/^custom-llmapi-redteamstuff-com\//, '');
-    } catch (e) {
-      alert('Model switch failed: ' + e.message);
-      modelLabel.textContent = origLabel;
-    } finally {
-      modelSel.disabled = false;
-    }
-  });
-
-  // --- Clear session ---
-  document.getElementById('chatbot-clear').addEventListener('click', async () => {
-    if (!confirm('Clear Atlas session? This archives the current conversation and starts fresh.')) return;
-    try {
-      const r = await fetch('/api/agents/atlas/reset-session', { method: 'POST' });
-      const j = await r.json();
-      if (!j.ok) throw new Error(j.error || 'reset failed');
-      const rec2 = state.transcripts.get(tabId);
-      if (rec2) { try { rec2.es && rec2.es.close(); } catch {} state.transcripts.delete(tabId); }
-      renderPane();
-    } catch (e) { alert('clear failed: ' + e.message); }
-  });
-
-  // --- Image upload ---
-  // Staged image paths accumulate here until the next send, then get appended
-  // to the outgoing message as "Attached: <path>" lines so Atlas can read them.
-  const stagedImages = [];
-  const attachedEl = document.getElementById('chatbot-attached');
-  function renderAttached() {
-    attachedEl.innerHTML = stagedImages.length
-      ? stagedImages.map((p, i) => `<span class="attached-chip" data-i="${i}">📎 ${p.split('/').pop()} <span class="remove" data-remove="${i}">×</span></span>`).join('')
-      : '';
-  }
-  attachedEl.addEventListener('click', ev => {
-    const i = ev.target.dataset?.remove;
-    if (i !== undefined) { stagedImages.splice(Number(i), 1); renderAttached(); }
-  });
-  document.getElementById('chatbot-attach').addEventListener('click', () => {
-    document.getElementById('chatbot-image-file').click();
-  });
-  document.getElementById('chatbot-image-file').addEventListener('change', async ev => {
-    const file = ev.target.files?.[0];
-    if (!file) return;
-    ev.target.value = '';
-    const reader = new FileReader();
-    reader.onload = async () => {
-      try {
-        const r = await fetch('/api/chat/atlas/upload', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dataUrl: reader.result, filename: file.name }),
-        });
-        const j = await r.json();
-        if (!j.ok) throw new Error(j.error || 'upload failed');
-        stagedImages.push(j.path);
-        renderAttached();
-      } catch (e) { alert('Image upload failed: ' + e.message); }
-    };
-    reader.readAsDataURL(file);
-  });
-
-  // --- Send ---
-  const dispatch = (override) => {
-    const ta = document.getElementById('chatbot-text');
-    let msg = override !== undefined ? override : ta.value.trim();
-    if (!msg && stagedImages.length === 0 && override === undefined) return;
-    // Local slash commands still work inside the chatbot pane.
-    if (msg.startsWith('/')) {
-      if (override === undefined) { ta.value = ''; ta.focus(); }
-      runSlashCommand(msg, rec);
-      return;
-    }
-    if (override === undefined && stagedImages.length) {
-      const list = stagedImages.map(p => `- ${p}`).join('\n');
-      msg = (msg ? msg + '\n\n' : '') + `Sam attached ${stagedImages.length} image(s) — use the read tool or your vision capability to inspect them:\n${list}`;
-      stagedImages.length = 0;
-      renderAttached();
-    }
-    if (override === undefined) {
-      ta.value = '';
-      ta.focus();
-      ta._gladosHistoryReset?.();
-      ta._gladosAutoGrow?.();
-    }
-    pushChatHistory('atlas', msg);
-
-    const clientId = `user-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const optimistic = { kind: 'user-message', text: msg, ts: Date.now(), _optimistic: true, clientId };
-    rec.events.push(optimistic);
-    rec.pendingUserMessages.push({ clientId, text: msg, ts: optimistic.ts });
-    rec.autoScroll = true;
-    if (rec.el && rec.el.isConnected) appendEntry(rec.el, optimistic, rec);
-
-    rec.sending = true;
-    rec.activity = 'waiting';
-    rec.turnStartedAt = Date.now();
-    rec.turnAgeMs = 0;
-    rec.firstTokenSeenAt = null;
-    rec.completedAt = null;
-    updateChatBotSendingIndicator();
-
-    fetch('/api/chat/atlas', {
+  try {
+    const r = await fetch(`/api/chat/${encodeURIComponent(agentId)}/stop`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg }),
-    }).then(r => r.json()).then(j => {
-      if (!j.ok) {
-        logEvent('ended', 'atlas chat error: ' + (j.error || 'unknown'));
-        finishTranscriptTurn(rec, tabId);
-      }
-    }).catch(e => {
-      logEvent('ended', 'atlas chat exception: ' + e.message);
-      finishTranscriptTurn(rec, tabId);
+      body: JSON.stringify({ reason: 'dashboard stop button' }),
     });
-  };
-  const send = () => dispatch();
-  chatRetriers.set('atlas', (msg) => dispatch(msg));
-  document.getElementById('chatbot-send').addEventListener('click', send);
-  const taEl = document.getElementById('chatbot-text');
-  taEl.addEventListener('keydown', ev => {
-    if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); send(); }
-  });
-  attachChatHistoryNav(taEl, 'atlas');
-  attachAutoGrow(taEl, {});
+    const j = await r.json().catch(() => ({}));
+    logEvent(j.stopped ? 'ended' : 'meta', j.stopped ? `stopped ${agentId}` : `${agentId} was not running`);
+  } catch (e) {
+    logEvent('ended', `stop ${agentId} failed: ${e.message}`);
+  } finally {
+    finishTranscriptTurn(rec, tabId);
+  }
 }
 
-function updateChatBotSendingIndicator() {
-  const el = document.getElementById('chatbot-sending');
-  if (!el) return;
-  const rec = state.transcripts.get('chatbot');
-  el.style.display = rec?.sending ? 'block' : 'none';
-  if (rec?.sending) el.textContent = transcriptStatusText(rec, 'Atlas');
+function updateChatInputControls(tabId) {
+  if (state.currentTab !== tabId) return;
+  const rec = state.transcripts.get(tabId);
+  const stopBtn = document.getElementById('chat-stop');
+  if (!stopBtn) return;
+  const stopping = rec?.activity === 'stopping';
+  stopBtn.disabled = !rec?.sending || stopping;
+  stopBtn.textContent = stopping ? 'Stopping...' : 'Stop';
 }
 
 function updateSendingIndicator(tabId) {
-  // Atlas has its own indicator element with a different id; route based on
-  // tabId so the SSE-driven sending-clear works for both chat surfaces.
-  if (tabId === 'chatbot') return updateChatBotSendingIndicator();
   if (state.currentTab !== tabId) return;
   const el = document.getElementById('sending-indicator');
   if (!el) return;
   const rec = state.transcripts.get(tabId);
   el.style.display = rec?.sending ? 'block' : 'none';
   if (rec?.sending) el.textContent = transcriptStatusText(rec, 'GLaDOS');
+  updateChatInputControls(tabId);
 }
 
 function scrollToBottom(container, rec) {
@@ -1412,7 +1312,7 @@ function renderCollapsible(text, extraClass = '') {
   return `<pre class="collapsible ${extraClass}">${safe}</pre><span class="expand-toggle">▸ expand (${text.length.toLocaleString()} chars)</span>`;
 }
 
-// v3.1: Markdown rendering for assistant-text entries.
+// v4: Markdown rendering for assistant-text entries.
 // Pipes text through `marked` + `DOMPurify`, retargets links, and attaches
 // copy buttons to code blocks. Falls back to plain <pre> if libs unavailable.
 function renderMarkdown(text, extraClass = '') {
@@ -1468,6 +1368,7 @@ function enhanceMarkdownContent(container) {
 }
 
 function appendEntry(container, ev, rec) {
+  if (ev.kind === 'result' && !ev.isError) return;
   const el = document.createElement('div');
   const kind = ev.kind;
   const classes = ['entry', kind];
@@ -1475,12 +1376,12 @@ function appendEntry(container, ev, rec) {
   if (ev._optimistic) classes.push('optimistic');
   el.className = classes.join(' ');
   // Stamp the owning agent so CSS can show "user/<agent>-input" and label the
-  // assistant bubble with the agent's name ("glados", "atlas", etc.).
+  // assistant bubble with the agent's name ("glados", "webapp-recon", etc.).
   if (rec?.agentId) el.dataset.agent = rec.agentId;
   const ts = ev.ts ? new Date(ev.ts).toLocaleTimeString() : '';
 
   if (kind === 'assistant-text') {
-    // v3.1: markdown for assistant output (bold, code, links, lists, headers).
+    // v4: markdown for assistant output (bold, code, links, lists, headers).
     el.innerHTML = `<span class="ts">${ts}</span>${renderMarkdown(displayTranscriptText(ev.text || ''))}`;
     enhanceMarkdownContent(el);
   } else if (kind === 'thinking' || kind === 'user-message') {
@@ -1490,20 +1391,22 @@ function appendEntry(container, ev, rec) {
       el.dataset.messageText = ev.text || '';
       if (ev.clientId) el.dataset.clientId = ev.clientId;
     }
-    // v3.1: right-click a user message to retry. Only on surfaces that
-    // registered a retrier (glados chat, atlas chat) — agent transcripts
+    // v4: right-click a user message to retry. Only on surfaces that
+    // registered a retrier (GLaDOS chat) — agent transcripts
     // don't have a retrier because they're not user-driven.
     if (kind === 'user-message' && rec?.agentId && chatRetriers.has(rec.agentId)) {
       installChatRetryContextMenu(el, rec.agentId, ev.text || '');
     }
   } else if (kind === 'tool-call') {
-    const args = ev.arguments !== undefined ? JSON.stringify(ev.arguments, null, 2) : '';
+    const args = ev.arguments !== undefined
+      ? JSON.stringify(ev.arguments, null, 2)
+      : (ev.toolInput !== undefined ? JSON.stringify(ev.toolInput, null, 2) : '');
     el.innerHTML = `<span class="ts">${ts}</span><span class="tool-name">→ ${escapeHtml(ev.toolName || '?')}</span>${renderCollapsible(args, 'args')}`;
   } else if (kind === 'tool-result') {
     const header = ev.isError ? '✗ error' : '← result';
     const extra = (ev.exitCode !== undefined ? ` exit=${ev.exitCode}` : '') +
                   (ev.durationMs !== undefined ? ` ${ev.durationMs}ms` : '');
-    // v3.1: show an explicit "[body truncated]" affordance when the tool
+    // v4: show an explicit "[body truncated]" affordance when the tool
     // result exceeds our 8KB preview cap instead of silently slicing. The
     // full text is held on the event; clicking the button re-renders with
     // the full string in place.
@@ -1530,6 +1433,17 @@ function appendEntry(container, ev, rec) {
     }
   } else if (kind === 'meta') {
     el.innerHTML = `<span class="ts">${ts}</span>${escapeHtml(JSON.stringify(ev))}`;
+  } else if (kind === 'harness-init') {
+    const serverText = Array.isArray(ev.mcpServers)
+      ? ev.mcpServers.map(s => `${s.name}:${s.status || 'unknown'}`).join(' ')
+      : '';
+    el.innerHTML = `<span class="ts">${ts}</span>${escapeHtml(ev.text || 'Agent SDK initialized')}` +
+      (serverText ? `<pre>${escapeHtml(serverText)}</pre>` : '');
+  } else if (kind === 'liveness') {
+    el.innerHTML = `<span class="ts">${ts}</span>${escapeHtml(ev.text || ev.state || 'liveness update')}`;
+  } else if (kind === 'permission-denied') {
+    el.innerHTML = `<span class="ts">${ts}</span><span class="tool-name">permission denied ${escapeHtml(ev.toolName || '')}</span>` +
+      renderCollapsible(ev.text || ev.decisionReason || '', 'out');
   } else if (kind === 'session-start') {
     el.innerHTML = `<span class="ts">${ts}</span>session started (${escapeHtml(ev.cwd || '')})`;
   } else if (kind === 'prompt-error') {
@@ -1592,10 +1506,8 @@ function logEvent(kind, text) {
   eventsEl.scrollTop = eventsEl.scrollHeight;
 }
 
-// v3.1 — Burp / patch-integrity health banner.
-// Polls /api/health/burp every 5s; shows a red banner on failure with
-// actionable fix buttons. Dismissed state persists only until the next
-// distinct failure signature.
+// Proxy health banner. Startup only warns when the selected proxy backend
+// reports a real problem.
 const healthBannerState = { dismissedSig: null, lastSig: null };
 async function refreshHealthBanner() {
   const banner = document.getElementById('health-banner');
@@ -1603,7 +1515,7 @@ async function refreshHealthBanner() {
   if (!banner || !msg) return;
   let data;
   try {
-    const r = await fetch('/api/health/burp');
+    const r = await fetch('/api/health/proxy');
     data = await r.json();
   } catch {
     banner.classList.remove('hidden');
@@ -1618,50 +1530,24 @@ async function refreshHealthBanner() {
   }
 
   const issues = [];
-  if (data.stale) issues.push('stale-sentinel');
-  if (data.burpProxy && !data.burpProxy.ok) issues.push('burp-proxy-down:8080');
-  if (data.burpExtApi && !data.burpExtApi.ok) issues.push('burp-ext-down:1338');
-  if (data.patchAls && !data.patchAls.ok) issues.push('als-patch-missing');
-  if (data.patchSsrf && !data.patchSsrf.ok) issues.push('ssrf-patch-missing');
+  const backend = data.backend || 'proxy';
   if (data.error) issues.push(data.error);
 
   const sig = issues.join('|');
   healthBannerState.lastSig = sig;
   if (sig === healthBannerState.dismissedSig) return;
 
-  msg.textContent = `Burp health: ${issues.join(' · ') || 'unknown failure'}`;
+  msg.textContent = `Proxy health (${backend}): ${issues.join(' · ') || 'unknown failure'}`;
   banner.classList.remove('hidden');
 }
 
 function setupHealthBanner() {
-  const reapplyBtn = document.getElementById('health-reapply-btn');
   const detailsBtn = document.getElementById('health-details-btn');
   const dismissBtn = document.getElementById('health-dismiss-btn');
-  const msg = document.getElementById('health-banner-msg');
-
-  reapplyBtn?.addEventListener('click', async () => {
-    reapplyBtn.disabled = true;
-    reapplyBtn.textContent = 'Applying…';
-    try {
-      const r = await fetch('/api/health/burp/reapply-patches', { method: 'POST' });
-      const data = await r.json();
-      if (data.ok) {
-        msg.textContent = 'Patches re-applied — restart gateway to load (or it will self-correct within 60s).';
-        logEvent('ok', 'patches re-applied via dashboard');
-      } else {
-        msg.textContent = `Re-apply failed: ${data.error || 'unknown'}`;
-      }
-    } catch (e) {
-      msg.textContent = `Re-apply request failed: ${e.message}`;
-    } finally {
-      reapplyBtn.disabled = false;
-      reapplyBtn.textContent = 'Re-apply patches';
-    }
-  });
 
   detailsBtn?.addEventListener('click', async () => {
     try {
-      const r = await fetch('/api/health/burp');
+      const r = await fetch('/api/health/proxy');
       const data = await r.json();
       alert(JSON.stringify(data, null, 2));
     } catch (e) { alert('health fetch failed: ' + e.message); }
@@ -1683,7 +1569,7 @@ function subscribeLobby() {
     const arr = JSON.parse(e.data);
     for (const a of arr) {
       state.active.set(a.agentId, { sessionId: a.sessionId });
-      if (a.agentId !== 'glados' && a.agentId !== 'atlas' && !state.openTabs.find(t => t.id === a.agentId)) {
+      if (a.agentId !== 'glados' && !state.openTabs.find(t => t.id === a.agentId)) {
         openAgentTab(a.agentId);
       }
     }
@@ -1694,13 +1580,7 @@ function subscribeLobby() {
     state.active.set(info.agentId, { sessionId: info.sessionId });
     logEvent('started', `${info.agentId} session-started`);
     renderAgentList();
-    if (info.agentId === 'atlas') {
-      if (!state.openTabs.find(t => t.id === 'chatbot')) {
-        state.openTabs.push({ id: 'chatbot', kind: 'chatbot', label: 'ChatBot' });
-      }
-      if (state.currentTab === 'atlas') setCurrentTab('chatbot');
-      else renderTabs();
-    } else if (info.agentId !== 'glados' && !state.openTabs.find(t => t.id === info.agentId)) {
+    if (info.agentId !== 'glados' && !state.openTabs.find(t => t.id === info.agentId)) {
       openAgentTab(info.agentId);
     }
   });
@@ -1708,6 +1588,34 @@ function subscribeLobby() {
     const info = JSON.parse(e.data);
     state.active.delete(info.agentId);
     logEvent('ended', `${info.agentId} session-ended`);
+    renderAgentList();
+  });
+  es.addEventListener('session-reset', e => {
+    const info = JSON.parse(e.data);
+    if (!info.agentId) return;
+    clearTranscriptTab(tabIdForAgent(info.agentId));
+    state.active.delete(info.agentId);
+    logEvent('ended', `${info.agentId} session-reset`);
+    renderAgentList();
+    if (state.currentTab === tabIdForAgent(info.agentId)) renderPane();
+  });
+  es.addEventListener('runtime-refresh', e => {
+    let info = {};
+    try { info = JSON.parse(e.data); } catch {}
+    if (info.resetAll) clearRuntimeTranscriptState(info.agentIds || []);
+    logEvent('ended', 'runtime refreshed');
+  });
+  es.addEventListener('agent-liveness', e => {
+    const info = JSON.parse(e.data);
+    if (!info.agentId) return;
+    if (info.live) {
+      state.active.set(info.agentId, { sessionId: info.sessionId || info.state || 'live' });
+      if (info.agentId !== 'glados' && !state.openTabs.find(t => t.id === info.agentId)) {
+        openAgentTab(info.agentId);
+      }
+    } else {
+      state.active.delete(info.agentId);
+    }
     renderAgentList();
   });
   es.addEventListener('halt', e => {
@@ -1718,24 +1626,9 @@ function subscribeLobby() {
     const { agentId } = JSON.parse(e.data);
     logEvent('started', `resume ${agentId}`);
   });
-  es.addEventListener('halt-all', e => {
-    const { reason } = JSON.parse(e.data);
-    logEvent('ended', `Halt All${reason ? ' — ' + reason : ''}`);
-  });
-  es.addEventListener('resume-all', e => {
-    const info = JSON.parse(e.data);
-    const count = Array.isArray(info.resumed) ? ` (${info.resumed.length} agents)` : '';
-    logEvent('started', `Resume All${count}`);
-  });
-  es.addEventListener('patches-reapplied', () => {
-    logEvent('ok', 'openclaw patches re-applied');
-    refreshHealthBanner();
-  });
   es.addEventListener('chat-turn-started', e => {
     let data = {}; try { data = JSON.parse(e.data); } catch {}
-    const tabId = data.agentId === 'atlas' ? 'chatbot'
-      : data.agentId === 'glados' ? 'glados-chat'
-      : null;
+    const tabId = data.agentId === 'glados' ? 'glados-chat' : null;
     if (!tabId) return;
     const rec = state.transcripts.get(tabId);
     if (rec) {
@@ -1750,9 +1643,7 @@ function subscribeLobby() {
   });
   es.addEventListener('chat-turn-ended', e => {
     let data = {}; try { data = JSON.parse(e.data); } catch {}
-    const tabId = data.agentId === 'atlas' ? 'chatbot'
-      : data.agentId === 'glados' ? 'glados-chat'
-      : null;
+    const tabId = data.agentId === 'glados' ? 'glados-chat' : null;
     if (!tabId) return;
     const rec = state.transcripts.get(tabId);
     if (rec?.sending) {
@@ -1764,7 +1655,7 @@ function subscribeLobby() {
     }
     logEvent('ended', `${data.agentId || 'agent'} turn ended`);
   });
-  // v3.1 — Plan-approval workflow lifecycle events.
+  // v4 — Plan-approval workflow lifecycle events.
   for (const type of ['plan-pending','plan-approved','plan-rejected','plan-modified','plan-complete']) {
     es.addEventListener(type, e => {
       let data = {}; try { data = JSON.parse(e.data); } catch {}
@@ -1790,66 +1681,193 @@ function subscribeLobby() {
   });
 }
 
-// --- Indicators ---
-const rpsPill = document.getElementById('burp-rps');
-
-async function refreshIndicators() {
-  try {
-    const r = await fetch('/api/burp/rps').then(r => r.json());
-    rpsPill.textContent = r.rps == null ? '—' : r.rps.toFixed(2);
-    rpsPill.className = 'pill ' + (r.rps == null ? 'muted' : 'ok');
-  } catch {
-    rpsPill.className = 'pill muted';
-  }
-}
-
 // --- Reports ---
 
 async function renderReportsPane() {
   const wrap = document.createElement('div');
   wrap.className = 'reports-pane';
   wrap.innerHTML = `
-    <div class="reports-tree" id="reports-tree">loading…</div>
+    <aside class="reports-library">
+      <div class="reports-library-header">
+        <div class="reports-library-title-row">
+          <div>
+            <h1>Report Library</h1>
+            <p id="reports-summary">Loading index...</p>
+          </div>
+          <button type="button" class="report-refresh" id="reports-refresh" title="Refresh report library" aria-label="Refresh report library">↻</button>
+        </div>
+        <div class="report-search-field">
+          <input id="reports-search" type="search" placeholder="Search reports" autocomplete="off" aria-label="Search reports" />
+          <button type="button" id="reports-search-clear" title="Clear search" aria-label="Clear search">×</button>
+        </div>
+        <div class="report-source-tabs" role="tablist" aria-label="Report source">
+          <button type="button" role="tab" data-report-scope="all">All</button>
+          <button type="button" role="tab" data-report-scope="reports">Reports</button>
+          <button type="button" role="tab" data-report-scope="investigations">Investigations</button>
+        </div>
+        <div class="report-index-notice" id="report-index-notice" hidden></div>
+      </div>
+      <div class="reports-tree" id="reports-tree"><div class="report-tree-loading">Loading reports...</div></div>
+    </aside>
     <div class="report-viewer" id="report-viewer">
-      <div class="report-empty">Select a report from the tree.</div>
+      <div class="report-empty"><strong>No report selected</strong></div>
     </div>`;
   paneEl.appendChild(wrap);
 
+  const searchEl = wrap.querySelector('#reports-search');
+  const clearEl = wrap.querySelector('#reports-search-clear');
+  const refreshEl = wrap.querySelector('#reports-refresh');
+  searchEl.value = state.reports.query;
+  clearEl.hidden = !state.reports.query;
+  refreshEl.addEventListener('click', () => renderPane());
+
   try {
-    const j = await fetch('/api/reports/tree').then(r => r.json());
-    const treeEl = document.getElementById('reports-tree');
-    treeEl.innerHTML = `<div style="color:var(--fg-dim);font-size:10px;margin-bottom:8px;">${escapeHtml(j.root || '')}</div>`;
-    const ul = document.createElement('ul');
-    ul.appendChild(buildTreeNodes(j.tree || []));
-    treeEl.appendChild(ul);
+    const j = await fetchJson('/api/reports/tree', { timeoutMs: 15000 });
+    const treeEl = wrap.querySelector('#reports-tree');
+    const summaryEl = wrap.querySelector('#reports-summary');
+    const noticeEl = wrap.querySelector('#report-index-notice');
+    const tree = j.tree || [];
+    const totalFiles = countReportFiles(tree);
+    const totalCollections = tree.length;
+    summaryEl.textContent = `${totalFiles.toLocaleString()} ${totalFiles === 1 ? 'file' : 'files'} in ${totalCollections} ${totalCollections === 1 ? 'collection' : 'collections'}`;
+    if (j.truncated) {
+      noticeEl.hidden = false;
+      const limited = Array.isArray(j.truncatedRoots) && j.truncatedRoots.length
+        ? j.truncatedRoots.join(' and ')
+        : 'large collections';
+      noticeEl.textContent = `${limited} limited to ${Number(j.maxEntries || 0).toLocaleString()} indexed items`;
+    }
+
+    const renderTree = () => {
+      const visibleTree = filterReportTree(tree, state.reports.query, state.reports.scope);
+      treeEl.innerHTML = '';
+      if (!visibleTree.length) {
+        treeEl.innerHTML = '<div class="report-tree-empty">No matching files</div>';
+        return;
+      }
+      const ul = document.createElement('ul');
+      ul.className = 'report-tree-root';
+      ul.appendChild(buildTreeNodes(visibleTree, { forceOpen: Boolean(state.reports.query) }));
+      treeEl.appendChild(ul);
+    };
+
+    const syncScopeControls = () => {
+      wrap.querySelectorAll('[data-report-scope]').forEach(button => {
+        const active = button.dataset.reportScope === state.reports.scope;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+    };
+
+    searchEl.addEventListener('input', () => {
+      state.reports.query = searchEl.value.trim();
+      clearEl.hidden = !state.reports.query;
+      renderTree();
+    });
+    clearEl.addEventListener('click', () => {
+      state.reports.query = '';
+      searchEl.value = '';
+      clearEl.hidden = true;
+      searchEl.focus();
+      renderTree();
+    });
+    wrap.querySelectorAll('[data-report-scope]').forEach(button => {
+      button.addEventListener('click', () => {
+        state.reports.scope = button.dataset.reportScope;
+        syncScopeControls();
+        renderTree();
+      });
+    });
+
+    syncScopeControls();
+    renderTree();
+
+    if (state.reports.selectedPath) {
+      const selectedEl = [...treeEl.querySelectorAll('.file')]
+        .find(el => el.dataset.path === state.reports.selectedPath);
+      loadReport(state.reports.selectedPath, selectedEl);
+    }
   } catch (e) {
-    document.getElementById('reports-tree').textContent = 'error loading tree: ' + e.message;
+    wrap.querySelector('#reports-tree').innerHTML = `<div class="report-tree-error">Could not load reports<br><span>${escapeHtml(e.message)}</span></div>`;
   }
 }
 
-function buildTreeNodes(nodes) {
+function countReportFiles(nodes) {
+  return nodes.reduce((total, node) => total + (node.type === 'file' ? 1 : countReportFiles(node.children || [])), 0);
+}
+
+function filterReportTree(nodes, query, scope = 'all') {
+  const needle = String(query || '').trim().toLowerCase();
+  const scoped = scope === 'all' ? nodes : nodes.filter(node => node.path === scope);
+
+  function visit(node) {
+    const ownMatch = !needle || `${node.name} ${node.path || ''}`.toLowerCase().includes(needle);
+    if (node.type === 'file') return ownMatch ? node : null;
+    if (!needle || ownMatch) return node;
+    const children = (node.children || []).map(visit).filter(Boolean);
+    return children.length ? { ...node, children } : null;
+  }
+
+  return scoped.map(visit).filter(Boolean);
+}
+
+function reportFileType(node) {
+  const ext = String(node.name || '').split('.').pop();
+  if (!ext || ext === node.name) return 'FILE';
+  return ext.slice(0, 4).toUpperCase();
+}
+
+function formatReportSize(bytes) {
+  const size = Math.max(0, Number(bytes || 0));
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
+  return `${(size / (1024 * 1024)).toFixed(size < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+function formatReportDate(value) {
+  const date = new Date(Number(value || 0));
+  if (!Number.isFinite(date.getTime()) || !value) return 'Date unavailable';
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(date);
+}
+
+function buildTreeNodes(nodes, { depth = 0, forceOpen = false } = {}) {
   const frag = document.createDocumentFragment();
   for (const n of nodes) {
     const li = document.createElement('li');
+    li.className = n.type === 'dir' ? 'report-dir-node' : 'report-file-node';
     if (n.type === 'dir') {
-      const head = document.createElement('div');
-      head.className = 'dir';
-      head.textContent = n.name;
+      const head = document.createElement('button');
+      head.type = 'button';
+      head.className = `dir${depth === 0 ? ' collection' : ''}`;
+      const fileCount = countReportFiles(n.children || []);
+      head.innerHTML = `<span class="tree-caret" aria-hidden="true">›</span><span class="dir-name">${escapeHtml(n.name)}</span><span class="dir-count">${fileCount.toLocaleString()}</span>`;
       const childUl = document.createElement('ul');
-      childUl.style.display = 'none';
-      childUl.appendChild(buildTreeNodes(n.children || []));
+      let populated = false;
+      const populate = () => {
+        if (populated) return;
+        childUl.appendChild(buildTreeNodes(n.children || [], { depth: depth + 1, forceOpen }));
+        populated = true;
+      };
+      const initiallyOpen = depth === 0 || forceOpen;
+      head.classList.toggle('open', initiallyOpen);
+      head.setAttribute('aria-expanded', initiallyOpen ? 'true' : 'false');
+      childUl.hidden = !initiallyOpen;
+      if (initiallyOpen) populate();
       head.addEventListener('click', () => {
         const open = head.classList.toggle('open');
-        childUl.style.display = open ? 'block' : 'none';
+        head.setAttribute('aria-expanded', open ? 'true' : 'false');
+        childUl.hidden = !open;
+        if (open) populate();
       });
       li.appendChild(head);
       li.appendChild(childUl);
     } else {
-      const fileEl = document.createElement('div');
-      fileEl.className = 'file';
+      const fileEl = document.createElement('button');
+      fileEl.type = 'button';
+      fileEl.className = `file${state.reports.selectedPath === n.path ? ' active' : ''}`;
       fileEl.dataset.path = n.path;
-      const kb = Math.max(1, Math.round((n.size || 0) / 1024));
-      fileEl.innerHTML = `${escapeHtml(n.name)}<span class="meta">${kb}K</span>`;
+      fileEl.title = n.path;
+      fileEl.innerHTML = `<span class="file-kind">${escapeHtml(reportFileType(n))}</span><span class="file-copy"><span class="file-name">${escapeHtml(n.name)}</span><span class="file-details"><span>${escapeHtml(formatReportDate(n.mtime))}</span><span>${escapeHtml(formatReportSize(n.size))}</span></span></span>`;
       fileEl.addEventListener('click', () => loadReport(n.path, fileEl));
       li.appendChild(fileEl);
     }
@@ -1859,6 +1877,7 @@ function buildTreeNodes(nodes) {
 }
 
 async function loadReport(relPath, clickedEl) {
+  state.reports.selectedPath = relPath;
   document.querySelectorAll('.reports-tree .file.active').forEach(e => e.classList.remove('active'));
   if (clickedEl) clickedEl.classList.add('active');
   const viewer = document.getElementById('report-viewer');
@@ -1902,8 +1921,8 @@ function wireReportActions(relPath, fileMeta, viewer) {
       const r = await fetch('/api/reports/file?path=' + encodeURIComponent(relPath), { method: 'DELETE' });
       const j = await r.json();
       if (!j.ok) throw new Error(j.error || 'delete failed');
-      viewer.innerHTML = '<div class="report-empty">deleted — reload tree</div>';
-      renderReportsPane();
+      state.reports.selectedPath = null;
+      renderPane();
     } catch (e) { alert('delete failed: ' + e.message); }
   });
   const editBtn = viewer.querySelector('#report-edit');
@@ -1934,6 +1953,126 @@ function wireReportActions(relPath, fileMeta, viewer) {
 }
 
 // --- Terminal ---
+
+function appendUpdateLine(text, stream = 'info') {
+  const line = { text: String(text || ''), stream, ts: Date.now() };
+  state.update.lines.push(line);
+  if (state.update.lines.length > 2000) state.update.lines.splice(0, state.update.lines.length - 2000);
+  const pre = document.getElementById('update-log');
+  if (pre) {
+    const span = document.createElement('span');
+    span.className = `update-line ${stream}`;
+    span.textContent = line.text.endsWith('\n') ? line.text : `${line.text}\n`;
+    pre.appendChild(span);
+    pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+async function refreshUpdateStatus() {
+  const el = document.getElementById('update-status');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/update/status');
+    const status = await r.json();
+    const dirty = status.dirty ? `dirty (${status.dirtySummary.length} file entries)` : 'clean';
+    const active = status.activeAgents ? `${status.activeAgents} active agent(s)` : 'no active agents';
+    el.textContent = `${status.branch || 'unknown'} @ ${status.head || 'unknown'} · ${dirty} · ${active}`;
+    el.className = status.dirty || status.activeAgents ? 'update-status warn' : 'update-status ok';
+  } catch (e) {
+    el.textContent = `status unavailable: ${e.message}`;
+    el.className = 'update-status err';
+  }
+}
+
+async function startInAppUpdate(force = false) {
+  if (state.update.running) return;
+  if (window.gladosDesktop?.isPackaged) {
+    if (!confirm('Check the signed GLaDOS release feed for an update? Operator data under ~/.glados is never part of the update payload.')) return;
+    state.update.running = true;
+    appendUpdateLine('[desktop] checking signed release feed\n', 'cmd');
+    try {
+      const result = await window.gladosDesktop.checkForUpdate();
+      appendUpdateLine(`[desktop] update check complete${result.version ? `: ${result.version}` : ''}\n`, 'info');
+      await window.gladosDesktop.downloadUpdate();
+      appendUpdateLine('[desktop] signed update downloaded and verified\n', 'info');
+      if (confirm('Update verified. Restart GLaDOS and install it now?')) await window.gladosDesktop.installUpdate();
+    } catch (e) {
+      appendUpdateLine(`[desktop] update failed: ${e.message}\n`, 'stderr');
+    } finally {
+      state.update.running = false;
+    }
+    return;
+  }
+  if (!force && !confirm('Run scripts/update.sh now? Updates are pulled from the configured Git remote and will not modify local operator data.')) return;
+  try { state.update.es?.close(); } catch {}
+  state.update.running = true;
+  appendUpdateLine(`$ scripts/update.sh --no-restart${force ? ' --force' : ''}\n`, 'cmd');
+  const es = new EventSource(`/api/update/stream?force=${force ? '1' : '0'}`);
+  state.update.es = es;
+  const done = () => {
+    state.update.running = false;
+    refreshUpdateStatus();
+  };
+  es.addEventListener('status', e => {
+    const s = JSON.parse(e.data);
+    appendUpdateLine(`[status] branch=${s.branch || '?'} head=${s.head || '?'} dirty=${s.dirty} activeAgents=${s.activeAgents}\n`, 'info');
+  });
+  es.addEventListener('started', e => appendUpdateLine(`[started] ${e.data}\n`, 'info'));
+  es.addEventListener('output', e => {
+    const d = JSON.parse(e.data);
+    appendUpdateLine(d.text || '', d.stream || 'stdout');
+  });
+  es.addEventListener('blocked', e => {
+    appendUpdateLine(`[blocked] ${e.data}\n`, 'stderr');
+    try { es.close(); } catch {}
+    done();
+  });
+  es.addEventListener('error', e => {
+    if (e.data) appendUpdateLine(`[error] ${e.data}\n`, 'stderr');
+    try { es.close(); } catch {}
+    done();
+  });
+  es.addEventListener('complete', e => {
+    const d = JSON.parse(e.data);
+    appendUpdateLine(`\n[complete] code=${d.code} ok=${d.ok} ${d.note || ''}\n`, d.ok ? 'info' : 'stderr');
+    try { es.close(); } catch {}
+    done();
+  });
+}
+
+function renderUpdatePane() {
+  const wrap = document.createElement('div');
+  wrap.className = 'update-pane';
+  wrap.innerHTML = `
+    <div class="update-toolbar">
+      <span id="update-status" class="update-status">checking...</span>
+      <button id="update-run">Run Update</button>
+      <button id="update-force" title="Continue despite active agents or dirty working tree">Force</button>
+      <button id="update-clear">Clear Log</button>
+    </div>
+    <pre id="update-log" class="update-log"></pre>
+  `;
+  paneEl.appendChild(wrap);
+  const pre = wrap.querySelector('#update-log');
+  for (const line of state.update.lines) {
+    const span = document.createElement('span');
+    span.className = `update-line ${line.stream}`;
+    span.textContent = line.text.endsWith('\n') ? line.text : `${line.text}\n`;
+    pre.appendChild(span);
+  }
+  pre.scrollTop = pre.scrollHeight;
+  wrap.querySelector('#update-run').addEventListener('click', () => startInAppUpdate(false));
+  wrap.querySelector('#update-force').addEventListener('click', () => startInAppUpdate(true));
+  wrap.querySelector('#update-clear').addEventListener('click', () => {
+    state.update.lines = [];
+    pre.innerHTML = '';
+  });
+  refreshUpdateStatus();
+  if (state.update.autoStart) {
+    state.update.autoStart = false;
+    setTimeout(() => startInAppUpdate(false), 50);
+  }
+}
 
 let _termInstance = null;
 function renderTerminalPane() {
@@ -1981,17 +2120,17 @@ function renderTerminalPane() {
   setTimeout(onResize, 50);
 }
 
-// --- Proxy (GLaDOS Burp extension on :1338) ---
+// --- Proxy ---
 // One long-lived state object across tab switches so the table keeps scrollback
 // and the EventSource isn't reopened on every render.
 const _proxyState = {
   rows: [], es: null,
   filterText: '', filterStatus: '', filterAgent: '',
   maxRows: 2000, paused: false, selectedId: null, detailCache: new Map(),
-  // v3.1 Tier 2 — click-to-sort column state, persisted in localStorage.
+  // v4 Tier 2 — click-to-sort column state, persisted in localStorage.
   sortKey: (() => { try { return localStorage.getItem('glados-dash.proxy.sortKey') || 'ts'; } catch { return 'ts'; } })(),
   sortDir: (() => { try { return localStorage.getItem('glados-dash.proxy.sortDir') || 'asc'; } catch { return 'asc'; } })(),
-  // v3.1 Tier 3 #9 — multi-row selection for bulk export. `selectedId` still
+  // v4 Tier 3 #9 — multi-row selection for bulk export. `selectedId` still
   // tracks the single row that populates the detail panes (last click); the
   // set below covers Shift+click ranges and Cmd/Ctrl+click toggles.
   selectedIds: new Set(),
@@ -2015,7 +2154,7 @@ function renderProxyPane() {
       </select>
       <input type="text" id="proxy-filter-agent" placeholder="agent tag…" />
       <button id="proxy-pause" title="Pause the live stream (keeps existing rows)">Pause</button>
-      <button id="proxy-clear" title="Clear the table (does not affect Burp)">Clear</button>
+      <button id="proxy-clear" title="Clear the table (does not affect captured traffic)">Clear</button>
       <span class="proxy-count" id="proxy-count">0 rows</span>
       <span class="proxy-multi-count" id="proxy-multi-count"></span>
       <button id="proxy-export-csv" title="Export CSV — selected rows if any, else all visible">CSV</button>
@@ -2054,7 +2193,7 @@ function renderProxyPane() {
           <input type="search" class="proxy-detail-search" id="proxy-req-search" placeholder="find in request (Ctrl-F)" />
           <span class="proxy-detail-search-count" id="proxy-req-search-count"></span>
           <button class="proxy-detail-copy" id="proxy-copy-req" title="Copy raw request">Copy</button>
-          <button class="proxy-detail-copy" id="proxy-replay-btn" title="Replay this request through Burp">Replay…</button>
+          <button class="proxy-detail-copy" id="proxy-replay-btn" title="Replay this request through the configured proxy">Replay...</button>
         </div>
         <pre class="proxy-detail-body" id="proxy-req-body">Select a row above.</pre>
       </div>
@@ -2135,7 +2274,7 @@ function renderProxyPane() {
     return tr;
   }
 
-  // v3.1 Tier 3 #9 — Shift+click = range select (across currently visible rows
+  // v4 Tier 3 #9 — Shift+click = range select (across currently visible rows
   // under the active sort), Cmd/Ctrl+click = toggle, plain click = single.
   function handleRowClick(r, ev) {
     const visible = sortRows(_proxyState.rows.filter(proxyRowMatches));
@@ -2224,7 +2363,7 @@ function renderProxyPane() {
       .catch(() => {
         if (_proxyState.selectedId !== r.id) return;
         reqBodyEl.textContent = formatRequest(null, r);
-        respBodyEl.textContent = '(detail endpoint unreachable — install / rebuild the Burp extension)';
+        respBodyEl.textContent = '(detail endpoint unavailable for the selected proxy backend)';
       });
   }
 
@@ -2322,7 +2461,7 @@ function renderProxyPane() {
     updateMultiCount();
   });
 
-  // v3.1 Tier 3 #9 — Export helpers. If any rows are multi-selected, export
+  // v4 Tier 3 #9 — Export helpers. If any rows are multi-selected, export
   // only those; otherwise export all currently-visible (filtered + sorted).
   function rowsForExport() {
     if (_proxyState.selectedIds.size > 0) {
@@ -2438,7 +2577,7 @@ function renderProxyPane() {
     navigator.clipboard.writeText(toCurl(row, d)).catch(() => {});
   });
 
-  // v3.1 — In-detail search. Highlights matches in the <pre>; arrows cycle.
+  // v4 — In-detail search. Highlights matches in the <pre>; arrows cycle.
   function attachDetailSearch(preEl, inputEl, countEl) {
     let matches = [], cursor = 0, baseText = '';
     const originalTextOf = () => preEl.dataset.plain || preEl.textContent || '';
@@ -2511,8 +2650,9 @@ function renderProxyPane() {
     setTimeout(() => { reqSearch.invalidateBase(); respSearch.invalidateBase(); }, 0);
   };
 
-  // v3.1 — Replay modal. Opens with the selected row's method/url/headers/body
-  // pre-filled, fires through Burp with the row's agent tag, shows response inline.
+  // Replay modal. Opens with the selected row's method/url/headers/body
+  // pre-filled, fires through the configured proxy with the row's agent tag,
+  // and shows the response inline.
   wrap.querySelector('#proxy-replay-btn').addEventListener('click', () => openReplayModal());
 
   function openReplayModal() {
@@ -2596,7 +2736,7 @@ function renderProxyPane() {
           respEl.textContent = JSON.stringify(data, null, 2);
           return;
         }
-        statusEl.textContent = `${data.status} ${data.statusText || ''} · ${data.elapsedMs}ms${data.proxied ? ' · through Burp' : ' · DIRECT (Burp unreachable)'}`;
+        statusEl.textContent = `${data.status} ${data.statusText || ''} · ${data.elapsedMs}ms${data.proxied ? ' · through proxy' : ' · direct'}`;
         const respHdrs = Object.entries(data.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n');
         respEl.textContent = `HTTP ${data.status} ${data.statusText || ''}\n${respHdrs}\n\n${data.body || ''}`;
       } catch (e) {
@@ -2628,12 +2768,28 @@ function renderProxyPane() {
       refreshAll();
     })
     .catch(() => {
-      tbody.innerHTML = `<tr><td colspan="7" class="proxy-empty">No connection to Burp extension at :1338 — install glados-proxy-api-1.0.0-all.jar in Burp (see About tab).</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="proxy-empty">No proxy traffic yet. Traffic will appear when the configured proxy backend is running.</td></tr>`;
     });
 
   if (_proxyState.es) { try { _proxyState.es.close(); } catch {} _proxyState.es = null; }
   const es = new EventSource('/api/proxy/stream');
-  es.onopen = () => { connEl.textContent = 'live'; connEl.className = 'proxy-status live'; };
+  es.onopen = async () => {
+    try {
+      const health = await fetch('/api/health/proxy').then(r => r.json());
+      if (!health.healthy) {
+        connEl.textContent = `offline — ${health.processStatus || 'proxy unavailable'}`;
+        connEl.title = health.error || '';
+        connEl.className = 'proxy-status offline';
+        return;
+      }
+      connEl.textContent = 'live';
+      connEl.title = '';
+      connEl.className = 'proxy-status live';
+    } catch {
+      connEl.textContent = 'offline — health unavailable';
+      connEl.className = 'proxy-status offline';
+    }
+  };
   es.onmessage = ev => {
     try {
       const r = JSON.parse(ev.data);
@@ -2646,7 +2802,7 @@ function renderProxyPane() {
   };
   _proxyState.es = es;
 
-  // v3.1 — per-agent metrics poll. Refreshes the sidebar every 2s.
+  // v4 — per-agent metrics poll. Refreshes the sidebar every 2s.
   const sidebarList = wrap.querySelector('#proxy-agents-list');
   async function refreshAgentMetrics() {
     if (!sidebarList.isConnected) return; // pane was replaced
@@ -2696,68 +2852,6 @@ function toCurl(r) {
   return `curl -sS${flags} '${(r.url || '').replace(/'/g, `'\\''`)}'`;
 }
 
-// --- About ---
-// What GLaDOS is, how the pieces fit, and the "you need to know this" operator
-// notes. Day-to-day agent controls now live in Settings.
-
-function renderAboutPane() {
-  const wrap = document.createElement('div');
-  wrap.className = 'about-pane';
-  wrap.innerHTML = `
-    <div class="about-checklist">
-      <h1>About GLaDOS Ops</h1>
-      <p>GLaDOS is a multi-agent red-team framework built on OpenClaw. The dashboard
-        you're looking at is the operator surface: live transcripts for each subagent,
-        a chat pane to GLaDOS herself, Burp proxy visibility, and kill-switch controls.
-        Agents do the offensive work; Burp Pro mediates every outbound request; this
-        dashboard gives you eyes and brakes.</p>
-
-      <h2>Architecture in one paragraph</h2>
-      <p>One long-lived OpenClaw gateway process (launchd-managed) runs all agents.
-        A small Node preload (<code>tools/tag-injector.js</code>) installs an
-        <code>AsyncLocalStorage</code> that propagates the current agent's id through
-        every tool call. Two patches inside openclaw's bundled <code>dist/</code> files
-        (applied by <code>tools/patch-openclaw-bundle.sh</code>) wire ALS into the tool
-        executor and route direct-mode fetches through Burp with per-request
-        <code>X-GLaDOS-Agent</code> headers. Burp's GLaDOS extension reads those
-        headers and attributes history per-agent, which the dashboard Proxy tab
-        consumes. Out-of-scope agents (glados, atlas, report-*, ai-specialist) and
-        localhost traffic bypass Burp entirely.</p>
-
-      <h2>Re-apply patches after openclaw upgrades</h2>
-      <p><b>Any time you run <code>npm install -g openclaw</code></b> (or otherwise upgrade
-        the CLI) the bundle patches get overwritten, per-agent Burp tags stop working,
-        and history entries revert to <code>(none)</code>. Re-run the patch script:</p>
-      <pre>bash tools/patch-openclaw-bundle.sh</pre>
-      <p>The script is idempotent (checks for <code>GLADOS_ALS_PATCH_V1</code> /
-        <code>GLADOS_SSRF_ROUTE_V1</code> markers before applying), keeps
-        <code>.pre-glados.bak</code> backups, and runs <code>node --check</code> on the
-        result. After it finishes, click <b>Restart gateway</b> in the top bar so the
-        new bundle gets loaded.</p>
-
-      <h2>Kill-switches</h2>
-      <ul>
-        <li><b>Halt All</b> (top bar) — flips Burp scope to <code>exclude ^.*$</code> and
-          writes deny rules to <code>~/.openclaw/exec-approvals.json</code>. Next tool
-          call from any agent fails within one turn.</li>
-        <li><b>Halt agent</b> — same mechanism scoped to a single agent.</li>
-        <li><code>tools/burp-gate.sh halt-all</code> — the same kill path
-          from a terminal if the dashboard is unreachable.</li>
-        <li><code>GLADOS_DISABLE_BURP_ROUTE=1</code> in the gateway plist — reverts the
-          SSRF patch's direct-mode fetches to unproxied. Emergency use only; agents lose
-          Burp visibility.</li>
-      </ul>
-      <p style="color:var(--fg-dim);">Already-in-flight browser tool calls are <i>not</i>
-        cancellable — OpenClaw has no <code>sessions_interrupt</code>. The kill switch
-        denies the <i>next</i> tool call.</p>
-    </div>
-    <div class="about-diagram">
-      <h2>Flow diagram</h2>
-      <iframe src="/api/flow-diagram" title="GLaDOS flow diagram"></iframe>
-    </div>`;
-  paneEl.appendChild(wrap);
-}
-
 // --- Settings ---
 
 async function renderSettingsPane() {
@@ -2766,36 +2860,29 @@ async function renderSettingsPane() {
   wrap.innerHTML = `
     <h1>Settings</h1>
     <section class="settings-section">
-      <h2>Appearance</h2>
-      <div class="settings-field">
-        <label>Color Profile</label>
-        <div id="color-profile-options" class="color-profile-options" role="radiogroup" aria-label="Color Profile"></div>
-      </div>
-      <div class="settings-field">
-        <label>Density</label>
-        <div id="density-options" class="appearance-options" role="radiogroup" aria-label="Density"></div>
-      </div>
-      <div class="settings-field">
-        <label>Font Size</label>
-        <div id="font-size-options" class="appearance-options" role="radiogroup" aria-label="Font Size"></div>
+      <h2>Operations</h2>
+      <div class="settings-actions">
+        <button id="update-app" title="Run scripts/update.sh with streamed progress">Update</button>
+        <button id="refresh-runtime" title="Refresh local Agent SDK runtime state">Refresh runtime</button>
+        <button id="reset-session" title="Archive the selected agent session">Reset session</button>
+        <button id="halt-one" title="Halt the selected agent" disabled>Halt agent</button>
+        <button id="resume-one" class="safe" title="Resume the selected halted agent" disabled>Resume agent</button>
       </div>
     </section>
     <section class="settings-section">
       <h2>Agents</h2>
       <div id="settings-version" class="settings-version">Version loading…</div>
-      <p style="color:var(--fg-dim);">Click an agent to expand. Enable/disable changes update the local agent workspace and regenerate <code>~/.openclaw/openclaw.json</code>; restart the gateway when prompted.</p>
+      <p style="color:var(--fg-dim);">Click an agent to expand. Enable/disable and model changes update the local agent workspace and v4 model override store. New turns pick up the change automatically.</p>
       <div id="settings-list">loading…</div>
     </section>`;
   paneEl.appendChild(wrap);
-  renderColorProfileControl();
-  renderSegmentedControl('density-options', 'density', DENSITY_OPTIONS, currentDensity(), applyDensity);
-  renderSegmentedControl('font-size-options', 'font-size', FONT_SIZE_OPTIONS, currentFontSize(), applyFontSize);
+  wireOperationControls(wrap);
 
   try {
     const [versionInfo, modelsResp, settingsResp] = await Promise.all([
-      fetch('/api/version').then(r => r.json()).catch(e => ({ error: e.message })),
-      fetch('/api/models').then(r => r.json()),
-      fetch('/api/settings/agents').then(r => r.json()),
+      fetchJson('/api/version', { timeoutMs: 5000 }).catch(e => ({ error: e.message })),
+      fetchJson('/api/models', { timeoutMs: 8000 }),
+      fetchJson('/api/settings/agents', { timeoutMs: 8000 }),
     ]);
     renderSettingsVersion(versionInfo);
     const models = modelsResp.models || [];
@@ -2856,7 +2943,7 @@ function renderSettingsVersion(info) {
 
 async function hydrateAgentCard(agentId, body, models) {
   try {
-    const d = await fetch(`/api/agents/${encodeURIComponent(agentId)}/details`).then(r => r.json());
+    const d = await fetchJson(`/api/agents/${encodeURIComponent(agentId)}/details`, { timeoutMs: 8000 });
     if (d.error) { body.textContent = 'error: ' + d.error; return; }
     const modelChoices = [...new Set([d.model, ...(models || [])].filter(Boolean))];
     const modelOpts = modelChoices.map(m => `<option${m === d.model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('');
@@ -2868,7 +2955,7 @@ async function hydrateAgentCard(agentId, body, models) {
       <div class="agent-state-row">
         <span class="agent-state-copy">
           <strong>${d.enabled ? 'Enabled' : 'Disabled'}</strong>
-          ${d.registered ? 'registered in OpenClaw config' : (d.enabled ? 'enabled locally but not registered yet' : 'not registered while disabled')}
+          ${d.registered ? 'loaded by Agent SDK runtime' : (d.enabled ? 'enabled locally for next turn' : 'not loaded while disabled')}
           ${d.dispatch ? ` · ${escapeHtml(d.dispatch)}` : ''}
           ${d.subagent === false ? ' · not dispatchable as subagent' : ''}
         </span>
@@ -2880,7 +2967,7 @@ async function hydrateAgentCard(agentId, body, models) {
       <label>Model (current: <code>${escapeHtml(d.model || '?')}</code>)</label>
       <div class="model-row">
         <select data-model-select ${d.registered ? '' : 'disabled'}>${modelOpts}</select>
-        <button data-save ${d.registered ? '' : 'disabled title="Enable this agent and restart the gateway before changing its active model"'}>Save</button>
+        <button data-save ${d.registered ? '' : 'disabled title="Enable this agent before changing its active model"'}>Save</button>
       </div>
 
       <label>Workspace</label>
@@ -2907,14 +2994,14 @@ async function hydrateAgentCard(agentId, body, models) {
     body.querySelector('[data-toggle-enabled]')?.addEventListener('click', async () => {
       const nextEnabled = !d.enabled;
       const action = nextEnabled ? 'enable' : 'disable';
-      if (!confirm(`${action[0].toUpperCase()}${action.slice(1)} ${agentId}?\n\nThis updates its local agent.json and regenerates ~/.openclaw/openclaw.json. Restart the gateway for running sessions to pick it up.`)) return;
+      if (!confirm(`${action[0].toUpperCase()}${action.slice(1)} ${agentId}?\n\nThis updates its local agent.json. New Agent SDK turns pick it up automatically.`)) return;
       const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/enabled`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: nextEnabled }),
       }).then(r => r.json());
       if (r.ok) {
-        logEvent('started', `${agentId} ${nextEnabled ? 'enabled' : 'disabled'} — restart gateway to apply`);
+        logEvent('started', `${agentId} ${nextEnabled ? 'enabled' : 'disabled'}`);
         await loadAgents();
         renderPane();
       } else {
@@ -2924,7 +3011,7 @@ async function hydrateAgentCard(agentId, body, models) {
     body.querySelector('[data-save]')?.addEventListener('click', async () => {
       const sel = body.querySelector('[data-model-select]');
       const newModel = sel.value;
-      if (!confirm(`Change ${agentId}'s model to ${newModel}?\n\nThis edits ~/.openclaw/openclaw.json. A .bak file will be written.\nThe next agent session will pick up the new model.`)) return;
+      if (!confirm(`Change ${agentId}'s model to ${newModel}?\n\nThis writes the v4 model override store. The next Agent SDK turn will use the new model.`)) return;
       const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/model`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3055,11 +3142,10 @@ async function runSlashCommand(raw, rec) {
   }
 }
 
-setInterval(refreshIndicators, 5000);
 setInterval(loadAgents, 15000);
 setInterval(refreshVisibleChatTurnStatuses, 2500);
 
-// v3.1 — Plan-approval workflow. Pending-plan badge + Plans pane.
+// v4 — Plan-approval workflow. Pending-plan badge + Plans pane.
 const plansState = { list: [], selected: null, proposals: [] };
 
 async function refreshPlansBadge() {
@@ -3326,10 +3412,9 @@ async function decidePlan(id, action, body) {
 // (escapeHtml defined earlier in this file)
 
 document.getElementById('open-glados').addEventListener('click', ev => { ev.preventDefault(); openGladosChat(); });
-document.getElementById('open-chatbot').addEventListener('click', ev => { ev.preventDefault(); openChatBot(); });
+document.getElementById('open-plans').addEventListener('click', ev => { ev.preventDefault(); openPlans(); });
 document.getElementById('open-reports').addEventListener('click', ev => { ev.preventDefault(); openReports(); });
 document.getElementById('open-settings').addEventListener('click', ev => { ev.preventDefault(); openSettings(); });
-document.getElementById('open-about').addEventListener('click', ev => { ev.preventDefault(); openAbout(); });
 document.getElementById('open-terminal').addEventListener('click', ev => { ev.preventDefault(); openTerminal(); });
 document.getElementById('open-proxy').addEventListener('click', ev => { ev.preventDefault(); openProxy(); });
 
@@ -3344,7 +3429,6 @@ document.getElementById('events-clear').addEventListener('click', () => {
   const sections = [
     { headingId: 'agents-heading',     bodyId: 'agent-list' },
     { headingId: 'workspace-heading',  bodyId: 'workspace-links' },
-    { headingId: 'indicators-heading', bodyId: 'indicators-group' },
     { headingId: 'help-heading',       bodyId: 'help-links' },
   ];
   for (const { headingId, bodyId } of sections) {
@@ -3367,51 +3451,8 @@ document.getElementById('events-clear').addEventListener('click', () => {
   }
 })();
 
-document.getElementById('restart-gateway').addEventListener('click', async () => {
-  if (!confirm('Restart the OpenClaw Gateway? Any in-flight agent turns will disconnect.')) return;
-  const btn = document.getElementById('restart-gateway');
-  const orig = btn.textContent;
-  btn.disabled = true; btn.textContent = 'Restarting…';
-  try {
-    const r = await fetch('/api/gateway/restart', { method: 'POST' });
-    const j = await r.json();
-    if (!j.ok) throw new Error(j.error || 'restart failed');
-    btn.textContent = 'Restarted ✓';
-    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1500);
-  } catch (e) {
-    alert('gateway restart failed: ' + e.message);
-    btn.textContent = orig; btn.disabled = false;
-  }
-});
-
-document.getElementById('reset-session').addEventListener('click', async () => {
-  const tabId = state.currentTab;
-  const tab = state.openTabs.find(t => t.id === tabId);
-  const agentId = tab?.kind === 'chat' ? 'glados'
-    : tab?.kind === 'chatbot' ? 'atlas'
-    : (tab?.kind === 'agent' ? tab.id : null);
-  if (!agentId) { alert('Select an agent or GLaDOS chat tab first.'); return; }
-  const resetMsg = agentId === 'glados'
-    ? 'Archive the current GLaDOS session and every assessment agent session, wipe the blackboard (engagements, findings, tasks, plans, recon state), AND clear short-term memory caches (memory/.dreams/) for every agent? Curated MEMORY.md, evidence files, and exported reports are kept. Atlas is left alone. The next message starts a fresh investigation.'
-    : `Archive the current session for "${agentId}"? The next message starts a fresh session.`;
-  if (!confirm(resetMsg)) return;
-  try {
-    const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/reset-session`, { method: 'POST' });
-    const j = await r.json();
-    if (!j.ok) throw new Error(j.error || 'reset failed');
-    // Drop local transcript and re-subscribe.
-    const rec = state.transcripts.get(tabId);
-    if (rec) {
-      try { rec.es && rec.es.close(); } catch {}
-      state.transcripts.delete(tabId);
-    }
-    renderPane();
-  } catch (e) { alert('reset-session failed: ' + e.message); }
-});
-
 loadAgents().then(() => {
   openGladosChat();
   subscribeLobby();
-  refreshIndicators();
   setupHealthBanner();
 });

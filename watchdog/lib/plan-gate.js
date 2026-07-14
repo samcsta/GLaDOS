@@ -1,14 +1,11 @@
-// v3.1.04242026 — Hard plan-approval dispatch gate.
-//
-// Before v3.1, the "no exploitation before plan approval" rule lived only in
-// SOUL.md as a prompt-enforced invariant (I1-I4). This module turns the rule
-// into a deterministic tool: plan_check_dispatch(agent_id, engagement_id?)
+// GLaDOS v4 hard plan-approval dispatch gate. The prompt invariant is also a
+// deterministic tool: plan_check_dispatch(agent_id, engagement_id?)
 // returns whether the agent is allowed to dispatch right now, based on either
 // an approved plan row or an operator-approved ATTACK PLAN finding in the
 // blackboard.
 //
 // Classification:
-//   - PHASE1_AGENTS: always allowed (they only produce the summary card + plan).
+//   - PHASE1_AGENTS: always allowed (they only produce recon and plans).
 //   - EXPLOITATION_AGENTS: require an approved plan AND membership in its
 //     agent_chain (or in proposed_vectors.agents).
 //   - META_AGENTS: always allowed (supervisor, validators, report-writer).
@@ -37,7 +34,7 @@ const EXPLOITATION_AGENTS = new Set([
   'graphql-specialist', 'cloud-exposure',
 ]);
 const META_AGENTS = new Set([
-  'glados', 'atlas', 'ai-specialist',
+  'glados', 'ai-specialist',
   'report-writer', 'report-validator',
   'webapp-validator', 'api-validator', 'poc-validator',
   'postex-validator', 'ad-validator', 'c2-validator',

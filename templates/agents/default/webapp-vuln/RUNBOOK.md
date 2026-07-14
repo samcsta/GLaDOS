@@ -7,7 +7,7 @@ Safely test only approved web vectors and produce suspected findings that requir
 ## Operating Workflow
 
 1. Call plan gate before work; only test approved vectors.
-2. Use Burp-visible browser/fetch traffic and keep payloads non-destructive.
+2. Use proxy-visible browser/fetch traffic and keep payloads non-destructive.
 3. For each vector, record baseline request, modified request, response delta, and false-positive controls.
 4. Prefer depth on approved endpoints over broad crawling.
 5. Write suspected findings with confidence and proposed validator steps; do not self-confirm.

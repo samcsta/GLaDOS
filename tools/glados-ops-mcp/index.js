@@ -3,11 +3,11 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const cp = require('node:child_process');
 const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
 const Database = require('better-sqlite3');
+const { resolveTool, toolStatus, loadManifest } = require('../../scripts/lib/redteam-tools');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const GLADOS_RUNTIME_DIR = process.env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), '.glados');
@@ -33,7 +33,6 @@ const PHASE1_AGENTS = new Set([
 ]);
 const META_AGENTS = new Set([
   'glados',
-  'atlas',
   'ai-specialist',
   'report-writer',
   'report-validator',
@@ -613,45 +612,24 @@ function openapiInventory(args) {
   };
 }
 
-function which(cmd) {
-  try { return cp.execFileSync('/usr/bin/which', [cmd], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
-  catch { return null; }
-}
-
-function firstExisting(paths) {
-  for (const p of paths) {
-    if (p && fs.existsSync(p)) return p;
-  }
-  return null;
-}
-
 function toolAvailability() {
-  const tools = ['ffuf', 'httpx', 'nuclei', 'semgrep', 'ghidraRun', 'ghidra', 'analyzeHeadless', 'jadx', 'apktool', 'bloodhound-python', 'certipy', 'nmap', 'sqlmap'];
-  const found = Object.fromEntries(tools.map(t => [t, which(t)]));
-  found.ghidra = found.ghidra || found.ghidraRun || firstExisting([
-    '/opt/homebrew/opt/ghidra/bin/ghidraRun',
-    '/usr/local/opt/ghidra/bin/ghidraRun',
-  ]);
-  found.analyzeHeadless = firstExisting([
-    path.join(ROOT, 'tools', 'bin', 'analyzeHeadless'),
-  ]) || found.analyzeHeadless || firstExisting([
-    '/opt/homebrew/opt/ghidra/libexec/support/analyzeHeadless',
-    '/usr/local/opt/ghidra/libexec/support/analyzeHeadless',
-  ]);
-  found.sqlmap = firstExisting([path.join(ROOT, 'tools', 'bin', 'sqlmap')]) || found.sqlmap;
-  found['bloodhound-python'] = found['bloodhound-python'] || firstExisting([path.join(os.homedir(), '.local', 'bin', 'bloodhound-python')]);
-  found.certipy = found.certipy || firstExisting([path.join(os.homedir(), '.local', 'bin', 'certipy')]);
-  return found;
+  const status = toolStatus();
+  return {
+    ...status,
+    byId: Object.fromEntries(status.tools.map(tool => [tool.id, tool.path])),
+  };
 }
 
 function safeFfuf(args) {
   if (!args.url_with_fuZZ.includes('FUZZ')) throw new Error('url_with_fuZZ must contain FUZZ');
   const rate = Math.max(1, Math.min(20, Number(args.rate) || 2));
-  const proxy = args.proxy || 'http://127.0.0.1:8080';
+  const proxy = args.proxy
+    || process.env.GLADOS_PROXY_URL
+    || `http://${process.env.GLADOS_MITM_LISTEN_HOST || '127.0.0.1'}:${process.env.GLADOS_MITM_LISTEN_PORT || '18080'}`;
   const headers = Object.entries(args.headers || {}).flatMap(([k, v]) => ['-H', `${k}: ${v}`]);
   const cmd = ['ffuf', '-u', args.url_with_fuZZ, '-w', args.wordlist, '-rate', String(rate), '-timeout', '10', '-x', proxy, ...headers];
   return {
-    executable_available: !!which('ffuf'),
+    executable_available: !!resolveTool(loadManifest().tools.find(tool => tool.id === 'ffuf')),
     command: cmd,
     shell_preview: cmd.map(v => /[\s"'$]/.test(v) ? `'${String(v).replace(/'/g, `'\\''`)}'` : v).join(' '),
     note: 'Review scope, target_health, and operator approval before running. This tool does not execute ffuf.',

@@ -28,14 +28,6 @@ db.exec(`
     action TEXT NOT NULL,
     at INTEGER NOT NULL
   );
-
-  CREATE TABLE IF NOT EXISTS breaker_trips (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    target_host TEXT NOT NULL,
-    tripped_at INTEGER NOT NULL,
-    sample_count INTEGER,
-    last_status INTEGER
-  );
 `);
 
 module.exports = { db };

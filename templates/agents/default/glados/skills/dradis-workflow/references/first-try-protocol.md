@@ -26,7 +26,7 @@ Every successful finding has a contextual anchor — a specific UI element or da
 
 ### 3. Execute the Action Steps
 
-- Use OpenClaw Browser MCP to follow steps exactly
+- Use approved Agent SDK MCP browser tooling to follow steps exactly
 - Take a screenshot after each significant step
 - Do not skip steps, reorder steps, or substitute equivalent actions
 
@@ -71,6 +71,6 @@ Before declaring a finding validated:
 - [ ] Contextual anchor is present and matches report
 - [ ] Visual delta audit completed — screenshots compared
 - [ ] Home page validated if report specifies it
-- [ ] Evidence captured: screenshots, request/response, Burp traffic
+- [ ] Evidence captured: screenshots, request/response, proxy traffic
 - [ ] Both primary agent and validator agree on outcome
 - [ ] Discrepancies flagged for further investigation (not silently resolved)

@@ -1,26 +1,40 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const express = require('express');
-const { PORT, BLACKBOARD_DB } = require('./lib/config');
-const { AgentWatcher } = require('./lib/agent-watcher');
-const { loadAgentRegistry, listAgentIds, currentSessionForAgent, sendMessageToAgent, sendMessageToAgentTracked } = require('./lib/openclaw');
+const { PORT, BLACKBOARD_DB, GLADOS_AGENT_WORKSPACES } = require('./lib/config');
 const reports = require('./lib/reports');
 const agentDetails = require('./lib/agent-details');
 const { getVersionInfo } = require('./lib/version');
-const { JsonlTail, convertToEvents } = require('./lib/jsonl-tail');
-const { RawStreamTail } = require('./lib/raw-stream-tail');
 const { DashboardTranscriptStore, mergeTranscriptEvents, afterLastEventId, sseFrame } = require('./lib/transcript-store');
 const { ControllerLite } = require('./lib/controller');
 const slash = require('./lib/slash');
+const updateRunner = require('./lib/update-runner');
+const {
+  streamAgentTurn,
+  loadRegistry: loadHarnessRegistry,
+  loadPolicy,
+  agentEnabled,
+  bareModelAlias,
+} = require('./lib/harness/agent-sdk');
+const { SdkSessionRegistry } = require('./lib/harness/session-registry');
+const { proxyBackendConfig, startMitmproxy } = require('./lib/proxy/mitmproxy-runner');
+const {
+  proxyHistory,
+  proxyDetail,
+  proxyMetrics,
+  watchProxyEvents,
+  proxyHealth,
+} = require('./lib/proxy/native-store');
 const watchdogHealth = require('glados-watchdog/lib/health');
 const watchdogHalt = require('glados-watchdog/lib/halt');
-const { getBurpRps } = require('glados-watchdog/lib/breaker');
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
-
-let rawStreamFloorMs = Date.now();
+app.use('/vendor/marked', express.static(path.join(__dirname, 'node_modules', 'marked')));
+app.use('/vendor/dompurify', express.static(path.join(__dirname, 'node_modules', 'dompurify', 'dist')));
+app.use('/vendor/xterm', express.static(path.join(__dirname, 'node_modules', 'xterm')));
+app.use('/vendor/xterm-addon-fit', express.static(path.join(__dirname, 'node_modules', 'xterm-addon-fit')));
 
 try {
   require('../scripts/lib/glados-local').ensureBlackboardDb({ blackboardDb: BLACKBOARD_DB });
@@ -28,35 +42,107 @@ try {
   console.warn('[startup] could not initialize blackboard db:', e.message);
 }
 
-// Boot-time hygiene: keep the sessions/ tree from accumulating archived
-// JSONLs (we hit 7.4 MB / 57 files in a few days under the prior keep-forever
-// behavior; the agent-watcher's chokidar can in some failure modes re-tail a
-// stale file and bleed prior chat into a fresh pane). Also keep the
-// agentDir IDENTITY.md files in sync with the workspace canonical so the
-// model never gets two competing system prompts. Both run cheaply once on
-// boot; the same helpers run again on glados session reset.
-try {
-  const prune = pruneArchivedSessions();
-  if (prune.deleted > 0) console.log(`[startup] pruned ${prune.deleted} archived session(s) (retention=${prune.retention})`);
-} catch (e) { console.warn('[startup] archive prune failed:', e.message); }
-try {
-  const sync = syncAgentDirIdentities();
-  if (sync.synced > 0) console.log(`[startup] synced ${sync.synced} agentDir IDENTITY.md from workspace`);
-} catch (e) { console.warn('[startup] agentDir sync failed:', e.message); }
-try {
-  const raw = truncateRawStream();
-  rawStreamFloorMs = Date.now();
-  if (raw.bytesBefore > 0) console.log(`[startup] truncated raw-stream.jsonl (${raw.bytesBefore} bytes)`);
-} catch (e) { console.warn('[startup] raw-stream truncate failed:', e.message); }
-
-const watcher = new AgentWatcher().start();
 const transcriptStore = new DashboardTranscriptStore(BLACKBOARD_DB);
-const controller = new ControllerLite({
-  dbPath: BLACKBOARD_DB,
-  sendMessageToAgentTracked,
-  currentSessionForAgent,
-});
-if (process.env.GLADOS_CONTROLLER_WORKER !== '0') controller.start();
+const sdkSessionRegistry = new SdkSessionRegistry();
+let proxyRuntime = {
+  status: 'stopped',
+  child: null,
+  pid: null,
+  startedAt: null,
+  error: null,
+  stderr: '',
+};
+
+function startDesktopProxy() {
+  const config = proxyBackendConfig(process.env);
+  if (process.env.GLADOS_DESKTOP !== '1' || config.backend !== 'mitmproxy') return;
+  const caScript = path.resolve(__dirname, '..', 'scripts', 'glados-ca.sh');
+  const generated = require('node:child_process').spawnSync('/bin/bash', [caScript, 'generate'], {
+    env: process.env,
+    encoding: 'utf8',
+  });
+  if (generated.status !== 0) {
+    proxyRuntime = {
+      ...proxyRuntime,
+      status: 'failed',
+      error: generated.stderr?.trim() || `MITM CA bootstrap exited ${generated.status}`,
+    };
+    console.warn('[proxy] native proxy CA bootstrap failed:', proxyRuntime.error);
+    return;
+  }
+  try {
+    const runtime = startMitmproxy(config);
+    proxyRuntime = {
+      status: 'starting',
+      child: runtime.child,
+      pid: runtime.child.pid || null,
+      startedAt: new Date().toISOString(),
+      error: null,
+      stderr: '',
+    };
+    runtime.child.stdout?.on('data', chunk => process.stdout.write(`[proxy] ${chunk}`));
+    runtime.child.stderr?.on('data', chunk => {
+      const text = chunk.toString();
+      proxyRuntime.stderr = `${proxyRuntime.stderr}${text}`.slice(-4000);
+      process.stderr.write(`[proxy] ${text}`);
+    });
+    runtime.child.once('spawn', () => {
+      proxyRuntime.status = 'running';
+      proxyRuntime.pid = runtime.child.pid || null;
+      console.log(`[proxy] native mitmproxy listening on ${config.listenHost}:${config.listenPort}`);
+    });
+    runtime.child.once('error', error => {
+      proxyRuntime.status = 'failed';
+      proxyRuntime.error = error.message;
+      proxyRuntime.child = null;
+      proxyRuntime.pid = null;
+      console.warn('[proxy] native proxy failed:', error.message);
+    });
+    runtime.child.once('exit', (code, signal) => {
+      if (proxyRuntime.status !== 'stopping') {
+        proxyRuntime.status = 'failed';
+        proxyRuntime.error = `mitmproxy exited (${signal || code})`;
+      } else {
+        proxyRuntime.status = 'stopped';
+      }
+      proxyRuntime.child = null;
+      proxyRuntime.pid = null;
+    });
+  } catch (error) {
+    proxyRuntime = { ...proxyRuntime, status: 'failed', child: null, pid: null, error: error.message };
+    console.warn('[proxy] native proxy failed:', error.message);
+  }
+}
+
+function stopDesktopProxy({ timeoutMs = 2500 } = {}) {
+  const child = proxyRuntime.child;
+  proxyRuntime.status = 'stopping';
+  if (!child || child.exitCode != null) {
+    proxyRuntime.status = 'stopped';
+    return Promise.resolve();
+  }
+  return new Promise(resolve => {
+    let settled = false;
+    let timer = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      proxyRuntime.status = 'stopped';
+      proxyRuntime.child = null;
+      proxyRuntime.pid = null;
+      resolve();
+    };
+    child.once('exit', finish);
+    timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch {}
+      setTimeout(finish, 250).unref();
+    }, timeoutMs);
+    try { child.kill('SIGTERM'); } catch { finish(); }
+  });
+}
+
+startDesktopProxy();
 
 app.get('/api/version', (req, res) => {
   res.json(getVersionInfo());
@@ -65,10 +151,11 @@ app.get('/api/version', (req, res) => {
 // Per-agent ring buffer of recent events (for new SSE subscribers to backfill).
 const BUFFER_LIMIT = 500;
 const buffers = new Map(); // agentId -> array of events (newest last)
-const sseClients = new Map(); // agentId -> Set<res>
+const sseClients = new Map(); // agentId -> Set<{ res, includeStream }>
 const lobbyClients = new Set(); // /api/agents SSE subscribers
 const activeChatTurns = new Map(); // agentId -> { turnId, startedAt, messagePreview }
-const recentChatTurns = new Map(); // agentId -> { turnId, expiresAt } short grace for late raw-stream fs events
+const activeSubagentTurns = new Map(); // agentId -> { sessionId, startedAt, parentAgentId, parentTurnId, toolCallId }
+const activeTaskToolIds = new Map(); // toolCallId -> agentId
 let pendingGladosKickoff = null;
 const BLACKBOARD_STATE_TABLES = [
   'controller_events',
@@ -85,6 +172,116 @@ const BLACKBOARD_STATE_TABLES = [
   'engagements',
 ];
 
+function loadAgentRegistry() {
+  const policy = loadPolicy();
+  return loadHarnessRegistry()
+    .filter(agent => agent?.id && agentEnabled(agent.id, { policy }))
+    .map(agent => ({
+      ...agent,
+      model: bareModelAlias(agent.model, { fallback: policy.harness?.defaultModel || 'claude-sonnet-5' }),
+      workspace: agent.workspace || path.join(GLADOS_AGENT_WORKSPACES, agent.id),
+      runtime: 'agent-sdk',
+    }));
+}
+
+function listAgentIds() {
+  return loadAgentRegistry().map(agent => agent.id);
+}
+
+function currentSessionForAgent(agentId) {
+  const turn = activeChatTurns.get(agentId);
+  const subagent = activeSubagentTurns.get(agentId);
+  if (!turn && !subagent) return null;
+  if (subagent && !turn) {
+    return {
+      live: true,
+      runtime: 'agent-sdk',
+      sessionId: subagent.sessionId,
+      sessionKey: `sdk:${agentId}:${subagent.sessionId}`,
+      startedAt: new Date(subagent.startedAt).toISOString(),
+      messagePreview: subagent.messagePreview || `subagent of ${subagent.parentAgentId || 'glados'}`,
+      parentAgentId: subagent.parentAgentId || null,
+      parentTurnId: subagent.parentTurnId || null,
+      toolCallId: subagent.toolCallId || null,
+    };
+  }
+  return {
+    live: true,
+    runtime: 'agent-sdk',
+    sessionId: turn.turnId,
+    sessionKey: `sdk:${agentId}:${turn.turnId}`,
+    startedAt: new Date(turn.startedAt).toISOString(),
+    messagePreview: turn.messagePreview,
+  };
+}
+
+function isTaskDispatchToolName(name) {
+  return name === 'Task' || name === 'Agent';
+}
+
+function targetAgentFromToolInput(input = {}) {
+  return input.subagent_type
+    || input.subagentType
+    || input.agent
+    || input.agentId
+    || input.agent_id
+    || input.name
+    || input.type
+    || null;
+}
+
+function isAllowedSubagentDispatch(parentAgentId, targetAgentId) {
+  if (parentAgentId !== 'glados' || !targetAgentId || targetAgentId === 'glados') return false;
+  return loadAgentRegistry().some(agent => agent.id === targetAgentId);
+}
+
+function startSubagentTurn(parentAgentId, targetAgent, { toolCallId = null, parentTurnId = null, messagePreview = '' } = {}) {
+  if (!targetAgent || targetAgent === parentAgentId) return;
+  const existing = activeSubagentTurns.get(targetAgent);
+  if (toolCallId) activeTaskToolIds.set(toolCallId, targetAgent);
+  if (existing?.live) return;
+  const sessionId = toolCallId || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const startedAt = Date.now();
+  activeSubagentTurns.set(targetAgent, {
+    live: true,
+    sessionId,
+    startedAt,
+    parentAgentId,
+    parentTurnId,
+    toolCallId,
+    messagePreview,
+  });
+  broadcastLobby('session-started', { agentId: targetAgent, sessionId, startedAt, parentAgentId, parentTurnId, toolCallId });
+}
+
+function finishSubagentTurn(targetAgent, { toolCallId = null, reason = null } = {}) {
+  if (!targetAgent) return;
+  const turn = activeSubagentTurns.get(targetAgent);
+  if (!turn) {
+    if (toolCallId) activeTaskToolIds.delete(toolCallId);
+    return;
+  }
+  activeSubagentTurns.delete(targetAgent);
+  if (toolCallId) activeTaskToolIds.delete(toolCallId);
+  else if (turn.toolCallId) activeTaskToolIds.delete(turn.toolCallId);
+  broadcastLobby('session-ended', { agentId: targetAgent, sessionId: turn.sessionId, toolCallId: turn.toolCallId, reason });
+}
+
+function finishSubagentsForTurn(parentAgentId, parentTurnId, reason = 'parent turn ended') {
+  for (const [agentId, turn] of [...activeSubagentTurns.entries()]) {
+    if (turn.parentAgentId === parentAgentId && (!parentTurnId || turn.parentTurnId === parentTurnId)) {
+      finishSubagentTurn(agentId, { toolCallId: turn.toolCallId, reason });
+    }
+  }
+}
+
+function sendMessageToAgentTrackedRuntime(agentId, message) {
+  return {
+    child: null,
+    promise: sendMessageToAgentRuntime(agentId, message),
+  };
+}
+
 function pushBuffer(agentId, ev) {
   let buf = buffers.get(agentId);
   if (!buf) { buf = []; buffers.set(agentId, buf); }
@@ -96,8 +293,10 @@ function pushBuffer(agentId, ev) {
 function broadcastTranscript(agentId, ev) {
   const set = sseClients.get(agentId);
   if (!set) return;
-  const payload = sseFrame(ev);
-  for (const res of set) res.write(payload);
+  for (const client of set) {
+    const payload = sseFrame(ev, { includeStream: client.includeStream });
+    if (payload) client.res.write(payload);
+  }
 }
 
 function broadcastLobby(type, data) {
@@ -108,34 +307,54 @@ function broadcastLobby(type, data) {
 function startChatTurn(agentId, message) {
   const turnId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const startedAt = Date.now();
-  // Raw-stream can replay compaction/safeguard tokens with historical `ts`
-  // values. A new direct chat turn should never render raw tokens older than
-  // the user message that triggered it.
-  rawStreamFloorMs = Math.max(rawStreamFloorMs, startedAt - 1000);
   activeChatTurns.set(agentId, {
     turnId,
     startedAt,
     messagePreview: String(message || '').slice(0, 160),
+    abortController: new AbortController(),
+    interrupt: null,
+    stopRequested: false,
   });
-  recentChatTurns.delete(agentId);
   broadcastLobby('chat-turn-started', { agentId, turnId, startedAt });
   return turnId;
+}
+
+function attachChatTurnInterrupt(agentId, turnId, interrupt) {
+  const turn = activeChatTurns.get(agentId);
+  if (!turn || turn.turnId !== turnId) return;
+  turn.interrupt = interrupt;
+  if (turn.stopRequested && typeof interrupt === 'function') {
+    Promise.resolve(interrupt('operator stop')).catch(() => {});
+  }
+}
+
+function stopChatTurn(agentId, reason = 'operator stop') {
+  const turn = activeChatTurns.get(agentId);
+  if (!turn) return { ok: true, stopped: false, agentId, reason: 'no active turn' };
+  turn.stopRequested = true;
+  try {
+    if (turn.abortController && !turn.abortController.signal.aborted) {
+      turn.abortController.abort(reason);
+    }
+  } catch {}
+  if (typeof turn.interrupt === 'function') {
+    Promise.resolve(turn.interrupt(reason)).catch(() => {});
+  }
+  activeChatTurns.delete(agentId);
+  finishSubagentsForTurn(agentId, turn.turnId, reason);
+  broadcastLobby('chat-turn-ended', { agentId, turnId: turn.turnId, stopped: true, reason });
+  transcriptEvent(agentId, 'meta', `Stopped current turn: ${reason}`, {
+    sub: 'operator-stop',
+    turnId: turn.turnId,
+  });
+  return { ok: true, stopped: true, agentId, turnId: turn.turnId, reason };
 }
 
 function finishChatTurn(agentId, turnId) {
   const current = activeChatTurns.get(agentId);
   if (!current || current.turnId !== turnId) return;
   activeChatTurns.delete(agentId);
-  recentChatTurns.set(agentId, { turnId, expiresAt: Date.now() + 15_000 });
   broadcastLobby('chat-turn-ended', { agentId, turnId });
-}
-
-function finishActiveChatTurn(agentId, ev = null) {
-  const current = activeChatTurns.get(agentId);
-  if (!current) return;
-  const evMs = eventSortMs(ev);
-  if (evMs && evMs < current.startedAt - 1000) return;
-  finishChatTurn(agentId, current.turnId);
 }
 
 function transcriptEvent(agentId, kind, text, extra = {}) {
@@ -164,6 +383,86 @@ function recordUserTranscript(agentId, text, extra = {}) {
   });
 }
 
+async function sendMessageToAgentRuntime(agentId, message, { turnId = null } = {}) {
+  recordUserTranscript(agentId, message, { runtime: 'agent-sdk' });
+  const turn = turnId ? activeChatTurns.get(agentId) : null;
+  let events = [];
+  try {
+    events = await streamAgentTurn({
+      agentId,
+      prompt: message,
+      store: transcriptStore,
+      onEvent: ev => {
+        const targetAgent = ev.agentId || agentId;
+        if (targetAgent !== agentId && !isAllowedSubagentDispatch(agentId, targetAgent)) return;
+        if (ev.kind === 'tool-call' && isTaskDispatchToolName(ev.toolName)) {
+          const child = ev.targetAgentId || targetAgentFromToolInput(ev.toolInput);
+          if (isAllowedSubagentDispatch(targetAgent, child)) {
+            const childPrompt = String(ev.toolInput?.prompt || '').trim();
+            startSubagentTurn(targetAgent, child, {
+              toolCallId: ev.toolCallId,
+              parentTurnId: turnId,
+              messagePreview: ev.toolInput?.description || childPrompt || ev.text || '',
+            });
+            if (childPrompt) {
+              recordUserTranscript(child, childPrompt, {
+                id: `subagent-prompt:${ev.toolCallId}`,
+                runtime: 'agent-sdk',
+                parentAgentId: targetAgent,
+                parentToolUseId: ev.toolCallId,
+                sub: 'subagent-prompt',
+              });
+            }
+          }
+        } else if (ev.kind === 'tool-result' && ev.toolCallId && activeTaskToolIds.has(ev.toolCallId)) {
+          finishSubagentTurn(activeTaskToolIds.get(ev.toolCallId), { toolCallId: ev.toolCallId });
+        } else if (isAllowedSubagentDispatch(agentId, targetAgent) && (ev.kind === 'thinking-stream' || ev.kind === 'text-stream' || ev.kind === 'assistant-text' || ev.kind === 'tool-call')) {
+          startSubagentTurn(agentId, targetAgent, {
+            toolCallId: ev.parentToolUseId || ev.toolCallId || null,
+            parentTurnId: turnId,
+            messagePreview: ev.text || ev.toolName || '',
+          });
+        }
+        pushBuffer(targetAgent, ev);
+        broadcastTranscript(targetAgent, ev);
+        if (ev.kind === 'liveness') {
+          if (isAllowedSubagentDispatch(agentId, targetAgent)) {
+            if (ev.live) startSubagentTurn(agentId, targetAgent, { toolCallId: ev.parentToolUseId || ev.toolCallId || null, parentTurnId: turnId, messagePreview: ev.text || ev.state || '' });
+            else finishSubagentTurn(targetAgent, { toolCallId: ev.parentToolUseId || ev.toolCallId || null, reason: ev.state || 'liveness ended' });
+          }
+          broadcastLobby('agent-liveness', { agentId: targetAgent, live: ev.live, state: ev.state, sessionId: currentSessionForAgent(targetAgent)?.sessionId || null });
+        }
+      },
+      options: {
+        abortSignal: turn?.turnId === turnId ? turn.abortController?.signal : undefined,
+        onInterruptReady: interrupt => attachChatTurnInterrupt(agentId, turnId, interrupt),
+        resumeSessionId: sdkSessionRegistry.get(agentId),
+        onSessionId: sessionId => sdkSessionRegistry.set(agentId, sessionId),
+      },
+    });
+  } finally {
+    finishSubagentsForTurn(agentId, turnId);
+  }
+  const finalText = events
+    .filter(ev => ev.kind === 'result' || ev.kind === 'assistant-text')
+    .map(ev => ev.text)
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+  return {
+    runtime: 'agent-sdk',
+    result: { payloads: [{ text: finalText || '', mediaUrl: null }] },
+    events: events.length,
+  };
+}
+
+const controller = new ControllerLite({
+  dbPath: BLACKBOARD_DB,
+  sendMessageToAgentTracked: sendMessageToAgentTrackedRuntime,
+  currentSessionForAgent,
+});
+if (process.env.GLADOS_CONTROLLER_WORKER !== '0') controller.start();
+
 function blackboardRowCounts() {
   const Database = require('better-sqlite3');
   let db;
@@ -186,26 +485,6 @@ function normalizeTarget(value) {
     .trim()
     .replace(/^["'`]+|["'`.,!?;:]+$/g, '')
     .replace(/\/+$/g, '');
-}
-
-function extractInvestigationTarget(message) {
-  const text = String(message || '').trim();
-  const patterns = [
-    /\b(?:begin|start|launch|run|perform|open)\s+(?:an?\s+)?(?:fresh\s+)?(?:investigation|assessment|web\s*app\s*assessment|test(?:-|\s*)run)\s+(?:on|for|against)\s+["'`]?([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'`<>]+|[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,})/i,
-    /\b(?:investigate|assess|test)\s+["'`]?([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'`<>]+|[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,})/i,
-  ];
-  for (const re of patterns) {
-    const m = text.match(re);
-    if (m?.[1]) return normalizeTarget(m[1]);
-  }
-  return null;
-}
-
-function extractBareTarget(message) {
-  const text = String(message || '').trim();
-  if (!text || /\s/.test(text.replace(/^https?:\/\//i, ''))) return null;
-  const m = text.match(/^["'`]?(https?:\/\/[^\s"'`<>]+|[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,})(?:\/[^"'`\s<>]*)?["'`.,!?;:]*$/i);
-  return m?.[1] ? normalizeTarget(m[1]) : null;
 }
 
 function isFreshSessionQuestion(message) {
@@ -337,124 +616,96 @@ function buildApprovedKickoffMessage(pending, operatorReply) {
   ].join('\n');
 }
 
-function openclawResultError(result) {
+function harnessResultError(result) {
   const payloads = result?.result?.payloads || [];
   const text = payloads.map(p => p?.text || '').join('\n').trim();
   if (/LLM request failed|LLM idle timeout|network connection error/i.test(text)) {
-    return text || 'OpenClaw model request failed';
+    return text || 'Agent SDK model request failed';
   }
   const stopReason = result?.result?.stopReason;
   const err = result?.result?.error || result?.error;
-  if (stopReason === 'error' || err) return err || 'OpenClaw run stopped with error';
+  if (stopReason === 'error' || err) return err || 'Agent SDK run stopped with error';
   return null;
 }
 
 function assessmentAgentIds() {
   const registryIds = loadAgentRegistry().map(a => a.id).filter(Boolean);
   const ids = registryIds.length ? registryIds : listAgentIds();
-  // Atlas is the user's general chatbot; a GLaDOS operational reset should not
-  // erase that separate conversation unless Atlas itself is selected.
-  return [...new Set(ids)].filter(id => id !== 'atlas');
+  return [...new Set(ids)];
 }
 
-function resetAgentSession(agentId, ts = new Date().toISOString().replace(/[:.]/g, '-')) {
-  const fs = require('node:fs');
-  const os = require('node:os');
-  const sessionsIdxPath = path.join(os.homedir(), '.openclaw/agents', agentId, 'sessions/sessions.json');
-  const snap = currentSessionForAgent(agentId);
-  let idx = null;
-  const archivedPaths = [];
-  const removedLockPaths = [];
-  let removedIndexEntry = false;
-
-  try {
-    idx = JSON.parse(fs.readFileSync(sessionsIdxPath, 'utf8'));
-  } catch {}
-
-  const entries = idx && typeof idx === 'object'
-    ? Object.entries(idx).filter(([key]) => key === `agent:${agentId}:main` || key.startsWith(`agent:${agentId}:subagent:`))
-    : [];
-  if (!entries.length && snap?.sessionFile) entries.push([snap.sessionKey || `agent:${agentId}:main`, { sessionFile: snap.sessionFile }]);
-
-  for (const [key, entry] of entries) {
-    const sessionFile = entry?.sessionFile;
-    if (sessionFile && fs.existsSync(sessionFile)) {
-      const archivedPath = `${sessionFile}.archived-${ts}`;
-      fs.renameSync(sessionFile, archivedPath);
-      archivedPaths.push(archivedPath);
-    }
-
-    const lockPath = sessionFile ? `${sessionFile}.lock` : null;
-    if (lockPath && fs.existsSync(lockPath)) {
-      fs.rmSync(lockPath, { force: true });
-      removedLockPaths.push(lockPath);
-    }
-
-    if (idx && idx[key]) {
-      delete idx[key];
-      removedIndexEntry = true;
-    }
-  }
-
-  if (idx && removedIndexEntry) {
-    fs.writeFileSync(sessionsIdxPath, JSON.stringify(idx, null, 2));
-  }
-
-  // Sweep loose orphan JSONLs that the index-driven pass above missed.
-  // Orphans accumulate when an OpenClaw process is killed between writing a
-  // session JSONL and updating sessions.json — the file exists but no index
-  // entry names it, so prior resets couldn't see it. Without this sweep,
-  // the agent-watcher's chokidar scan can later replay an orphan's content
-  // into the live pane and bleed prior-investigation chat into a fresh
-  // session. We rename rather than delete (recoverable on disk).
-  const sessionsDirPath = path.dirname(sessionsIdxPath);
-  const orphanArchivedPaths = [];
-  try {
-    const justArchived = new Set(archivedPaths);
-    for (const name of fs.readdirSync(sessionsDirPath)) {
-      if (!name.endsWith('.jsonl')) continue;       // skip already-archived (.jsonl.archived-*)
-      const full = path.join(sessionsDirPath, name);
-      if (justArchived.has(full)) continue;          // we just touched this one
-      // If the index still references this file, it's a live session for a
-      // different key (subagent we missed, etc.) — leave it alone.
-      let referencedInIndex = false;
-      try {
-        const raw = fs.readFileSync(sessionsIdxPath, 'utf8');
-        if (raw.includes(name)) referencedInIndex = true;
-      } catch {}
-      if (referencedInIndex) continue;
-      const orphanArchived = `${full}.archived-orphan-${ts}`;
-      try {
-        fs.renameSync(full, orphanArchived);
-        orphanArchivedPaths.push(orphanArchived);
-      } catch (e) {
-        // Best-effort — log but don't fail the reset.
-        console.warn(`[reset:${agentId}] could not archive orphan ${name}: ${e.message}`);
+function resetAgentSession(agentId) {
+  const hadSession = !!currentSessionForAgent(agentId);
+  const turn = activeChatTurns.get(agentId);
+  if (turn) {
+    turn.stopRequested = true;
+    try {
+      if (turn.abortController && !turn.abortController.signal.aborted) {
+        turn.abortController.abort('session reset');
       }
+    } catch {}
+    if (typeof turn.interrupt === 'function') {
+      Promise.resolve(turn.interrupt('session reset')).catch(() => {});
     }
-  } catch (e) {
-    if (e.code !== 'ENOENT') console.warn(`[reset:${agentId}] orphan sweep failed: ${e.message}`);
   }
-
+  activeChatTurns.delete(agentId);
+  const subagent = activeSubagentTurns.get(agentId);
+  if (subagent?.toolCallId) activeTaskToolIds.delete(subagent.toolCallId);
+  activeSubagentTurns.delete(agentId);
+  for (const [childId, child] of [...activeSubagentTurns.entries()]) {
+    if (child.parentAgentId === agentId) {
+      activeSubagentTurns.delete(childId);
+      if (child.toolCallId) activeTaskToolIds.delete(child.toolCallId);
+      broadcastLobby('session-ended', { agentId: childId, sessionId: child.sessionId, toolCallId: child.toolCallId, reason: 'session reset' });
+    }
+  }
   buffers.delete(agentId);
+  sdkSessionRegistry.clear(agentId);
   broadcastLobby('session-reset', {
     agentId,
-    archivedPath: archivedPaths[0] || null,
-    archivedPaths,
-    orphanArchivedPaths,
-    removedIndexEntry,
+    runtime: 'agent-sdk',
+    hadSession,
   });
   return {
     ok: true,
     agentId,
-    archivedPath: archivedPaths[0] || null,
-    archivedPaths,
-    orphanArchivedPaths,
-    removedLockPath: removedLockPaths[0] || null,
-    removedLockPaths,
-    removedIndexEntry,
-    hadSession: entries.length > 0 || removedIndexEntry || orphanArchivedPaths.length > 0,
+    runtime: 'agent-sdk',
+    hadSession,
   };
+}
+
+function clearAllRuntimeSessions(reason = 'runtime restart') {
+  const agentIds = new Set([
+    'glados',
+    ...assessmentAgentIds(),
+    ...buffers.keys(),
+    ...activeChatTurns.keys(),
+    ...activeSubagentTurns.keys(),
+  ]);
+  for (const [agentId, turn] of activeChatTurns.entries()) {
+    turn.stopRequested = true;
+    try {
+      if (turn.abortController && !turn.abortController.signal.aborted) turn.abortController.abort(reason);
+    } catch {}
+    if (typeof turn.interrupt === 'function') {
+      Promise.resolve(turn.interrupt(reason)).catch(() => {});
+    }
+    broadcastLobby('chat-turn-ended', { agentId, turnId: turn.turnId, stopped: true, reason });
+  }
+  for (const [agentId, turn] of activeSubagentTurns.entries()) {
+    broadcastLobby('session-ended', { agentId, sessionId: turn.sessionId, toolCallId: turn.toolCallId, reason });
+  }
+  activeChatTurns.clear();
+  activeSubagentTurns.clear();
+  activeTaskToolIds.clear();
+  buffers.clear();
+  pendingGladosKickoff = null;
+  try { transcriptStore.clearAll(); } catch (e) { console.warn('[transcript-store] runtime clear failed:', e.message); }
+  sdkSessionRegistry.clearAll();
+  for (const agentId of agentIds) {
+    broadcastLobby('session-reset', { agentId, runtime: 'agent-sdk', hadSession: true, reason });
+  }
+  return [...agentIds];
 }
 
 // Wipes the blackboard so a fresh GLaDOS session starts a clean investigation.
@@ -490,32 +741,18 @@ function wipeBlackboard() {
   }
 }
 
-// Clears every state source that can leak prior-investigation context into a
-// fresh GLaDOS session. There are three sources, all independent:
-//   1. memory/.dreams/* in each agent workspace — short-term recall snippets
-//      indexed across past memory files. The agent startup procedure
-//      (workspaces/agents/<id>/AGENTS.md) reads these; if not cleared, snippets
-//      from prior assessments resurface as "remembered context".
-//   2. ~/.openclaw/memory/<id>.sqlite — OpenClaw's per-agent vector embedding
-//      store. Holds chunks, file index, and embedding cache. Empty on most
-//      agents but accumulates on glados/atlas if the operator interacts.
-//   3. Stray .archived-* JSONLs older than the retention budget — see
-//      pruneArchivedSessions(). Not handled here; called separately on reset.
-// The curated long-term MEMORY.md is intentionally preserved.
+// Clears short-term workspace recall that can leak prior-investigation context
+// into a fresh SDK harness session. The curated long-term MEMORY.md is
+// intentionally preserved.
 function wipeAgentMemories() {
   const fs = require('node:fs');
   const path = require('node:path');
-  const os = require('node:os');
-  const Database = require('better-sqlite3');
   const workspaces = process.env.GLADOS_AGENT_WORKSPACES
-    || path.join(os.homedir(), '.glados', 'workspaces', 'agents');
-  const openclawMemDir = path.join(os.homedir(), '.openclaw', 'memory');
+    || GLADOS_AGENT_WORKSPACES;
   let dreamsCleared = 0;
-  let sqliteCleared = 0;
   let agents = 0;
   const errors = [];
 
-  // 1. Workspace .dreams short-term recall.
   let entries = [];
   try { entries = fs.readdirSync(workspaces, { withFileTypes: true }); } catch (e) {
     return { ok: false, error: `read workspaces: ${e.message}` };
@@ -533,345 +770,28 @@ function wipeAgentMemories() {
     } catch (e) { errors.push(`dreams ${ent.name}: ${e.message}`); }
   }
 
-  // 2. OpenClaw per-agent memory SQLite (vector embedding store). Clear data
-  // tables but leave schema intact so OpenClaw doesn't have to recreate it.
-  // Schema: chunks, chunks_fts*, files, embedding_cache, meta.
-  if (fs.existsSync(openclawMemDir)) {
-    for (const f of fs.readdirSync(openclawMemDir)) {
-      if (!f.endsWith('.sqlite')) continue;
-      const dbPath = path.join(openclawMemDir, f);
-      let db;
-      try {
-        db = new Database(dbPath);
-        db.exec(`
-          DELETE FROM chunks;
-          DELETE FROM files;
-          DELETE FROM chunks_fts;
-          DELETE FROM embedding_cache;
-        `);
-        sqliteCleared++;
-      } catch (e) {
-        errors.push(`openclaw-mem ${f}: ${e.message}`);
-      } finally {
-        try { db?.close(); } catch {}
-      }
-    }
-  }
-
   return {
     ok: errors.length === 0,
     agents,
     dreamsCleared,
-    openclawMemoryCleared: sqliteCleared,
     errors,
   };
 }
 
-// Truncates ~/.openclaw/logs/raw-stream.jsonl so the dashboard's RawStreamTail
-// starts fresh on the next turn. The gateway's per-token thinking/text stream
-// accumulates in this file unboundedly between rotations (50 MB threshold —
-// took a week to fill 7 MB, never rotated). When `compaction.mode: "safeguard"`
-// is active in openclaw.json, the gateway can replay old thinking tokens with
-// their original `ts` field during compaction, producing transient SSE events
-// that render in the GLaDOS pane with stale timestamps and disappear on page
-// refresh (because they're never written to the durable session JSONL). This
-// is the source of "old thinking content leaks during a fresh response" —
-// truncating clears the gateway's replay buffer.
-function truncateRawStream() {
-  const fs = require('node:fs');
-  const path = require('node:path');
-  const os = require('node:os');
-  const file = process.env.OPENCLAW_RAW_STREAM_PATH
-    || path.join(os.homedir(), '.openclaw', 'logs', 'raw-stream.jsonl');
-  let bytesBefore = 0;
-  try { bytesBefore = fs.statSync(file).size; } catch {}
-  try { fs.writeFileSync(file, ''); }
-  catch (e) { return { ok: false, error: e.message }; }
-  rawStreamFloorMs = Date.now();
-  return { ok: true, bytesBefore, truncatedAt: rawStreamFloorMs };
-}
-
-// Syncs every agent's openclaw.json `agentDir` IDENTITY.md (if present) from
-// the canonical workspace IDENTITY.md so the model never gets two competing
-// system prompts. The two-location issue exists historically because some
-// agents have both `workspace` and `agentDir` configured in openclaw.json
-// (e.g. glados), and OpenClaw loads files from both paths. If they drift,
-// the older file can dominate or contradict the workspace version. This
-// helper makes them identical, with the workspace as the source of truth.
-function syncAgentDirIdentities() {
-  const fs = require('node:fs');
-  const path = require('node:path');
-  const os = require('node:os');
-  const workspaces = process.env.GLADOS_AGENT_WORKSPACES
-    || path.join(os.homedir(), '.glados', 'workspaces', 'agents');
-  const openclawAgents = path.join(os.homedir(), '.openclaw', 'agents');
-  let synced = 0;
-  let skipped = 0;
-  const errors = [];
-  if (!fs.existsSync(workspaces) || !fs.existsSync(openclawAgents)) {
-    return { ok: true, synced, skipped, errors };
-  }
-  for (const ent of fs.readdirSync(openclawAgents, { withFileTypes: true })) {
-    if (!ent.isDirectory()) continue;
-    const agentDirIdentity = path.join(openclawAgents, ent.name, 'agent', 'IDENTITY.md');
-    const workspaceIdentity = path.join(workspaces, ent.name, 'IDENTITY.md');
-    if (!fs.existsSync(agentDirIdentity) || !fs.existsSync(workspaceIdentity)) {
-      skipped++;
-      continue;
-    }
-    try {
-      const ws = fs.readFileSync(workspaceIdentity, 'utf8');
-      const ad = fs.readFileSync(agentDirIdentity, 'utf8');
-      if (ws === ad) { skipped++; continue; }
-      fs.writeFileSync(agentDirIdentity, ws);
-      synced++;
-    } catch (e) {
-      errors.push(`${ent.name}: ${e.message}`);
-    }
-  }
-  return { ok: errors.length === 0, synced, skipped, errors };
-}
-
-// Deletes archived session JSONLs older than the retention budget across every
-// agent's sessions/ directory. Default retention is 0 — every reset garbage
-// collects all archives, since the operator explicitly does not use the
-// forensic trail. Override with env var GLADOS_ARCHIVE_RETENTION=N to keep
-// the most-recent N archive files per agent.
-//
-// Without this prune, archived JSONLs accumulated unboundedly (we hit 7.4 MB
-// across 57 files in a few days), and the agent-watcher's chokidar instance
-// could in some failure modes re-tail a stale file and bleed prior chat into
-// a fresh pane. Garbage collecting on reset keeps the sessions/ directory at
-// most one-archive-per-agent immediately after each reset.
-function pruneArchivedSessions() {
-  const fs = require('node:fs');
-  const path = require('node:path');
-  const os = require('node:os');
-  const retention = Math.max(0, Number(process.env.GLADOS_ARCHIVE_RETENTION) || 0);
-  const agentsRoot = path.join(os.homedir(), '.openclaw', 'agents');
-  let deleted = 0;
-  let kept = 0;
-  const errors = [];
-  if (!fs.existsSync(agentsRoot)) return { ok: true, deleted, kept, retention, errors };
-  for (const agentEnt of fs.readdirSync(agentsRoot, { withFileTypes: true })) {
-    if (!agentEnt.isDirectory()) continue;
-    const sessDir = path.join(agentsRoot, agentEnt.name, 'sessions');
-    if (!fs.existsSync(sessDir)) continue;
-    let archives;
-    try {
-      archives = fs.readdirSync(sessDir)
-        .filter(f => f.includes('.jsonl.archived'))
-        .map(f => {
-          const full = path.join(sessDir, f);
-          let mtime = 0;
-          try { mtime = fs.statSync(full).mtimeMs; } catch {}
-          return { full, mtime };
-        })
-        .sort((a, b) => b.mtime - a.mtime); // newest first
-    } catch (e) {
-      errors.push(`${agentEnt.name}: ${e.message}`);
-      continue;
-    }
-    archives.forEach((a, i) => {
-      if (i < retention) { kept++; return; }
-      try { fs.rmSync(a.full, { force: true }); deleted++; }
-      catch (e) { errors.push(`${agentEnt.name}/${path.basename(a.full)}: ${e.message}`); }
-    });
-  }
-  return { ok: errors.length === 0, deleted, kept, retention, errors };
-}
-
-function candidateRawStreamAgent() {
-  const active = [...activeChatTurns.keys()];
-  if (active.length === 1) return active[0];
-  const now = Date.now();
-  for (const [agentId, v] of recentChatTurns) {
-    if (!v || v.expiresAt < now) recentChatTurns.delete(agentId);
-  }
-  const recent = [...recentChatTurns.keys()];
-  return recent.length === 1 ? recent[0] : null;
-}
-
-watcher.on('event', ev => {
-  pushBuffer(ev.agentId, ev);
-  broadcastTranscript(ev.agentId, ev);
-  if (ev.kind === 'assistant-text' || ev.kind === 'prompt-error') {
-    finishActiveChatTurn(ev.agentId, ev);
-  }
-});
-watcher.on('session-started', info => {
-  broadcastLobby('session-started', info);
-});
-watcher.on('session-ended', info => {
-  broadcastLobby('session-ended', info);
-});
-
-// --- Real-time token stream from OpenClaw's raw-stream log ---
-// The gateway (when launched with OPENCLAW_RAW_STREAM=1) appends per-token
-// thinking/text deltas to ~/.openclaw/logs/raw-stream.jsonl. The file's
-// events are keyed by sessionId — we maintain a reverse map sessionId->agentId
-// from each agent's sessions.json and fan every delta into the matching
-// agent's SSE transcript stream. Frontend coalesces deltas into one live entry
-// per turn (see public/app.js 'thinking-stream' / 'text-stream' handling).
-const sessionToAgent = new Map(); // sessionId -> agentId
-const orphanRawDeltas = new Map(); // sessionId -> [{...raw-stream ev}]
-function bufferOrphanRawDelta(ev) {
-  const key = ev.sessionId;
-  if (!key) return;
-  const arr = orphanRawDeltas.get(key) || [];
-  arr.push({ ev, ts: Date.now() });
-  while (arr.length > 300) arr.shift();
-  orphanRawDeltas.set(key, arr);
-}
-function flushOrphanRawDeltas(sessionId, agentId) {
-  const arr = orphanRawDeltas.get(sessionId);
-  if (!arr || !agentId) return;
-  orphanRawDeltas.delete(sessionId);
-  const cutoff = Date.now() - 30_000;
-  for (const item of arr) {
-    if (item.ts < cutoff) continue;
-    broadcastTranscript(agentId, { agentId, ...item.ev });
-  }
-}
-function refreshSessionMap() {
-  try {
-    const registry = loadAgentRegistry();
-    for (const a of registry) {
-      const snap = currentSessionForAgent(a.id);
-      if (snap && snap.sessionId) {
-        sessionToAgent.set(snap.sessionId, a.id);
-        flushOrphanRawDeltas(snap.sessionId, a.id);
-      }
-    }
-  } catch {}
-}
-refreshSessionMap();
-setInterval(refreshSessionMap, 5_000);
-watcher.on('session-started', info => {
-  if (info?.sessionId && info?.agentId) {
-    sessionToAgent.set(info.sessionId, info.agentId);
-    flushOrphanRawDeltas(info.sessionId, info.agentId);
-  }
-});
-
-// Extract agentId from a runId. The gateway uses runId patterns like:
-//   <uuid>                                                — main-agent turn
-//   announce:v1:agent:<id>:subagent:<sub-uuid>:<uuid>     — subagent heartbeat
-//   ...:agent:<id>:...                                    — other agent-scoped runs
-// Returns the embedded agent id when present, else null. We only trust the
-// extracted id if it matches a known registered agent — otherwise we'd let
-// arbitrary runId text become pane labels.
-function agentFromRunId(runId, knownAgentIds) {
-  if (typeof runId !== 'string') return null;
-  const m = runId.match(/(?:^|[:/])agent:([a-zA-Z0-9_-]+)(?:[:/]|$)/);
-  if (!m) return null;
-  const id = m[1];
-  return knownAgentIds.has(id) ? id : null;
-}
-
-function rawEventMs(ev) {
-  const parsed = Date.parse(ev?.ts || '');
-  return Number.isFinite(parsed) ? parsed : Date.now();
-}
-
-function staleRawStreamEvent(ev, agentId) {
-  const evMs = rawEventMs(ev);
-  if (evMs < rawStreamFloorMs - 1000) return true;
-  const snap = agentId ? currentSessionForAgent(agentId) : null;
-  if (snap?.sessionId && ev.sessionId && ev.sessionId !== snap.sessionId) return true;
-  if (snap?.startedAt && evMs < snap.startedAt - 1000) return true;
-  return false;
-}
-
-function readSessionBackfillEvents(sessionFile, agentId, sessionId) {
-  let raw = '';
-  try { raw = fs.readFileSync(sessionFile, 'utf8'); } catch { return null; }
-  const events = [];
-  for (const line of raw.split(/\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let obj;
-    try { obj = JSON.parse(trimmed); } catch { continue; }
-    for (const ev of convertToEvents(obj)) {
-      events.push({ agentId, sessionId, ...ev });
-    }
-  }
-  return suppressSupersededPromptErrors(events);
-}
-
-function eventSortMs(ev) {
-  const ms = Date.parse(ev?.ts || '');
-  return Number.isFinite(ms) ? ms : 0;
-}
-
-function bufferedTranscriptEvents(agentId, lastEventId = null) {
-  let backfill = [];
-  const snap = currentSessionForAgent(agentId);
-  if (snap && snap.sessionFile && fs.existsSync(snap.sessionFile)) {
-    backfill = readSessionBackfillEvents(snap.sessionFile, agentId, snap.sessionId) || [];
-  }
+function bufferedTranscriptEvents(agentId, lastEventId = null, options = {}) {
   let dashboardEvents = [];
   try {
     dashboardEvents = transcriptStore.list(agentId);
   } catch (e) {
     console.warn('[transcript-store] could not list dashboard events:', e.message);
   }
-  const merged = mergeTranscriptEvents(backfill, dashboardEvents, buffers.get(agentId) || []);
+  const mergeOptions = { includeStream: options.includeStream !== false };
+  const merged = mergeTranscriptEvents(
+    { events: dashboardEvents, options: mergeOptions },
+    { events: buffers.get(agentId) || [], options: mergeOptions }
+  );
   return afterLastEventId(merged, lastEventId);
 }
-
-function suppressSupersededPromptErrors(events) {
-  if (!Array.isArray(events) || events.length === 0) return events || [];
-  return events.filter((ev, i) => {
-    if (ev.kind !== 'prompt-error') return true;
-    return !events.slice(i + 1).some(later => later.kind === 'assistant-text');
-  });
-}
-
-const rawStream = new RawStreamTail().start();
-rawStream.on('raw', ev => {
-  // Suppress subagent heartbeat traffic ("NO_REPLY" replies and the like).
-  // These are gateway-internal liveness pings — never operator-facing chat —
-  // and previously cluttered the GLaDOS pane as one-token fragments because
-  // they have no sessionId and got routed to the candidate agent.
-  if (typeof ev.runId === 'string' && ev.runId.startsWith('announce:')) return;
-
-  // Build the known-agent set fresh each event — registry is small and this
-  // saves us from staleness if a new agent was just registered.
-  const knownAgentIds = new Set(loadAgentRegistry().map(a => a.id));
-
-  // Lazy-learn: if a sessionId isn't in our map yet (e.g. brand-new session we
-  // haven't scanned), do a one-shot refresh before dropping the event.
-  let agentId = ev.sessionId ? sessionToAgent.get(ev.sessionId) : null;
-  if (!agentId && ev.sessionId) { refreshSessionMap(); agentId = sessionToAgent.get(ev.sessionId); }
-  // The raw-stream log frequently omits sessionId but always has runId, and
-  // the runId itself encodes the agent for any agent-scoped run. Prefer that
-  // over the "active chat" candidate fallback so subagent traffic lands in
-  // the subagent's pane instead of polluting whichever chat is currently up.
-  if (!agentId) {
-    agentId = agentFromRunId(ev.runId, knownAgentIds);
-  }
-  if (!agentId && !ev.sessionId) {
-    agentId = candidateRawStreamAgent();
-  }
-  if (!agentId) {
-    if (ev.sessionId) bufferOrphanRawDelta(ev);
-    return;
-  }
-  if (staleRawStreamEvent(ev, agentId)) return;
-  const enriched = { agentId, ...ev };
-  // DO NOT push to the per-agent ring buffer — the buffer is for backfill
-  // on reconnect and a 2000-token-per-turn flood would blow it out instantly.
-  // Streaming deltas are live-only; reconnecting clients re-read the final
-  // message from the session JSONL (which is the durable source of truth).
-  broadcastTranscript(agentId, enriched);
-});
-rawStream.on('rotated', info => {
-  console.log(`[raw-stream] rotated to ${info.rotatedTo}`);
-});
-rawStream.on('error', e => {
-  console.warn('[raw-stream] error:', e.message);
-});
 
 // --- REST ---
 
@@ -884,8 +804,10 @@ app.get('/api/agents', (req, res) => {
       name: a.name,
       model: a.model,
       workspace: a.workspace,
+      runtime: a.runtime || 'agent-sdk',
       active: !!(snap && snap.live),
       session: snap,
+      halted: watchdogHalt.agentStatus(a.id).haltActive,
     };
   });
   res.json({ agents: out });
@@ -912,6 +834,7 @@ app.get('/api/agents/stream', (req, res) => {
 // Per-agent transcript SSE. On connect, backfills recent buffer then streams live.
 app.get('/api/agents/:id/transcript', (req, res) => {
   const agentId = req.params.id;
+  const includeStream = req.query.stream === 'v4';
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-transform',
@@ -919,19 +842,18 @@ app.get('/api/agents/:id/transcript', (req, res) => {
   });
   res.write(': connected\n\n');
 
-  // Backfill from the durable session JSONL plus the in-memory ring. This is
-  // intentionally done on every connect, not only when the ring is empty:
-  // subagent prompts can be written before the watcher attaches, while later
-  // live events still populate the ring.
+  // Backfill from the durable SDK transcript store plus the in-memory live ring.
   const lastEventId = req.get('Last-Event-ID') || req.query.lastEventId || null;
-  for (const ev of bufferedTranscriptEvents(agentId, lastEventId)) {
-    res.write(sseFrame(ev));
+  for (const ev of bufferedTranscriptEvents(agentId, lastEventId, { includeStream })) {
+    const payload = sseFrame(ev, { includeStream });
+    if (payload) res.write(payload);
   }
 
   let set = sseClients.get(agentId);
   if (!set) { set = new Set(); sseClients.set(agentId, set); }
-  set.add(res);
-  req.on('close', () => set.delete(res));
+  const client = { res, includeStream };
+  set.add(client);
+  req.on('close', () => set.delete(client));
 });
 
 // GLaDOS chat — POST message; reply arrives via the normal transcript stream.
@@ -964,8 +886,8 @@ app.post('/api/chat/glados', async (req, res) => {
     const approvedMessage = buildApprovedKickoffMessage(approved, message);
     const turnId = startChatTurn('glados', approvedMessage);
     try {
-      const result = await sendMessageToAgent('glados', approvedMessage);
-      const resultError = openclawResultError(result);
+      const result = await sendMessageToAgentRuntime('glados', approvedMessage, { turnId });
+      const resultError = harnessResultError(result);
       if (resultError) {
         if (approved.goalId) controller.updateGoalStatus(approved.goalId, 'failed');
         return res.status(502).json({ ok: false, error: resultError, result });
@@ -983,12 +905,6 @@ app.post('/api/chat/glados', async (req, res) => {
     } finally {
       finishChatTurn('glados', turnId);
     }
-  }
-
-  const kickoffTarget = extractInvestigationTarget(message);
-  if (kickoffTarget) {
-    recordUserTranscript('glados', message);
-    return res.json(createPendingGladosKickoff(kickoffTarget, message));
   }
 
   if (isFreshSessionQuestion(message)) {
@@ -1013,8 +929,8 @@ app.post('/api/chat/glados', async (req, res) => {
 
   const turnId = startChatTurn('glados', message);
   try {
-    const result = await sendMessageToAgent('glados', message);
-    const resultError = openclawResultError(result);
+    const result = await sendMessageToAgentRuntime('glados', message, { turnId });
+    const resultError = harnessResultError(result);
     if (resultError) return res.status(502).json({ ok: false, error: resultError, result });
     res.json({ ok: true, result });
   } catch (e) {
@@ -1029,22 +945,10 @@ app.post('/api/chat/glados', async (req, res) => {
   }
 });
 
-// Atlas chat — local general-purpose assistant (not red-team). Same plumbing
-// as GLaDOS: POST message, reply streams back over the agent's transcript SSE.
-app.post('/api/chat/atlas', async (req, res) => {
-  const message = (req.body && req.body.message) || '';
-  if (!message.trim()) return res.status(400).json({ error: 'message required' });
-  const turnId = startChatTurn('atlas', message);
-  try {
-    const result = await sendMessageToAgent('atlas', message);
-    const resultError = openclawResultError(result);
-    if (resultError) return res.status(502).json({ ok: false, error: resultError, result });
-    res.json({ ok: true, result });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message, stderr: e.stderr, stdout: e.stdout });
-  } finally {
-    finishChatTurn('atlas', turnId);
-  }
+app.post('/api/chat/:agent/stop', (req, res) => {
+  const agentId = req.params.agent;
+  const reason = String(req.body?.reason || 'operator stop').slice(0, 200);
+  res.json(stopChatTurn(agentId, reason));
 });
 
 app.get('/api/chat/status/:agent', (req, res) => {
@@ -1060,52 +964,38 @@ app.get('/api/chat/status/:agent', (req, res) => {
   });
 });
 
-// Atlas image upload — saves a base64-data-URL image to a staging dir and
-// returns the absolute path. The frontend then appends that path into the
-// user's next message text so Atlas can use `read` (or vision, if the model
-// supports it) to inspect it.
-const ATLAS_UPLOADS = path.join(require('node:os').tmpdir(), 'atlas-uploads');
-try { require('node:fs').mkdirSync(ATLAS_UPLOADS, { recursive: true }); } catch {}
-app.use('/api/chat/atlas/uploads', express.json({ limit: '25mb' }));
-app.post('/api/chat/atlas/upload', express.json({ limit: '25mb' }), (req, res) => {
-  const { dataUrl, filename } = req.body || {};
-  if (!dataUrl || typeof dataUrl !== 'string') return res.status(400).json({ ok: false, error: 'dataUrl required' });
-  const m = dataUrl.match(/^data:(image\/(png|jpeg|jpg|webp|gif));base64,(.+)$/);
-  if (!m) return res.status(400).json({ ok: false, error: 'unsupported image format' });
-  const ext = m[2] === 'jpeg' ? 'jpg' : m[2];
-  const base = (filename || 'upload').replace(/[^\w.\-]/g, '_').slice(0, 40);
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const outPath = path.join(ATLAS_UPLOADS, `${stamp}-${base}.${ext}`);
-  try {
-    require('node:fs').writeFileSync(outPath, Buffer.from(m[3], 'base64'));
-    res.json({ ok: true, path: outPath, bytes: Buffer.from(m[3], 'base64').length });
-  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-
 async function haltAgent(agentId, reason = 'dashboard halt', initiator = 'dashboard') {
+  if (!assessmentAgentIds().includes(agentId)) throw new Error(`unknown GLaDOS agent: ${agentId}`);
   const result = await watchdogHalt.agentHalt(agentId, reason, { initiator });
-  broadcastLobby('halt', { agentId, reason });
-  return result;
+  let interruptedParent = null;
+  const direct = activeChatTurns.get(agentId);
+  try { direct?.abortController?.abort(`${agentId} halted by operator`); } catch {}
+  if (typeof direct?.interrupt === 'function') {
+    await Promise.resolve(direct.interrupt(`${agentId} halted by operator`)).catch(() => {});
+  }
+  const subagent = activeSubagentTurns.get(agentId);
+  if (subagent?.parentAgentId) {
+    interruptedParent = subagent.parentAgentId;
+    const parentTurn = activeChatTurns.get(interruptedParent);
+    try { parentTurn?.abortController?.abort(`${agentId} halted by operator`); } catch {}
+    if (typeof parentTurn?.interrupt === 'function') {
+      await Promise.resolve(parentTurn.interrupt(`${agentId} halted by operator`)).catch(() => {});
+    }
+  }
+  const notice = `Operator halted ${agentId}: ${reason}. ${interruptedParent ? `Its owning ${interruptedParent} turn was interrupted.` : 'Future tool calls are denied until this agent is resumed.'}`;
+  transcriptEvent(agentId, 'operator-event', notice, { halted: true, initiator, isError: true });
+  if (agentId !== 'glados') transcriptEvent('glados', 'operator-event', notice, { haltedAgentId: agentId, halted: true, initiator, isError: true });
+  broadcastLobby('halt', { agentId, reason, interruptedParent, haltActive: true });
+  return { ...result, interruptedParent };
 }
 
 async function resumeAgent(agentId, initiator = 'dashboard') {
+  if (!assessmentAgentIds().includes(agentId)) throw new Error(`unknown GLaDOS agent: ${agentId}`);
   const result = await watchdogHalt.agentResume(agentId, { initiator });
-  broadcastLobby('resume', { agentId });
-  return result;
-}
-
-async function haltAll(reason = 'dashboard halt-all', engagementId = null, initiator = 'dashboard') {
-  const result = await watchdogHalt.engagementHaltAll(engagementId, reason, { initiator });
-  broadcastLobby('halt-all', {
-    reason,
-    haltedAgents: result.haltedAgents || [],
-  });
-  return result;
-}
-
-async function resumeAll(initiator = 'dashboard') {
-  const result = await watchdogHalt.engagementResumeAll({ initiator });
-  broadcastLobby('resume-all', { resumed: result.resumed || [] });
+  const notice = `Operator resumed ${agentId}. New turns and tool calls are permitted by the per-agent halt gate.`;
+  transcriptEvent(agentId, 'operator-event', notice, { halted: false, initiator });
+  if (agentId !== 'glados') transcriptEvent('glados', 'operator-event', notice, { haltedAgentId: agentId, halted: false, initiator });
+  broadcastLobby('resume', { agentId, haltActive: false });
   return result;
 }
 
@@ -1115,8 +1005,20 @@ async function probeTarget(targetUrl) {
   return result;
 }
 
-async function burpRps() {
-  return { rps: await getBurpRps({ windowSec: 10 }) };
+function currentProxyConfig() {
+  return proxyBackendConfig(process.env);
+}
+
+async function proxyRps() {
+  const metrics = proxyMetrics({ windowSec: 10, config: currentProxyConfig() });
+  return { backend: metrics.backend, rps: metrics.rps };
+}
+
+function configuredReplayProxyUrl() {
+  const config = currentProxyConfig();
+  if (process.env.GLADOS_REPLAY_PROXY) return process.env.GLADOS_REPLAY_PROXY;
+  if (config.backend === 'mitmproxy') return `http://${config.listenHost}:${config.listenPort}`;
+  return '';
 }
 
 function activeAgentStatus() {
@@ -1191,24 +1093,17 @@ async function runSlash(raw) {
   } else if (cmd === '/halt') {
     if (!arg) emit('usage: /halt <agent>');
     else emit(JSON.stringify(await haltAgent(arg, 'slash command', 'slash'), null, 2));
-  } else if (cmd === '/halt-all') {
-    emit(JSON.stringify(await haltAll('slash command', null, 'slash'), null, 2));
   } else if (cmd === '/resume') {
     if (!arg) emit('usage: /resume <agent>');
     else emit(JSON.stringify(await resumeAgent(arg, 'slash'), null, 2));
-  } else if (cmd === '/resume-all') {
-    emit(JSON.stringify(await resumeAll('slash'), null, 2));
   } else if (cmd === '/probe') {
     if (!arg) emit('usage: /probe <url>');
     else emit(JSON.stringify(await probeTarget(arg), null, 2));
-  } else if (cmd === '/rps' || cmd === '/breaker') {
-    const r = await burpRps();
-    emit(`Burp RPS: ${r.rps ?? 'n/a'}\nAutomatic 5xx/429 halt breaker is disabled. Use Halt All when you want to stop the engagement.`);
   } else if (cmd === '/status') {
     emit(slash.formatStatus(controllerStatusPayload()));
   } else if (cmd === '/goal' || cmd === '/investigate') {
     if (!arg) {
-      emit(slash.targetUsage(cmd));
+      emit(cmd === '/investigate' ? slash.investigateReadyPrompt() : slash.targetUsage(cmd));
     } else if (!slash.isUrlOrDomain(arg)) {
       emit(`${slash.targetUsage(cmd)}\nTarget must be a URL or domain.`);
     } else {
@@ -1290,18 +1185,6 @@ app.post('/api/resume/:id', async (req, res) => {
     res.json(await resumeAgent(req.params.id, 'dashboard'));
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
-app.post('/api/halt-all', async (req, res) => {
-  try {
-    res.json(await haltAll(req.body?.reason || 'dashboard halt-all', req.body?.engagement_id || null, 'dashboard'));
-  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-// v3.1: companion to /api/halt-all. Clears deny rules for every agent the
-// halt-all added, and re-enables the Burp scope.
-app.post('/api/resume-all', async (req, res) => {
-  try {
-    res.json(await resumeAll('dashboard'));
-  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
 
 // --- Target health ---
 app.post('/api/targets/probe', async (req, res) => {
@@ -1315,61 +1198,42 @@ app.get('/api/targets', (req, res) => {
   res.json({ targets: watchdogHealth.listHealth() });
 });
 
-// --- Burp RPS + gate indicator ---
-app.get('/api/burp/rps', async (req, res) => {
-  res.json(await burpRps());
+// --- Proxy metrics ---
+app.get('/api/proxy/rps', async (req, res) => {
+  res.json(await proxyRps());
 });
 
-// --- Burp extension passthrough (:1338 — GLaDOS Montoya extension) ---
-// The dashboard's Proxy tab calls these; the server forwards to the extension
-// so the browser never needs to know about :1338 directly. If the extension
-// isn't running, these degrade gracefully (503 / empty SSE).
-const BURP_EXT_API = process.env.BURP_EXT_API || 'http://127.0.0.1:1338';
+// --- Proxy API abstraction ---
 app.get('/api/proxy/detail', async (req, res) => {
   const id = String(req.query.id || '');
   if (!id) return res.status(400).json({ error: 'id required' });
-  try {
-    const upstream = await fetch(`${BURP_EXT_API}/proxy/detail?id=${encodeURIComponent(id)}`);
-    if (!upstream.ok) return res.status(upstream.status).json({ error: 'not found' });
-    res.json(await upstream.json());
-  } catch {
-    res.status(503).json({ error: 'burp extension unreachable at :1338' });
-  }
+  const detail = proxyDetail(id, currentProxyConfig());
+  if (!detail) return res.status(404).json({ error: 'not found' });
+  res.json(detail);
 });
 app.get('/api/proxy/metrics', async (req, res) => {
-  // v3.1 — per-agent proxy metrics passthrough.
-  const qs = new URLSearchParams();
-  if (req.query.window) qs.set('window', String(req.query.window));
-  try {
-    const upstream = await fetch(`${BURP_EXT_API}/proxy/metrics?${qs}`);
-    if (!upstream.ok) return res.status(upstream.status).json({ agents: [] });
-    res.json(await upstream.json());
-  } catch {
-    res.status(503).json({ error: 'burp extension unreachable at :1338', agents: [] });
-  }
+  res.json(proxyMetrics({
+    windowSec: Number(req.query.window || 10),
+    config: currentProxyConfig(),
+  }));
 });
 app.get('/api/proxy/history', async (req, res) => {
-  const qs = new URLSearchParams();
-  if (req.query.since) qs.set('since', String(req.query.since));
-  if (req.query.limit) qs.set('limit', String(req.query.limit));
-  try {
-    const upstream = await fetch(`${BURP_EXT_API}/proxy/history?${qs}`);
-    if (!upstream.ok) return res.status(upstream.status).json([]);
-    const rows = await upstream.json();
-    res.json(rows);
-  } catch {
-    res.status(503).json({ error: 'burp extension unreachable at :1338' });
-  }
+  res.json(proxyHistory({
+    since: req.query.since,
+    limit: req.query.limit,
+    config: currentProxyConfig(),
+  }));
 });
-// v3.1 — Request replay. Fires an HTTP request through Burp proxy so it lands
-// in history with the provided agent tag; returns the response inline.
+// Request replay. Fires an HTTP request through the configured proxy so it
+// lands in history with the provided agent tag; returns the response inline.
 // Body: { method, url, headers: {..}, body?: string, agentTag?: string, timeoutMs? }
 app.post('/api/proxy/replay', async (req, res) => {
   const { method = 'GET', url, headers = {}, body = null, agentTag = 'replay', timeoutMs = 15000 } =
     req.body || {};
   if (!url || !/^https?:\/\//i.test(url)) return res.status(400).json({ error: 'valid http(s) url required' });
-  // Forbid replay to loopback / localhost — prevents accidentally re-sending
-  // dashboard/gateway/ollama traffic through Burp and muddying attribution.
+  // Forbid replay to loopback / localhost; prevents accidentally re-sending
+  // dashboard/gateway/ollama traffic through the capture proxy and muddying
+  // attribution.
   try {
     const u = new URL(url);
     const host = u.hostname.toLowerCase();
@@ -1380,13 +1244,13 @@ app.post('/api/proxy/replay', async (req, res) => {
 
   const undici = (() => { try { return require('undici'); } catch { return null; } })();
   const ProxyAgent = undici?.ProxyAgent;
-  const proxyUrl = process.env.GLADOS_REPLAY_PROXY || 'http://127.0.0.1:8080';
-  const dispatcher = ProxyAgent
+  const proxyUrl = configuredReplayProxyUrl();
+  const dispatcher = ProxyAgent && proxyUrl
     ? new ProxyAgent({
       uri: proxyUrl,
-      // Replay intentionally talks through Burp, which resigns upstream TLS
-      // with the local PortSwigger CA. Some operator shells do not export that
-      // CA into Node, so tolerate Burp's interception cert for this endpoint.
+      // Replay intentionally talks through a local MITM proxy, which resigns
+      // upstream TLS. Some operator shells do not export the local CA into
+      // Node, so tolerate the interception cert for this endpoint.
       requestTls: { rejectUnauthorized: false },
     })
     : undefined;
@@ -1417,9 +1281,6 @@ app.post('/api/proxy/replay', async (req, res) => {
 });
 
 app.get('/api/proxy/stream', async (req, res) => {
-  // Pipe SSE from the extension to the browser. Emit dashboard-side comments
-  // immediately and on an interval so the Proxy tab can show "live" even when
-  // Burp has no request events to forward yet.
   res.set({
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -1428,32 +1289,21 @@ app.get('/api/proxy/stream', async (req, res) => {
   });
   res.flushHeaders?.();
   res.write(`: dashboard proxy stream open\n\n`);
-  let upstream, aborted = false;
-  const controller = new AbortController();
+  let closed = false;
   const heartbeat = setInterval(() => {
-    if (!aborted && !res.destroyed) res.write(`: dashboard heartbeat ${Date.now()}\n\n`);
+    if (!closed && !res.destroyed) res.write(`: dashboard heartbeat ${Date.now()}\n\n`);
   }, 15000);
-  req.on('close', () => { aborted = true; controller.abort(); clearInterval(heartbeat); });
-  try {
-    upstream = await fetch(`${BURP_EXT_API}/proxy/stream`, { signal: controller.signal });
-    if (!upstream.ok || !upstream.body) {
-      res.write(`: upstream unreachable\n\n`);
-      return res.end();
-    }
-    res.write(`: upstream connected\n\n`);
-    const reader = upstream.body.getReader();
-    const decoder = new TextDecoder();
-    while (!aborted) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      res.write(decoder.decode(value, { stream: true }));
-    }
-  } catch {
-    if (!aborted) res.write(`: upstream error\n\n`);
-  } finally {
+  const closeWatch = watchProxyEvents({
+    config: currentProxyConfig(),
+    onEvent: row => {
+      if (!closed && !res.destroyed) res.write(`data: ${JSON.stringify(row)}\n\n`);
+    },
+  });
+  req.on('close', () => {
+    closed = true;
     clearInterval(heartbeat);
-  }
-  res.end();
+    closeWatch();
+  });
 });
 
 // --- Reports ---
@@ -1480,37 +1330,36 @@ app.put('/api/reports/file', (req, res) => {
   } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 });
 
-// Serves the standalone Mermaid flow diagram for the About tab iframe.
+// Serves the standalone Mermaid flow diagram for diagnostics.
 app.get('/api/flow-diagram', (req, res) => {
   const p = path.resolve(__dirname, '..', 'glados-flow-diagram.html');
   res.sendFile(p, err => { if (err) res.status(404).send('flow diagram not found'); });
 });
 
-// Restarts the OpenClaw Gateway service via `openclaw daemon restart`.
+// Refreshes the local SDK runtime state. The v4 harness is in-process, so there
+// is no external gateway daemon to restart.
 app.post('/api/gateway/restart', (req, res) => {
-  const { execFile } = require('node:child_process');
-  const { OPENCLAW_BIN } = require('./lib/config');
-  execFile(OPENCLAW_BIN, ['daemon', 'restart'], { timeout: 30_000 }, (err, stdout, stderr) => {
-    if (err) return res.status(500).json({ ok: false, error: err.message, stderr: stderr?.toString() });
-    const rawStream = truncateRawStream();
-    broadcastLobby('gateway-restart', { ok: true, rawStream });
-    res.json({ ok: true, stdout: stdout?.toString(), stderr: stderr?.toString(), rawStream });
+  const agentIds = clearAllRuntimeSessions('runtime restart');
+  broadcastLobby('runtime-refresh', { ok: true, runtime: 'agent-sdk', resetAll: true, agentIds });
+  res.json({
+    ok: true,
+    runtime: 'agent-sdk',
+    resetAll: true,
+    resetCount: agentIds.length,
+    message: 'Agent SDK runtime is in-process; no external gateway restart is required.',
   });
 });
 
-// Archives the current session JSONL so the agent's next turn starts fresh.
-// When agentId === 'glados', cascades to every assessment agent AND wipes the
-// blackboard (engagements, findings, tasks, plans, recon state) — a glados
-// reset means a new investigation, and findings from a prior target must not
-// bleed into the next one. Evidence files and exported reports on the
-// filesystem are intentionally untouched.
+// Clears SDK transcript/liveness state so the next turn starts fresh. When
+// agentId === 'glados', cascades to every assessment agent and wipes the
+// blackboard. Evidence files and exported reports on disk are intentionally
+// untouched.
 app.post('/api/agents/:id/reset-session', (req, res) => {
   const agentId = req.params.id;
   try {
-    const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const ids = agentId === 'glados' ? assessmentAgentIds() : [agentId];
     const results = ids.map(id => {
-      try { return resetAgentSession(id, ts); }
+      try { return resetAgentSession(id); }
       catch (e) { return { ok: false, agentId: id, error: e.message }; }
     });
     const failed = results.filter(r => !r.ok);
@@ -1519,35 +1368,25 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
 
     let blackboard = null;
     let memories = null;
-    let archivePrune = null;
-    let agentDirSync = null;
-    let rawStream = null;
     if (agentId === 'glados') {
       pendingGladosKickoff = null;
       blackboard = wipeBlackboard();
       memories = wipeAgentMemories();
-      archivePrune = pruneArchivedSessions();
-      agentDirSync = syncAgentDirIdentities();
-      rawStream = truncateRawStream();
       broadcastLobby('blackboard-wiped', blackboard);
       broadcastLobby('memories-wiped', memories);
-      broadcastLobby('archives-pruned', archivePrune);
-      broadcastLobby('raw-stream-truncated', rawStream);
     }
 
     const primary = results.find(r => r.agentId === agentId) || results[0];
     res.json({
       ok: true,
       agentId,
-      archivedPath: primary?.archivedPath || null,
+      runtime: 'agent-sdk',
       cascade: agentId === 'glados',
       resetCount: results.length,
       results,
+      hadSession: !!primary?.hadSession,
       blackboard,
       memories,
-      archivePrune,
-      agentDirSync,
-      rawStream,
     });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
@@ -1564,7 +1403,11 @@ app.get('/api/agents/:id/details', (req, res) => {
   res.json(d);
 });
 app.get('/api/models', async (req, res) => {
-  res.json({ models: await agentDetails.listKnownModels() });
+  try {
+    res.json({ models: await agentDetails.listKnownModels() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 app.post('/api/agents/:id/model', (req, res) => {
   try {
@@ -1587,44 +1430,40 @@ app.get('/api/slash-commands', (req, res) => {
 });
 
 app.get('/api/healthz', (req, res) => {
-  res.json({ ok: true, activeAgents: watcher.activeAgents().length });
+  res.json({ ok: true, runtime: 'agent-sdk', activeAgents: activeAgentStatus().length });
 });
 
-// v3.1 — Burp + patch-integrity sentinel written by the tag-injector preload.
-// Dashboard polls every 5s and renders a red banner if `healthy` is false.
-app.get('/api/health/burp', (req, res) => {
-  const p = path.join(require('node:os').homedir(), '.openclaw/logs/tag-injector-health.json');
-  try {
-    const raw = require('node:fs').readFileSync(p, 'utf8');
-    const data = JSON.parse(raw);
-    const stale = Date.now() - data.ts > 180_000; // older than 3× probe interval
-    res.json({ ...data, stale });
-  } catch (e) {
-    res.status(503).json({
-      healthy: false,
-      error: 'sentinel not available — tag-injector not loaded?',
-      hint: 'Check NODE_OPTIONS on the gateway plist; restart gateway.',
-    });
-  }
+app.get('/api/update/status', (req, res) => {
+  res.json(updateRunner.updateStatus({ activeAgents: activeAgentStatus().length }));
 });
 
-// v3.1 — Re-apply the openclaw bundle patches from the dashboard (Help tab
-// "Re-apply patches" button). Runs tools/patch-openclaw-bundle.sh and returns
-// stdout/stderr so the operator can see the result.
-app.post('/api/health/burp/reapply-patches', (req, res) => {
-  const { execFile } = require('node:child_process');
-  const script = path.resolve(__dirname, '..', 'tools/patch-openclaw-bundle.sh');
-  execFile('bash', [script], { timeout: 30_000 }, (err, stdout, stderr) => {
-    if (err) return res.status(500).json({ ok: false, error: err.message, stdout: stdout?.toString(), stderr: stderr?.toString() });
-    broadcastLobby('patches-reapplied', { ok: true });
-    res.json({ ok: true, stdout: stdout?.toString(), stderr: stderr?.toString() });
+app.get('/api/update/stream', (req, res) => {
+  updateRunner.startUpdateStream({
+    res,
+    force: /^(1|true|yes)$/i.test(String(req.query.force || '')),
+    activeAgents: activeAgentStatus().length,
   });
 });
 
-// v3.1 — Plan-approval workflow endpoints (see routes/plans.js).
+app.get('/api/health/proxy', (req, res) => {
+  const store = proxyHealth(currentProxyConfig());
+  const supervised = process.env.GLADOS_DESKTOP === '1' && store.backend === 'mitmproxy';
+  const processHealthy = !supervised || proxyRuntime.status === 'running';
+  res.json({
+    ...store,
+    healthy: store.healthy && processHealthy,
+    processStatus: supervised ? proxyRuntime.status : 'external',
+    pid: supervised ? proxyRuntime.pid : null,
+    startedAt: supervised ? proxyRuntime.startedAt : null,
+    error: store.error || (!processHealthy ? proxyRuntime.error || 'native proxy is not running' : null),
+    stderr: !processHealthy ? proxyRuntime.stderr : undefined,
+  });
+});
+
+// v4 — Plan-approval workflow endpoints (see routes/plans.js).
 app.use('/api/plans', require('./routes/plans')(broadcastLobby));
 
-// v3.1.04252026 (Blocker E) — Replan-proposal watcher.
+// v4.0.0 (Blocker E) — Replan-proposal watcher.
 // Polls blackboard's replan_proposals table every 5s for state='open' rows.
 // Broadcasts plan-replan-proposed once per (engagement_id, finding_id) tuple
 // (in-memory dedup); operator approves/dismisses via /api/plans/replan-proposals.
@@ -1692,9 +1531,8 @@ app.get('/api/replan-proposals', (req, res) => {
   function safeJson(s){ try { return s ? JSON.parse(s) : null; } catch { return null; } }
 });
 app.post('/api/replan-proposals/:id/resolve', express.json(), (req, res) => {
-  const path = require('node:path');
   const Database = require('better-sqlite3');
-  const dbPath = path.resolve(__dirname, '..', 'blackboard', 'blackboard.db');
+  const dbPath = BLACKBOARD_DB;
   const db = new Database(dbPath);
   try {
     const state = req.body?.state || 'dismissed';
@@ -1717,15 +1555,38 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/api/terminal' });
 wss.on('connection', ws => attachTerminal(ws));
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`GLaDOS Ops Dashboard on http://localhost:${PORT}`);
-});
+function listen(port, { fallback = true } = {}) {
+  server.once('error', err => {
+    if (fallback && err?.code === 'EADDRINUSE' && Number(port) !== 0) {
+      console.warn(`[startup] port ${port} in use; falling back to a dynamic loopback port`);
+      listen(0, { fallback: false });
+      return;
+    }
+    console.error('[startup] server listen failed:', err);
+    process.exitCode = 1;
+  });
+  server.listen(Number(port) || 0, '127.0.0.1', () => {
+    const actual = server.address()?.port || port;
+    const url = `http://127.0.0.1:${actual}`;
+    console.log(`GLaDOS Ops Dashboard on ${url}`);
+    if (typeof process.send === 'function') process.send({ type: 'glados-dashboard-ready', url, port: actual });
+  });
+}
 
-function shutdown() {
-  try { watcher.stop(); } catch {}
+listen(PORT);
+
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try { server.close(); } catch {}
+  await stopDesktopProxy();
   try { controller.close(); } catch {}
   try { transcriptStore.close(); } catch {}
   process.exit(0);
 }
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => { shutdown().catch(() => process.exit(1)); });
+process.on('SIGTERM', () => { shutdown().catch(() => process.exit(1)); });
+if (process.env.GLADOS_DESKTOP === '1') {
+  process.on('disconnect', () => { shutdown().catch(() => process.exit(1)); });
+}

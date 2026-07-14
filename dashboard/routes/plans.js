@@ -1,4 +1,4 @@
-// GLaDOS v3.1 — Plans & plan-approval REST endpoints.
+// GLaDOS v4 — Plans & plan-approval REST endpoints.
 // Wraps the blackboard `plans` + `plan_approvals` tables with a small Express
 // router. Mounted from server.js as `app.use('/api/plans', require('./routes/plans')(broadcastLobby))`.
 //
@@ -20,12 +20,13 @@ const fs = require('node:fs');
 const os = require('node:os');
 const Database = require('better-sqlite3');
 
-// v3.1 Tier 2 — Derive a per-agent fetch ACL from an approved plan's recon
-// summary + agent_chain. Writes $OPENCLAW_HOME/glados-fetch-acl.json with a strict
-// allow-list: Phase 1 agents keep their canonical OSINT surface; exploitation
-// agents (those in agent_chain) are scoped to target hostnames discovered in
-// recon. tag-injector picks up the new file within ~1s (mtime-cached).
-const ACL_PATH = path.join(process.env.OPENCLAW_HOME || path.join(os.homedir(), '.openclaw'), 'glados-fetch-acl.json');
+const GLADOS_RUNTIME_DIR = process.env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), '.glados');
+
+// Derive a per-agent fetch ACL from an approved plan's recon summary and
+// agent_chain. The v4 policy copy lives under ~/.glados, never under legacy
+// runtime homes.
+const ACL_PATH = process.env.GLADOS_FETCH_ACL ||
+  path.join(GLADOS_RUNTIME_DIR, 'policy', 'glados-fetch-acl.json');
 const PHASE1_SURFACES = {
   osint:         ['*.shodan.io','*.censys.io','crt.sh','*.crt.sh','api.github.com','*.github.com','archive.org','web.archive.org','*.virustotal.com'],
   'origin-ip':   ['*.shodan.io','*.censys.io','*.fofa.info','dns.google','cloudflare-dns.com'],
@@ -70,12 +71,14 @@ function buildAclFromPlan(plan) {
 }
 function writeAclSafe(acl) {
   try {
-    fs.mkdirSync(path.dirname(ACL_PATH), { recursive: true });
+    fs.mkdirSync(path.dirname(ACL_PATH), { recursive: true, mode: 0o700 });
+    fs.chmodSync(path.dirname(ACL_PATH), 0o700);
     // Backup existing first.
     if (fs.existsSync(ACL_PATH)) {
       try { fs.copyFileSync(ACL_PATH, ACL_PATH + '.bak'); } catch {}
     }
-    fs.writeFileSync(ACL_PATH, JSON.stringify(acl, null, 2));
+    fs.writeFileSync(ACL_PATH, `${JSON.stringify(acl, null, 2)}\n`, { mode: 0o600 });
+    fs.chmodSync(ACL_PATH, 0o600);
     return { ok: true, path: ACL_PATH };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -170,14 +173,14 @@ module.exports = function makeRouter(broadcastLobby) {
     } finally { db.close(); }
   });
 
-  // v3.1.04252026 (Blocker H) — Transactional plan approval.
+  // Transactional plan approval.
   //
   // Old path:
   //   1) UPDATE plans SET state='approved'
   //   2) INSERT INTO plan_approvals
   //   3) Attempt ACL write → if it fails, plan is already approved and the
-  //      next sessions_spawn passes the gate with NO ACL boundary in place.
-  //      That's exactly the safety boundary v3.1 promised.
+  //      next dispatch passes the gate with NO ACL boundary in place.
+  // This is the v4 boundary between operator approval and target-capable tools.
   //
   // New path:
   //   1) Build & write the ACL FIRST. If writeAcl=true and the write fails

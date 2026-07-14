@@ -21,12 +21,15 @@ cat <<EOF
 
 This file maps an agent id to a model ref, e.g.:
   {
-    "atlas": "custom-llmapi-redteamstuff-com/minimax-m2.7",
-    "report-writer": "custom-llmapi-redteamstuff-com/qwen3.6-27b-fp8"
+    "glados": "claude-sonnet-5",
+    "report-writer": "claude-opus-4-8",
+    "osint": "claude-fable-5"
   }
 
 It lives outside the repo, survives 'git pull' and 'glados update', and always
 wins over the registry default. The dashboard model picker writes here for you.
+Use bare LiteLLM Anthropic Messages aliases; provider-prefixed values are not
+valid on the gateway's /v1/messages route.
 Reference: templates/model-overrides.example.json
 After editing, apply it with: scripts/update.sh   (or: node scripts/lib/glados-local.js update)
 EOF

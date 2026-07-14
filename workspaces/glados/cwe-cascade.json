@@ -1,5 +1,5 @@
 {
-  "_comment": "GLaDOS v3.1 — CWE cascade weightings for dynamic replanning. When a validator writes a finding with confidence >= replan_threshold AND its CWE appears here, GLaDOS halts and proposes a replan biased toward enables_vectors.",
+  "_comment": "GLaDOS v4 — CWE cascade weightings for dynamic replanning. When a validator writes a finding with confidence >= replan_threshold AND its CWE appears here, GLaDOS halts and proposes a replan biased toward enables_vectors.",
   "replan_threshold": 0.9,
   "cascades": {
     "CWE-94": {

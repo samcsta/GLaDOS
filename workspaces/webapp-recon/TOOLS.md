@@ -8,8 +8,8 @@ Core Phase 1 recon agent. Maps the application and writes baseline data; does no
 
 ## Preferred Tools
 
-- OpenClaw Browser with Burp-visible traffic for interactive web application work.
-- Burp proxy/extension for request and response evidence; keep target HTTP(S) observable unless the operator approves an exception.
+- Agent SDK Browser with proxy-visible traffic for interactive web application work.
+- GLaDOS native proxy for request and response evidence; keep target HTTP(S) observable unless the operator approves an exception.
 - Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
 - Watchdog MCP (`target_health`, `plan_check_dispatch`) for health and phase gates.
 - glados-ops `local_auth_status` and `adfs_active_directory_login` only for approved Ford ADFS dependency login.
@@ -17,7 +17,10 @@ Core Phase 1 recon agent. Maps the application and writes baseline data; does no
 
 ## Tool Rules
 
-- Use Browser/Burp-visible navigation before shell HTTP.
+- Use Browser/proxy-visible navigation before shell HTTP.
+- For an operator-requested proxy smoke test, do exactly one GET through
+  `$GLADOS_PROXY_URL` with `X-GLaDOS-Agent: webapp-recon`, report the status
+  and redirect, then stop. Do not convert the diagnostic into recon.
 - Stay inside exact scope; record discovered out-of-scope hosts as scope expansion candidates only.
 - Do not fuzz, exploit, mutate data, upload files, send messages, purchase/book, or validate high-impact leads.
 - Screenshot landing page, auth boundary, forms, error states, and meaningful app states.

@@ -11,7 +11,7 @@ Conditional specialist. Dispatch only when recon identifies a GraphQL endpoint o
 - Watchdog MCP (`target_health`, `plan_check_dispatch`) for health and phase gates.
 - glados-ops MCP (`scope_guard_check`) before target-touching actions and when scope is ambiguous.
 - Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
-- Burp proxy/extension for request and response evidence; keep target HTTP(S) observable unless the operator approves an exception.
+- GLaDOS native proxy for request and response evidence; keep target HTTP(S) observable unless the operator approves an exception.
 - Captured GraphQL traffic, schemas, and operation names.
 - glados-ops `js_endpoint_extract` for operation discovery from JS bundles.
 
