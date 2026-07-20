@@ -485,6 +485,19 @@ CREATE TABLE IF NOT EXISTS plan_approvals (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_plan_approvals_plan ON plan_approvals(plan_id);
+CREATE TABLE IF NOT EXISTS operator_action_approvals (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  target_url TEXT NOT NULL,
+  method TEXT NOT NULL DEFAULT '*',
+  risk_to_target TEXT NOT NULL DEFAULT '*',
+  operator TEXT NOT NULL DEFAULT 'operator',
+  reason TEXT,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_operator_action_approvals_match
+  ON operator_action_approvals(agent_id, target_url, method, expires_at);
 CREATE TABLE IF NOT EXISTS baseline_recon (
   engagement_id TEXT PRIMARY KEY,
   summary_json TEXT NOT NULL DEFAULT '{}',
@@ -799,6 +812,7 @@ function bootstrap() {
   log(`installed agents: ${agentResult.installed.length}`);
   log(`existing agents left untouched: ${agentResult.skipped.length}`);
   if (!fs.existsSync(DOTENV_PATH)) warn('no .env found; copy .env.example to .env and configure non-secret runtime paths');
+  return { paths, agentResult };
 }
 
 function update() {
@@ -844,6 +858,7 @@ if (require.main === module) main();
 
 module.exports = {
   localPaths,
+  bootstrap,
   bootstrapAgents,
   updateAgentStatus,
   ensureBlackboardDb,

@@ -3,18 +3,22 @@
 <head>
   <meta charset="utf-8" />
   <title>GLaDOS Ops Dashboard</title>
-  <link rel="stylesheet" href="/styles.css?v=20260714-report-library" />
+  <link rel="stylesheet" href="/styles.css?v=20260714-ops-workspace" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
       GLaDOS Ops
     </div>
+    <button id="sidebar-toggle" class="topbar-icon-btn" type="button" title="Show or hide the sidebar" aria-label="Show or hide the sidebar">☰</button>
     <nav class="tabs" id="tabs"></nav>
     <div class="controls">
       <label class="toggle"><input type="checkbox" id="errors-only" /> Errors only</label>
       <label class="toggle" title="When off, hide thinking blocks and intermediate tool calls — show only your input to GLaDOS, tool results, and final assistant output."><input type="checkbox" id="debug-mode" checked /> Debug</label>
     </div>
+    <button id="notifications-toggle" class="notification-toggle" type="button" aria-label="Open notifications" title="Notifications">
+      Alerts <span id="notifications-badge" class="notification-badge hidden">0</span>
+    </button>
   </header>
 
   <div id="health-banner" class="health-banner hidden" role="alert">
@@ -31,42 +35,67 @@
         <span class="collapsible-chevron">▾</span> Workspace
       </h2>
       <div class="workspace-links" id="workspace-links">
+        <a href="#" id="open-overview">Overview</a>
         <a href="#" id="open-glados">GLaDOS</a>
         <a href="#" id="open-plans">Plans <span id="plans-badge" class="plans-badge hidden">0</span></a>
         <a href="#" id="open-reports">Reports</a>
         <a href="#" id="open-terminal">Terminal</a>
         <a href="#" id="open-proxy">Proxy</a>
+        <a href="#" id="open-settings">Settings</a>
       </div>
       <h2 class="collapsible-heading" id="agents-heading" data-section="agents" title="Click to collapse/expand">
         <span class="collapsible-chevron">▾</span> Agents
       </h2>
-      <ul id="agent-list"></ul>
-      <h2 class="collapsible-heading" id="help-heading" data-section="help" title="Click to collapse/expand">
-        <span class="collapsible-chevron">▾</span> Help
-      </h2>
-      <div class="workspace-links" id="help-links">
-        <a href="#" id="open-settings">Settings</a>
+      <div id="agents-section">
+        <div class="agent-list-controls">
+          <input id="agent-search" type="search" placeholder="Find agent…" aria-label="Find agent" />
+          <div class="segmented agent-filter" role="group" aria-label="Filter agents">
+            <button type="button" data-agent-filter="all" class="active">All</button>
+            <button type="button" data-agent-filter="active">Active</button>
+            <button type="button" data-agent-filter="halted">Halted</button>
+          </div>
+        </div>
+        <ul id="agent-list"></ul>
       </div>
     </aside>
 
+    <div id="sidebar-splitter" class="layout-splitter vertical" role="separator" aria-orientation="vertical" title="Drag to resize sidebar"></div>
+
     <section class="pane" id="pane">
-      <div class="pane-empty">Select an agent tab or start chatting with GLaDOS.</div>
+      <div class="pane-empty">Open Overview or start chatting with GLaDOS.</div>
     </section>
   </main>
 
+  <div id="events-splitter" class="layout-splitter horizontal" role="separator" aria-orientation="horizontal" title="Drag to resize live events"></div>
   <footer class="events">
     <div class="events-label">
       <span>LIVE EVENTS</span>
-      <button id="events-clear" class="events-clear-btn" title="Clear the live events feed (client-side only)">Clear</button>
+      <span class="events-label-actions">
+        <button id="events-collapse" class="events-clear-btn" title="Collapse live events">Collapse</button>
+        <button id="events-clear" class="events-clear-btn" title="Clear the live events feed (client-side only)">Clear</button>
+      </span>
     </div>
     <div id="events"></div>
   </footer>
+
+  <aside id="notification-drawer" class="notification-drawer" aria-hidden="true" aria-label="Notifications" inert>
+    <div class="notification-drawer-head">
+      <div><strong>Notifications</strong><span id="notification-summary">No new activity</span></div>
+      <span class="notification-drawer-actions">
+        <button id="notifications-clear" type="button">Clear</button>
+        <button id="notifications-close" type="button" aria-label="Close notifications" title="Close">×</button>
+      </span>
+    </div>
+    <div id="notification-list" class="notification-list"></div>
+  </aside>
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
+  <div id="modal-root"></div>
 
   <link rel="stylesheet" href="/vendor/xterm/css/xterm.css" />
   <script src="/vendor/marked/marked.min.js"></script>
   <script src="/vendor/dompurify/purify.min.js"></script>
   <script src="/vendor/xterm/lib/xterm.js"></script>
   <script src="/vendor/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
-  <script src="/app.js?v=20260714-report-library"></script>
+  <script src="/app.js?v=20260714-ops-workspace"></script>
 </body>
 </html>

@@ -75,11 +75,6 @@ function listSettingsAgents() {
   const active = new Map(loadAgentRegistry().filter(a => a.enabled !== false).map(a => [a.id, a]));
   const upstream = templateRegistryById();
   const ids = new Set([...active.keys(), ...upstream.keys()]);
-  try {
-    for (const d of fs.readdirSync(GLADOS_AGENT_WORKSPACES, { withFileTypes: true })) {
-      if (d.isDirectory() && !d.name.startsWith('.')) ids.add(d.name);
-    }
-  } catch {}
   return [...ids].sort().map(id => {
     const local = workspaceMeta(id);
     const entry = active.get(id);
@@ -100,6 +95,7 @@ function listSettingsAgents() {
 function agentDetails(agentId) {
   const entry = activeEntryById(agentId);
   const local = workspaceMeta(agentId);
+  if (!entry && !local.upstream.id) return null;
   const ws = entry?.workspace || local.workspace;
   if (!fs.existsSync(ws)) return null;
   return {
@@ -138,7 +134,7 @@ function updateAgentModel(agentId, newModel) {
   const durableModel = bareModelAlias(newModel, { fallback: null });
   if (!durableModel) throw new Error('model required');
   const local = workspaceMeta(agentId);
-  if (!local.upstream.id && !fs.existsSync(local.workspace)) throw new Error(`agent not found: ${agentId}`);
+  if (!local.upstream.id) throw new Error(`agent not found: ${agentId}`);
   const old = bareModelAlias(local.meta.model || local.upstream.model || activeEntryById(agentId)?.model, { fallback: null });
   persistModelOverride(agentId, durableModel);
   const next = {
@@ -154,6 +150,7 @@ function updateAgentModel(agentId, newModel) {
 function updateAgentEnabled(agentId, enabled) {
   if (agentId === 'glados' && enabled === false) throw new Error('glados cannot be disabled from Settings');
   const { workspace, meta, upstream } = workspaceMeta(agentId);
+  if (!upstream.id) throw new Error(`agent not found: ${agentId}`);
   if (!fs.existsSync(workspace)) throw new Error(`agent workspace not found: ${agentId}`);
   const disabledPath = path.join(workspace, '.disabled');
   if (enabled && fs.existsSync(disabledPath)) fs.unlinkSync(disabledPath);

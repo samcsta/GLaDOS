@@ -1,29 +1,49 @@
 const path = require('node:path');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const express = require('express');
-const { PORT, BLACKBOARD_DB, GLADOS_AGENT_WORKSPACES } = require('./lib/config');
+const { PORT, BLACKBOARD_DB, WATCHDOG_DB, GLADOS_AGENT_WORKSPACES, GLADOS_INVESTIGATIONS_DIR, GLADOS_RUNTIME_DIR } = require('./lib/config');
 const reports = require('./lib/reports');
 const agentDetails = require('./lib/agent-details');
 const { getVersionInfo } = require('./lib/version');
-const { DashboardTranscriptStore, mergeTranscriptEvents, afterLastEventId, sseFrame } = require('./lib/transcript-store');
+const {
+  DashboardTranscriptStore,
+  compactTranscriptEventForTransport,
+  mergeTranscriptEvents,
+  afterLastEventId,
+  sseFrame,
+} = require('./lib/transcript-store');
 const { ControllerLite } = require('./lib/controller');
+const { activeTurnConflict } = require('./lib/chat-turn-admission');
+const { isKickoffApproval, isKickoffCancel, isNetReconRequested, resolveKickoffResources } = require('./lib/kickoff-intent');
+const { getLiteLlmUsage } = require('./lib/litellm-usage');
+const { cleanupLooseInvestigationArtifacts, resetMutableAgentStatus } = require('./lib/runtime-reset');
+const { engagementMetrics } = require('../tools/glados-ops-mcp/lib/engagement-metrics');
+const { normalizeActionTarget } = require('../tools/glados-ops-mcp/lib/operator-action-approval');
 const slash = require('./lib/slash');
 const updateRunner = require('./lib/update-runner');
+const { createUpdatePreservationSnapshot } = require('./lib/update-preservation');
+const planRoutes = require('./routes/plans');
+const { endInvestigationForEngagement } = planRoutes;
 const {
   streamAgentTurn,
   loadRegistry: loadHarnessRegistry,
   loadPolicy,
   agentEnabled,
   bareModelAlias,
+  resolveSdkWorkingDirectory,
 } = require('./lib/harness/agent-sdk');
 const { SdkSessionRegistry } = require('./lib/harness/session-registry');
 const { proxyBackendConfig, startMitmproxy } = require('./lib/proxy/mitmproxy-runner');
+const { ResumeCoordinator } = require('./lib/harness/resume-coordinator');
 const {
   proxyHistory,
   proxyDetail,
   proxyMetrics,
+  clearProxyTraffic,
   watchProxyEvents,
   proxyHealth,
+  combineProxyRuntimeHealth,
 } = require('./lib/proxy/native-store');
 const watchdogHealth = require('glados-watchdog/lib/health');
 const watchdogHalt = require('glados-watchdog/lib/halt');
@@ -37,9 +57,9 @@ app.use('/vendor/xterm', express.static(path.join(__dirname, 'node_modules', 'xt
 app.use('/vendor/xterm-addon-fit', express.static(path.join(__dirname, 'node_modules', 'xterm-addon-fit')));
 
 try {
-  require('../scripts/lib/glados-local').ensureBlackboardDb({ blackboardDb: BLACKBOARD_DB });
+  require('../scripts/lib/glados-local').bootstrap();
 } catch (e) {
-  console.warn('[startup] could not initialize blackboard db:', e.message);
+  console.warn('[startup] could not initialize durable GLaDOS runtime:', e.message);
 }
 
 const transcriptStore = new DashboardTranscriptStore(BLACKBOARD_DB);
@@ -153,9 +173,17 @@ const BUFFER_LIMIT = 500;
 const buffers = new Map(); // agentId -> array of events (newest last)
 const sseClients = new Map(); // agentId -> Set<{ res, includeStream }>
 const lobbyClients = new Set(); // /api/agents SSE subscribers
-const activeChatTurns = new Map(); // agentId -> { turnId, startedAt, messagePreview }
-const activeSubagentTurns = new Map(); // agentId -> { sessionId, startedAt, parentAgentId, parentTurnId, toolCallId }
+const activeChatTurns = new Map(); // agentId -> { turnId, startedAt, messagePreview, message, abortController, interrupt }
+const activeSubagentTurns = new Map(); // agentId -> { sessionId, startedAt, parentAgentId, parentTurnId, toolCallId, taskPrompt }
 const activeTaskToolIds = new Map(); // toolCallId -> agentId
+const resumeCoordinator = new ResumeCoordinator({
+  filePath: path.join(GLADOS_RUNTIME_DIR, 'state', 'paused-agent-work.json'),
+});
+const resumeContinuationQueue = [];
+let resumeContinuationRunning = false;
+const approvedPlanQueue = [];
+const approvedPlanQueueIds = new Set();
+let approvedPlanQueueRunning = false;
 let pendingGladosKickoff = null;
 const BLACKBOARD_STATE_TABLES = [
   'controller_events',
@@ -164,6 +192,7 @@ const BLACKBOARD_STATE_TABLES = [
   'dashboard_transcript_events',
   'replan_proposals',
   'plan_approvals',
+  'operator_action_approvals',
   'plans',
   'recon_steps',
   'baseline_recon',
@@ -235,11 +264,19 @@ function isAllowedSubagentDispatch(parentAgentId, targetAgentId) {
   return loadAgentRegistry().some(agent => agent.id === targetAgentId);
 }
 
-function startSubagentTurn(parentAgentId, targetAgent, { toolCallId = null, parentTurnId = null, messagePreview = '' } = {}) {
+function startSubagentTurn(parentAgentId, targetAgent, { toolCallId = null, parentTurnId = null, messagePreview = '', taskPrompt = '' } = {}) {
   if (!targetAgent || targetAgent === parentAgentId) return;
   const existing = activeSubagentTurns.get(targetAgent);
   if (toolCallId) activeTaskToolIds.set(toolCallId, targetAgent);
-  if (existing?.live) return;
+  if (existing?.live) {
+    // SubagentStart/liveness can precede the parent Task tool call. Merge the
+    // later Task payload so a halt always preserves the exact assignment.
+    if (toolCallId) existing.toolCallId = toolCallId;
+    if (parentTurnId) existing.parentTurnId = parentTurnId;
+    if (messagePreview) existing.messagePreview = messagePreview;
+    if (taskPrompt) existing.taskPrompt = taskPrompt;
+    return;
+  }
   const sessionId = toolCallId || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const startedAt = Date.now();
   activeSubagentTurns.set(targetAgent, {
@@ -250,6 +287,7 @@ function startSubagentTurn(parentAgentId, targetAgent, { toolCallId = null, pare
     parentTurnId,
     toolCallId,
     messagePreview,
+    taskPrompt,
   });
   broadcastLobby('session-started', { agentId: targetAgent, sessionId, startedAt, parentAgentId, parentTurnId, toolCallId });
 }
@@ -283,6 +321,7 @@ function sendMessageToAgentTrackedRuntime(agentId, message) {
 }
 
 function pushBuffer(agentId, ev) {
+  ev = compactTranscriptEventForTransport(ev);
   let buf = buffers.get(agentId);
   if (!buf) { buf = []; buffers.set(agentId, buf); }
   if (ev?.id && buf.some(existing => existing?.id === ev.id)) return;
@@ -293,8 +332,9 @@ function pushBuffer(agentId, ev) {
 function broadcastTranscript(agentId, ev) {
   const set = sseClients.get(agentId);
   if (!set) return;
+  const transportEvent = compactTranscriptEventForTransport(ev);
   for (const client of set) {
-    const payload = sseFrame(ev, { includeStream: client.includeStream });
+    const payload = sseFrame(transportEvent, { includeStream: client.includeStream });
     if (payload) client.res.write(payload);
   }
 }
@@ -305,12 +345,20 @@ function broadcastLobby(type, data) {
 }
 
 function startChatTurn(agentId, message) {
+  const conflict = activeTurnConflict(activeChatTurns, agentId);
+  if (conflict) {
+    const error = new Error(conflict.error);
+    error.code = conflict.code;
+    error.conflict = conflict;
+    throw error;
+  }
   const turnId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const startedAt = Date.now();
   activeChatTurns.set(agentId, {
     turnId,
     startedAt,
     messagePreview: String(message || '').slice(0, 160),
+    message: String(message || ''),
     abortController: new AbortController(),
     interrupt: null,
     stopRequested: false,
@@ -355,6 +403,28 @@ function finishChatTurn(agentId, turnId) {
   if (!current || current.turnId !== turnId) return;
   activeChatTurns.delete(agentId);
   broadcastLobby('chat-turn-ended', { agentId, turnId });
+  if (agentId === 'glados') {
+    if (approvedPlanQueue.length) setImmediate(drainApprovedPlanExecutions);
+    else if (resumeContinuationQueue.length) setImmediate(drainResumeContinuations);
+  }
+}
+
+function stopInvestigationRuntime(result, { reason = 'operator ended investigation' } = {}) {
+  for (const agentId of [...activeChatTurns.keys()]) stopChatTurn(agentId, reason);
+  for (const [agentId, turn] of [...activeSubagentTurns.entries()]) {
+    finishSubagentTurn(agentId, { toolCallId: turn.toolCallId, reason });
+  }
+  const endedPlans = new Set(result?.plans_ended || []);
+  for (let index = approvedPlanQueue.length - 1; index >= 0; index -= 1) {
+    const queued = approvedPlanQueue[index];
+    if (queued.engagementId === result?.engagement_id || endedPlans.has(queued.id)) {
+      approvedPlanQueueIds.delete(queued.id);
+      approvedPlanQueue.splice(index, 1);
+    }
+  }
+  resumeContinuationQueue.splice(0, resumeContinuationQueue.length);
+  pendingGladosKickoff = null;
+  return { stoppedAgents: true, queuedApprovalsRemoved: endedPlans.size };
 }
 
 function transcriptEvent(agentId, kind, text, extra = {}) {
@@ -383,11 +453,31 @@ function recordUserTranscript(agentId, text, extra = {}) {
   });
 }
 
-async function sendMessageToAgentRuntime(agentId, message, { turnId = null } = {}) {
-  recordUserTranscript(agentId, message, { runtime: 'agent-sdk' });
+function admitUserTranscript(agentId, text, clientId) {
+  const safeClientId = String(clientId || '')
+    .replace(/[^a-zA-Z0-9._:-]/g, '')
+    .slice(0, 160) || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  const ev = transcriptStore.record(agentId, {
+    agentId,
+    kind: 'user-message',
+    text,
+    ts: new Date().toISOString(),
+    id: `dashboard-user:${agentId}:${safeClientId}`,
+    clientId: safeClientId,
+    runtime: 'agent-sdk',
+    admitted: true,
+  });
+  pushBuffer(agentId, ev);
+  broadcastTranscript(agentId, ev);
+  return ev;
+}
+
+async function sendMessageToAgentRuntime(agentId, message, { turnId = null, recordPrompt = true } = {}) {
+  if (recordPrompt) recordUserTranscript(agentId, message, { runtime: 'agent-sdk' });
   const turn = turnId ? activeChatTurns.get(agentId) : null;
   let events = [];
   try {
+    const sdkCwd = resolveSdkWorkingDirectory({ env: process.env });
     events = await streamAgentTurn({
       agentId,
       prompt: message,
@@ -403,6 +493,7 @@ async function sendMessageToAgentRuntime(agentId, message, { turnId = null } = {
               toolCallId: ev.toolCallId,
               parentTurnId: turnId,
               messagePreview: ev.toolInput?.description || childPrompt || ev.text || '',
+              taskPrompt: childPrompt,
             });
             if (childPrompt) {
               recordUserTranscript(child, childPrompt, {
@@ -415,7 +506,12 @@ async function sendMessageToAgentRuntime(agentId, message, { turnId = null } = {
             }
           }
         } else if (ev.kind === 'tool-result' && ev.toolCallId && activeTaskToolIds.has(ev.toolCallId)) {
-          finishSubagentTurn(activeTaskToolIds.get(ev.toolCallId), { toolCallId: ev.toolCallId });
+          // A background Task first returns a launch acknowledgement. Its real
+          // completion arrives later as task_notification and must own the
+          // liveness transition; ending here creates a false idle/active flicker.
+          if (!/^Subagent launched\.?$/i.test(String(ev.text || '').trim())) {
+            finishSubagentTurn(activeTaskToolIds.get(ev.toolCallId), { toolCallId: ev.toolCallId });
+          }
         } else if (isAllowedSubagentDispatch(agentId, targetAgent) && (ev.kind === 'thinking-stream' || ev.kind === 'text-stream' || ev.kind === 'assistant-text' || ev.kind === 'tool-call')) {
           startSubagentTurn(agentId, targetAgent, {
             toolCallId: ev.parentToolUseId || ev.toolCallId || null,
@@ -434,10 +530,21 @@ async function sendMessageToAgentRuntime(agentId, message, { turnId = null } = {
         }
       },
       options: {
+        cwd: sdkCwd,
         abortSignal: turn?.turnId === turnId ? turn.abortController?.signal : undefined,
         onInterruptReady: interrupt => attachChatTurnInterrupt(agentId, turnId, interrupt),
-        resumeSessionId: sdkSessionRegistry.get(agentId),
-        onSessionId: sessionId => sdkSessionRegistry.set(agentId, sessionId),
+        resumeSessionId: sdkSessionRegistry.get(agentId, sdkCwd),
+        onSessionId: sessionId => sdkSessionRegistry.set(agentId, sessionId, sdkCwd),
+        onInvalidSession: (_sessionId, error) => {
+          sdkSessionRegistry.clear(agentId);
+          const timeoutRecovery = error?.code === 'GLADOS_FIRST_ACTIVITY_TIMEOUT';
+          transcriptEvent(agentId, 'meta', timeoutRecovery
+            ? 'The resumed Agent SDK session produced no activity. Cleared it and retried this message once in a fresh session.'
+            : 'Recovered a stale Agent SDK session after the application working directory changed.', {
+            sub: 'session-recovery',
+            reasonCode: error?.code || null,
+          });
+        },
       },
     });
   } finally {
@@ -449,11 +556,140 @@ async function sendMessageToAgentRuntime(agentId, message, { turnId = null } = {
     .filter(Boolean)
     .join('\n')
     .trim();
+  const promptError = events.find(ev => ev.kind === 'prompt-error');
   return {
     runtime: 'agent-sdk',
     result: { payloads: [{ text: finalText || '', mediaUrl: null }] },
     events: events.length,
+    error: promptError?.error || promptError?.text || null,
   };
+}
+
+function queueAcceptedChatTurn({ agentId, message, turnId, onSuccess = null, onFailure = null }) {
+  setImmediate(async () => {
+    try {
+      const result = await sendMessageToAgentRuntime(agentId, message, {
+        turnId,
+        recordPrompt: false,
+      });
+      const resultError = harnessResultError(result);
+      if (resultError) throw new Error(resultError);
+      // An operator stop removes the authoritative active turn before the SDK
+      // finishes unwinding. Do not let that cancelled run mark a goal complete.
+      if (activeChatTurns.get(agentId)?.turnId !== turnId) return;
+      await onSuccess?.(result);
+    } catch (error) {
+      transcriptEvent(agentId, 'prompt-error', error.message || String(error), {
+        error: error.message || String(error),
+        code: error.code || null,
+        provider: 'LiteLLM Anthropic Messages',
+        api: '/v1/messages',
+        turnId,
+        isError: true,
+      });
+      try { await onFailure?.(error); } catch {}
+    } finally {
+      finishChatTurn(agentId, turnId);
+    }
+  });
+}
+
+function queueResumeContinuation(snapshot) {
+  resumeContinuationQueue.push(snapshot);
+  setImmediate(drainResumeContinuations);
+}
+
+async function drainResumeContinuations() {
+  if (resumeContinuationRunning || approvedPlanQueueRunning || activeChatTurns.has('glados')) return;
+  const snapshot = resumeContinuationQueue.shift();
+  if (!snapshot) return;
+  resumeContinuationRunning = true;
+  const prompt = resumeCoordinator.buildContinuationPrompt(snapshot);
+  const turnId = startChatTurn('glados', prompt);
+  transcriptEvent('glados', 'operator-event', `Continuing ${snapshot.agentId} after operator resume.`, {
+    resumedAgentId: snapshot.agentId,
+    continuation: true,
+  });
+  try {
+    const result = await sendMessageToAgentRuntime('glados', prompt, { turnId });
+    const error = harnessResultError(result);
+    if (error) {
+      transcriptEvent('glados', 'prompt-error', `Could not continue ${snapshot.agentId}: ${error}`, {
+        resumedAgentId: snapshot.agentId,
+        continuation: true,
+        isError: true,
+      });
+    }
+  } catch (error) {
+    transcriptEvent('glados', 'prompt-error', `Could not continue ${snapshot.agentId}: ${error.message}`, {
+      resumedAgentId: snapshot.agentId,
+      continuation: true,
+      isError: true,
+    });
+  } finally {
+    finishChatTurn('glados', turnId);
+    resumeContinuationRunning = false;
+    if (resumeContinuationQueue.length) setImmediate(drainResumeContinuations);
+  }
+}
+
+function queueApprovedPlanExecution({ id, engagement_id: engagementId, decision, vectors } = {}) {
+  const planId = String(id || '').trim();
+  if (!planId) return { executionQueued: false, error: 'plan id missing' };
+  if (approvedPlanQueueIds.has(planId)) return { executionQueued: true, duplicate: true };
+  approvedPlanQueueIds.add(planId);
+  approvedPlanQueue.push({
+    id: planId,
+    engagementId: String(engagementId || '').trim(),
+    decision: String(decision || 'approve_all'),
+    vectors: Array.isArray(vectors) ? vectors.map(String) : [],
+  });
+  setImmediate(drainApprovedPlanExecutions);
+  return { executionQueued: true, queueDepth: approvedPlanQueue.length };
+}
+
+async function drainApprovedPlanExecutions() {
+  if (approvedPlanQueueRunning || resumeContinuationRunning || activeChatTurns.has('glados')) return;
+  const approval = approvedPlanQueue.shift();
+  if (!approval) return;
+  approvedPlanQueueRunning = true;
+  const prompt = [
+    'AUTOMATED PLAN-APPROVAL HANDOFF',
+    `plan_id: ${approval.id}`,
+    `engagement_id: ${approval.engagementId || 'unknown'}`,
+    `decision: ${approval.decision}`,
+    `approved_vectors: ${approval.vectors.length ? approval.vectors.join(', ') : 'all proposed vectors'}`,
+    `operator_approval_reference: plans-api:${approval.id}`,
+    'The operator decision is already durable in the plan database. Begin the approved next phase now.',
+    'Read the approved plan, dispatch only its approved agent chain, and do not ask the operator to repeat this approval.',
+    'Keep the coverage ledger current. If an exploit unlocks a new authenticated surface, return to webapp-recon and synthesize the next plan before further gated testing.',
+  ].join('\n');
+  let turnId = null;
+  try {
+    turnId = startChatTurn('glados', prompt);
+    transcriptEvent('glados', 'operator-event', `Plan ${approval.id} approved; automatically starting the next phase.`, {
+      planId: approval.id,
+      engagementId: approval.engagementId || null,
+      approvalDecision: approval.decision,
+      approvedVectors: approval.vectors,
+      automatedApprovalHandoff: true,
+    });
+    const result = await sendMessageToAgentRuntime('glados', prompt, { turnId });
+    const error = harnessResultError(result);
+    if (error) throw new Error(error);
+  } catch (error) {
+    transcriptEvent('glados', 'prompt-error', `Automatic execution of approved plan ${approval.id} failed: ${error.message}`, {
+      planId: approval.id,
+      automatedApprovalHandoff: true,
+      isError: true,
+    });
+  } finally {
+    if (turnId) finishChatTurn('glados', turnId);
+    approvedPlanQueueIds.delete(approval.id);
+    approvedPlanQueueRunning = false;
+    if (approvedPlanQueue.length) setImmediate(drainApprovedPlanExecutions);
+    else if (resumeContinuationQueue.length) setImmediate(drainResumeContinuations);
+  }
 }
 
 const controller = new ControllerLite({
@@ -491,47 +727,6 @@ function isFreshSessionQuestion(message) {
   const text = String(message || '').toLowerCase();
   return /\b(fresh|new|clean)\s+session\b/.test(text)
     || /\bis\s+this\s+(?:a\s+)?(?:fresh|new|clean)\b/.test(text);
-}
-
-function isKickoffApproval(message) {
-  return /\b(continue|proceed|go ahead|approved?|yes|start|do it|looks good)\b/i.test(String(message || ''));
-}
-
-function isKickoffCancel(message) {
-  return /\b(cancel|stop|halt|no|never mind|nevermind|do not proceed)\b/i.test(String(message || ''));
-}
-
-function resolveKickoffResources(message) {
-  const text = String(message || '').toLowerCase();
-  let resources = [
-    { id: 'dradistab', label: 'Dradis Tab', url: 'https://dradistab.redteamstuff.com' },
-    { id: 'dradis', label: 'Dradis', url: 'https://dradis.redteamstuff.com' },
-    { id: 'domainsai', label: 'DomainsAI', url: 'https://domainsai.redteamstuff.com' },
-  ];
-
-  if (/\bonly\s+domainsai\b/.test(text)) {
-    resources = resources.filter(r => r.id === 'domainsai');
-  }
-  const skipDradisPair = /\bskip\b[^.?!\n]*(dradistab\s*\/\s*dradis|dradis\s*\/\s*dradistab|dradistab\s+(?:and|&)\s+dradis|dradis\s+(?:and|&)\s+dradistab)/.test(text)
-    || /\bskip\s+(?:the\s+)?dradis(?:tab)?\s+checks?\b/.test(text);
-  if (skipDradisPair) {
-    resources = resources.filter(r => r.id !== 'dradis' && r.id !== 'dradistab');
-  } else {
-    if (/\bskip\s+(?:the\s+)?dradistab\b/.test(text)) {
-      resources = resources.filter(r => r.id !== 'dradistab');
-    }
-    if (/\bskip\s+(?:the\s+)?dradis\b/.test(text)) {
-      resources = resources.filter(r => r.id !== 'dradis');
-    }
-  }
-  if (/\bskip\s+(?:all\s+)?(?:internal\s+)?(?:resource|resources|lookups|checks)\b/.test(text)) {
-    resources = [];
-  }
-  if (/\bdomainsai\s+first\b/.test(text)) {
-    resources.sort((a, b) => (a.id === 'domainsai' ? -1 : b.id === 'domainsai' ? 1 : 0));
-  }
-
-  return resources;
 }
 
 function kickoffApprovalPrompt(target) {
@@ -583,12 +778,14 @@ function buildApprovedKickoffMessage(pending, operatorReply) {
   ].filter(r => !approvedIds.has(r.id));
   const skippedText = skipped.length ? skipped.map(r => `${r.label} (${r.url})`).join(', ') : 'none';
   const target = pending.target;
+  const netReconRequested = isNetReconRequested(`${pending.originalMessage}\n${operatorReply}`);
   return [
     `Begin the approved investigation kickoff for ${target}.`,
     '',
     'Operator approval gate has already completed in the dashboard.',
     `Approved pre-agent resources, in order: ${resourceText}.`,
     `Explicitly skipped resources: ${skippedText}.`,
+    `Network/infrastructure recon explicitly requested by operator: ${netReconRequested ? 'yes' : 'no'}.`,
     '',
     'Hard workflow rules:',
     '- Do not consult any unapproved resource.',
@@ -606,7 +803,9 @@ function buildApprovedKickoffMessage(pending, operatorReply) {
     '- First send one concise message: "Will do, starting with <target>..."',
     '- Then perform only the approved resource checks.',
     '- Consolidate resource-check results into one concise message.',
-    '- Then announce one dispatch message for the core Phase 1 agents: "Deploying WEBAPP RECON and low-impact DNS/NET recon agents to do <specific tasks>..."',
+    netReconRequested
+      ? '- The operator explicitly requested network recon. Dispatch WEBAPP RECON and NET RECON; the net-recon task must include operator_requested_net_recon: true and operator_request_reference pointing to the original request.'
+      : '- Do not dispatch net-recon. Dispatch WEBAPP RECON only and record baseline.net_recon.status=skipped with reason=operator_not_requested.',
     '- Do not dispatch OSINT unless the operator explicitly asks for OSINT/passive public-source recon. OSINT is manual-only and must never block plan-synthesizer after webapp-recon has finished.',
     '- Do not send separate chat bubbles for every internal tool call.',
     '- Do not dispatch exploitation agents before plan approval.',
@@ -636,6 +835,8 @@ function assessmentAgentIds() {
 
 function resetAgentSession(agentId) {
   const hadSession = !!currentSessionForAgent(agentId);
+  if (agentId === 'glados') resumeCoordinator.clearAll();
+  else resumeCoordinator.clear(agentId);
   const turn = activeChatTurns.get(agentId);
   if (turn) {
     turn.stopRequested = true;
@@ -698,6 +899,11 @@ function clearAllRuntimeSessions(reason = 'runtime restart') {
   activeChatTurns.clear();
   activeSubagentTurns.clear();
   activeTaskToolIds.clear();
+  resumeCoordinator.clearAll();
+  resumeContinuationQueue.length = 0;
+  approvedPlanQueue.length = 0;
+  approvedPlanQueueIds.clear();
+  approvedPlanQueueRunning = false;
   buffers.clear();
   pendingGladosKickoff = null;
   try { transcriptStore.clearAll(); } catch (e) { console.warn('[transcript-store] runtime clear failed:', e.message); }
@@ -770,10 +976,14 @@ function wipeAgentMemories() {
     } catch (e) { errors.push(`dreams ${ent.name}: ${e.message}`); }
   }
 
+  const status = resetMutableAgentStatus(workspaces);
+  errors.push(...status.errors);
+
   return {
     ok: errors.length === 0,
     agents,
     dreamsCleared,
+    statusFilesReset: status.reset,
     errors,
   };
 }
@@ -781,7 +991,7 @@ function wipeAgentMemories() {
 function bufferedTranscriptEvents(agentId, lastEventId = null, options = {}) {
   let dashboardEvents = [];
   try {
-    dashboardEvents = transcriptStore.list(agentId);
+    dashboardEvents = transcriptStore.listRecent(agentId, { limit: BUFFER_LIMIT });
   } catch (e) {
     console.warn('[transcript-store] could not list dashboard events:', e.message);
   }
@@ -790,10 +1000,50 @@ function bufferedTranscriptEvents(agentId, lastEventId = null, options = {}) {
     { events: dashboardEvents, options: mergeOptions },
     { events: buffers.get(agentId) || [], options: mergeOptions }
   );
-  return afterLastEventId(merged, lastEventId);
+  return afterLastEventId(merged, lastEventId).slice(-BUFFER_LIMIT);
 }
 
 // --- REST ---
+
+app.post('/api/operator-action-approvals', (req, res) => {
+  const agentId = String(req.body?.agent_id || '');
+  if (!assessmentAgentIds().includes(agentId)) return res.status(400).json({ error: 'unknown agent_id' });
+  let targetUrl;
+  try { targetUrl = normalizeActionTarget(req.body?.target_url); }
+  catch { return res.status(400).json({ error: 'valid target_url required' }); }
+  const method = String(req.body?.method || '*').toUpperCase();
+  if (!/^(?:\*|GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)$/.test(method)) {
+    return res.status(400).json({ error: 'invalid method' });
+  }
+  const risk = String(req.body?.risk_to_target || '*').toLowerCase();
+  if (!['*', 'low', 'medium', 'high'].includes(risk)) return res.status(400).json({ error: 'invalid risk_to_target' });
+  const ttlSeconds = Math.max(30, Math.min(3600, Number(req.body?.ttl_seconds || 600)));
+  const now = Date.now();
+  const approval = {
+    id: `action_${crypto.randomBytes(8).toString('hex')}`,
+    agent_id: agentId,
+    target_url: targetUrl,
+    method,
+    risk_to_target: risk,
+    operator: String(req.body?.operator || 'operator').slice(0, 120),
+    reason: String(req.body?.reason || '').slice(0, 1000),
+    created_at: now,
+    expires_at: now + ttlSeconds * 1000,
+  };
+  const Database = require('better-sqlite3');
+  const db = new Database(BLACKBOARD_DB);
+  try {
+    db.prepare(`
+      INSERT INTO operator_action_approvals
+        (id, agent_id, target_url, method, risk_to_target, operator, reason, created_at, expires_at)
+      VALUES (@id, @agent_id, @target_url, @method, @risk_to_target, @operator, @reason, @created_at, @expires_at)
+    `).run(approval);
+  } finally {
+    db.close();
+  }
+  broadcastLobby('operator-action-approved', approval);
+  res.status(201).json({ ok: true, approval });
+});
 
 app.get('/api/agents', (req, res) => {
   const registry = loadAgentRegistry();
@@ -860,9 +1110,18 @@ app.get('/api/agents/:id/transcript', (req, res) => {
 app.post('/api/chat/glados', async (req, res) => {
   const message = (req.body && req.body.message) || '';
   if (!message.trim()) return res.status(400).json({ error: 'message required' });
+  const conflict = activeTurnConflict(activeChatTurns, 'glados');
+  if (conflict) return res.status(409).json(conflict);
+  let admittedEvent;
+  try {
+    // Persist before starting the SDK. A renderer/app restart can no longer
+    // erase a message that was sitting in an hours-long HTTP request.
+    admittedEvent = admitUserTranscript('glados', message, req.body?.client_id);
+  } catch (error) {
+    return res.status(503).json({ ok: false, error: `message was not admitted: ${error.message}` });
+  }
 
   if (pendingGladosKickoff) {
-    recordUserTranscript('glados', message);
     if (isKickoffCancel(message)) {
       const cancelled = pendingGladosKickoff;
       pendingGladosKickoff = null;
@@ -885,30 +1144,23 @@ app.post('/api/chat/glados', async (req, res) => {
     if (approved.goalId) controller.updateGoalStatus(approved.goalId, 'running');
     const approvedMessage = buildApprovedKickoffMessage(approved, message);
     const turnId = startChatTurn('glados', approvedMessage);
-    try {
-      const result = await sendMessageToAgentRuntime('glados', approvedMessage, { turnId });
-      const resultError = harnessResultError(result);
-      if (resultError) {
-        if (approved.goalId) controller.updateGoalStatus(approved.goalId, 'failed');
-        return res.status(502).json({ ok: false, error: resultError, result });
-      }
-      if (approved.goalId) controller.updateGoalStatus(approved.goalId, 'complete');
-      return res.json({ ok: true, gated: true, approved: true, result });
-    } catch (e) {
-      if (approved.goalId) controller.updateGoalStatus(approved.goalId, 'failed');
-      return res.status(500).json({
-        ok: false,
-        error: e.message,
-        stderr: e.stderr,
-        stdout: e.stdout,
-      });
-    } finally {
-      finishChatTurn('glados', turnId);
-    }
+    transcriptEvent('glados', 'operator-event', approvedMessage, {
+      sub: 'kickoff-handoff',
+      turnId,
+      admittedUserEventId: admittedEvent.sseId,
+    });
+    res.status(202).json({ ok: true, accepted: true, gated: true, approved: true, turnId });
+    queueAcceptedChatTurn({
+      agentId: 'glados',
+      message: approvedMessage,
+      turnId,
+      onSuccess: () => { if (approved.goalId) controller.updateGoalStatus(approved.goalId, 'complete'); },
+      onFailure: () => { if (approved.goalId) controller.updateGoalStatus(approved.goalId, 'failed'); },
+    });
+    return;
   }
 
   if (isFreshSessionQuestion(message)) {
-    recordUserTranscript('glados', message);
     const counts = blackboardRowCounts();
     const rows = counts ? Object.values(counts).reduce((sum, n) => sum + Number(n || 0), 0) : null;
     const activeAgents = (() => {
@@ -928,21 +1180,33 @@ app.post('/api/chat/glados', async (req, res) => {
   }
 
   const turnId = startChatTurn('glados', message);
-  try {
-    const result = await sendMessageToAgentRuntime('glados', message, { turnId });
-    const resultError = harnessResultError(result);
-    if (resultError) return res.status(502).json({ ok: false, error: resultError, result });
-    res.json({ ok: true, result });
-  } catch (e) {
-    res.status(500).json({
-      ok: false,
-      error: e.message,
-      stderr: e.stderr,
-      stdout: e.stdout,
-    });
-  } finally {
-    finishChatTurn('glados', turnId);
+  res.status(202).json({ ok: true, accepted: true, turnId, eventId: admittedEvent.sseId });
+  queueAcceptedChatTurn({ agentId: 'glados', message, turnId });
+});
+
+// Direct specialist chat is the authoritative operator-to-worker handoff for
+// approvals that cannot be delegated by another agent (for example, an
+// irreversible target lifecycle action). The dashboard user message is sent
+// as the specialist's root turn rather than quoted through GLaDOS/SendMessage.
+app.post('/api/chat/:agent', async (req, res) => {
+  const agentId = String(req.params.agent || '');
+  const message = (req.body && req.body.message) || '';
+  if (!assessmentAgentIds().includes(agentId) || agentId === 'glados') {
+    return res.status(404).json({ error: 'agent not found' });
   }
+  if (!message.trim()) return res.status(400).json({ error: 'message required' });
+  const conflict = activeTurnConflict(activeChatTurns, agentId);
+  if (conflict) return res.status(409).json(conflict);
+  let admittedEvent;
+  try {
+    admittedEvent = admitUserTranscript(agentId, message, req.body?.client_id);
+  } catch (error) {
+    return res.status(503).json({ ok: false, error: `message was not admitted: ${error.message}` });
+  }
+
+  const turnId = startChatTurn(agentId, message);
+  res.status(202).json({ ok: true, accepted: true, direct: true, agentId, turnId, eventId: admittedEvent.sseId });
+  queueAcceptedChatTurn({ agentId, message, turnId });
 });
 
 app.post('/api/chat/:agent/stop', (req, res) => {
@@ -969,11 +1233,20 @@ async function haltAgent(agentId, reason = 'dashboard halt', initiator = 'dashbo
   const result = await watchdogHalt.agentHalt(agentId, reason, { initiator });
   let interruptedParent = null;
   const direct = activeChatTurns.get(agentId);
+  const subagent = activeSubagentTurns.get(agentId);
+  if (subagent) {
+    const parentTurn = activeChatTurns.get(subagent.parentAgentId);
+    resumeCoordinator.capture(agentId, {
+      parentAgentId: subagent.parentAgentId,
+      taskPrompt: subagent.taskPrompt,
+      taskDescription: subagent.messagePreview,
+      operatorPrompt: parentTurn?.message || parentTurn?.messagePreview || '',
+    });
+  }
   try { direct?.abortController?.abort(`${agentId} halted by operator`); } catch {}
   if (typeof direct?.interrupt === 'function') {
     await Promise.resolve(direct.interrupt(`${agentId} halted by operator`)).catch(() => {});
   }
-  const subagent = activeSubagentTurns.get(agentId);
   if (subagent?.parentAgentId) {
     interruptedParent = subagent.parentAgentId;
     const parentTurn = activeChatTurns.get(interruptedParent);
@@ -982,7 +1255,7 @@ async function haltAgent(agentId, reason = 'dashboard halt', initiator = 'dashbo
       await Promise.resolve(parentTurn.interrupt(`${agentId} halted by operator`)).catch(() => {});
     }
   }
-  const notice = `Operator halted ${agentId}: ${reason}. ${interruptedParent ? `Its owning ${interruptedParent} turn was interrupted.` : 'Future tool calls are denied until this agent is resumed.'}`;
+  const notice = `Operator halted ${agentId}: ${reason}. ${interruptedParent ? `Its owning ${interruptedParent} turn was interrupted and its task context was saved for resume.` : 'Future tool calls are denied until this agent is resumed.'}`;
   transcriptEvent(agentId, 'operator-event', notice, { halted: true, initiator, isError: true });
   if (agentId !== 'glados') transcriptEvent('glados', 'operator-event', notice, { haltedAgentId: agentId, halted: true, initiator, isError: true });
   broadcastLobby('halt', { agentId, reason, interruptedParent, haltActive: true });
@@ -992,11 +1265,15 @@ async function haltAgent(agentId, reason = 'dashboard halt', initiator = 'dashbo
 async function resumeAgent(agentId, initiator = 'dashboard') {
   if (!assessmentAgentIds().includes(agentId)) throw new Error(`unknown GLaDOS agent: ${agentId}`);
   const result = await watchdogHalt.agentResume(agentId, { initiator });
-  const notice = `Operator resumed ${agentId}. New turns and tool calls are permitted by the per-agent halt gate.`;
+  const pausedWork = resumeCoordinator.take(agentId);
+  if (pausedWork) queueResumeContinuation(pausedWork);
+  const notice = pausedWork
+    ? `Operator resumed ${agentId}. The halt gate is clear and GLaDOS will re-dispatch the saved task context to continue its work.`
+    : `Operator resumed ${agentId}. New turns and tool calls are permitted by the per-agent halt gate.`;
   transcriptEvent(agentId, 'operator-event', notice, { halted: false, initiator });
   if (agentId !== 'glados') transcriptEvent('glados', 'operator-event', notice, { haltedAgentId: agentId, halted: false, initiator });
   broadcastLobby('resume', { agentId, haltActive: false });
-  return result;
+  return { ...result, continuationScheduled: !!pausedWork };
 }
 
 async function probeTarget(targetUrl) {
@@ -1007,6 +1284,12 @@ async function probeTarget(targetUrl) {
 
 function currentProxyConfig() {
   return proxyBackendConfig(process.env);
+}
+
+function currentProxyHealth() {
+  const store = proxyHealth(currentProxyConfig());
+  const supervised = process.env.GLADOS_DESKTOP === '1' && store.backend === 'mitmproxy';
+  return combineProxyRuntimeHealth(store, proxyRuntime, { supervised });
 }
 
 async function proxyRps() {
@@ -1030,6 +1313,156 @@ function activeAgentStatus() {
   } catch {
     return [];
   }
+}
+
+function overviewPayload() {
+  const Database = require('better-sqlite3');
+  const agents = loadAgentRegistry().map(agent => {
+    const session = currentSessionForAgent(agent.id);
+    return {
+      id: agent.id,
+      name: agent.name,
+      model: agent.model,
+      active: !!session?.live,
+      halted: watchdogHalt.agentStatus(agent.id).haltActive,
+      sessionId: session?.sessionId || null,
+    };
+  });
+  const proxy = currentProxyHealth();
+  let db;
+  let engagement = null;
+  let goal = null;
+  let plan = null;
+  let topFindings = [];
+  let assessmentMetrics = null;
+  let findings = { total: 0, critical: 0, high: 0, medium: 0, low: 0, pendingValidation: 0 };
+  let tasks = { total: 0, pending: 0, running: 0, complete: 0, failed: 0, cancelled: 0 };
+  try {
+    db = new Database(BLACKBOARD_DB, { readonly: true, fileMustExist: true });
+    engagement = db.prepare(`
+      SELECT id, target_name AS target, scope, status, started_at AS startedAt, completed_at AS completedAt
+      FROM engagements
+      -- The overview represents the most recently started engagement. Giving
+      -- every active row absolute priority lets an older, empty kickoff stub
+      -- permanently mask a later canonical completed engagement.
+      ORDER BY datetime(started_at) DESC, rowid DESC
+      LIMIT 1
+    `).get() || null;
+    if (engagement) {
+      try { assessmentMetrics = engagementMetrics(db, engagement.id); }
+      catch (error) { console.warn('[overview] could not calculate engagement metrics:', error.message); }
+      goal = db.prepare(`
+        SELECT id, type, target, status, created_at AS createdAt, updated_at AS updatedAt
+        FROM controller_goals
+        WHERE engagement_id = ? OR target = ?
+        ORDER BY datetime(updated_at) DESC LIMIT 1
+      `).get(engagement.id, engagement.target) || null;
+      plan = db.prepare(`
+        SELECT id, version, state, plan_json AS planJson, created_at AS createdAt,
+               approved_at AS approvedAt, completed_at AS completedAt
+        FROM plans WHERE engagement_id = ? ORDER BY version DESC, datetime(created_at) DESC LIMIT 1
+      `).get(engagement.id) || null;
+      if (plan) {
+        let planDocument = {};
+        try { planDocument = JSON.parse(plan.planJson) || {}; } catch {}
+        const vectors = Array.isArray(planDocument.proposed_vectors) ? planDocument.proposed_vectors : [];
+        plan.objective = planDocument.terminal_objective
+          || vectors[0]?.name
+          || planDocument.replan_reason
+          || 'Review the approved vectors and current evidence.';
+        plan.vectors = vectors.slice(0, 4).map(vector => ({
+          cwe: vector.cwe || null,
+          name: vector.name || vector.rationale || vector.cwe || 'Unnamed vector',
+          risk: vector.risk_to_target || null,
+          agents: Array.isArray(vector.agents) ? vector.agents.slice(0, 4) : [],
+        }));
+        plan.agentChain = Array.isArray(planDocument.agent_chain) ? planDocument.agent_chain.slice(0, 8) : [];
+        delete plan.planJson;
+      }
+      const findingRows = db.prepare(`
+        SELECT lower(COALESCE(severity, priority, 'unknown')) AS severity,
+               lower(COALESCE(validation_status, 'pending')) AS validationStatus,
+               COUNT(*) AS n
+        FROM findings WHERE engagement_id = ? GROUP BY severity, validationStatus
+      `).all(engagement.id);
+      findings = findingRows.reduce((out, row) => {
+        out.total += row.n;
+        if (Object.prototype.hasOwnProperty.call(out, row.severity)) out[row.severity] += row.n;
+        if (!['validated', 'confirmed', 'rejected', 'false_positive'].includes(row.validationStatus)) out.pendingValidation += row.n;
+        return out;
+      }, findings);
+      topFindings = db.prepare(`
+        SELECT id, title, cwe_id AS cwe, affected_component AS component,
+               lower(COALESCE(severity, 'informational')) AS severity,
+               cvss_score AS cvss, lower(COALESCE(validation_status, 'pending')) AS validationStatus,
+               confidence_score AS confidence, updated_at AS updatedAt
+        FROM findings
+        WHERE engagement_id = ?
+        ORDER BY CASE lower(COALESCE(severity, 'informational'))
+          WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2
+          WHEN 'low' THEN 3 ELSE 4 END,
+          COALESCE(cvss_score, 0) DESC, COALESCE(confidence_score, 0) DESC, id DESC
+        LIMIT 5
+      `).all(engagement.id);
+      const taskRows = db.prepare(`SELECT lower(COALESCE(status, 'pending')) AS status, COUNT(*) AS n FROM tasks WHERE engagement_id = ? GROUP BY status`).all(engagement.id);
+      tasks = taskRows.reduce((out, row) => {
+        out.total += row.n;
+        if (['running', 'in_progress', 'active'].includes(row.status)) out.running += row.n;
+        else if (['complete', 'completed', 'done'].includes(row.status)) out.complete += row.n;
+        else if (row.status === 'cancelled') out.cancelled += row.n;
+        else if (['failed', 'error'].includes(row.status)) out.failed += row.n;
+        else out.pending += row.n;
+        return out;
+      }, tasks);
+    }
+  } catch (error) {
+    console.warn('[overview] could not read blackboard:', error.message);
+  } finally {
+    try { db?.close(); } catch {}
+  }
+
+  if (engagement?.scope) {
+    try { engagement.scope = JSON.parse(engagement.scope); } catch {}
+  }
+  const activeAgents = agents.filter(agent => agent.active);
+  const haltedAgents = agents.filter(agent => agent.halted);
+  const pendingApprovals = plan?.state === 'pending_approval' ? 1 : 0;
+  let phase = 'Standby';
+  if (engagement) {
+    if (engagement.status === 'complete' || engagement.completedAt) phase = 'Complete';
+    else if (pendingApprovals) phase = 'Awaiting approval';
+    else if (plan && ['approved', 'executing'].includes(plan.state)) phase = 'Execution';
+    else phase = 'Reconnaissance';
+  }
+  const healthRows = watchdogHealth.listHealth();
+  const targetHealth = engagement
+    ? healthRows.find(row => String(row.target_url || '').includes(engagement.target) || String(engagement.target || '').includes(String(row.target_url || ''))) || null
+    : null;
+  return {
+    generatedAt: new Date().toISOString(),
+    version: getVersionInfo().version,
+    phase,
+    engagement,
+    goal,
+    plan,
+    findings,
+    topFindings,
+    tasks,
+    assessmentMetrics,
+    agents,
+    activeAgents,
+    haltedAgents,
+    pendingApprovals,
+    targetHealth,
+    proxy: {
+      backend: proxy.backend,
+      healthy: proxy.healthy,
+      stale: proxy.stale,
+      rps: proxy.rps || 0,
+      error: proxy.error || null,
+      processStatus: proxy.processStatus,
+    },
+  };
 }
 
 function planSummary() {
@@ -1151,6 +1584,15 @@ app.post('/api/slash/run', async (req, res) => {
 
 app.get('/api/controller/status', (req, res) => {
   try { res.json({ ok: true, ...controllerStatusPayload() }); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.get('/api/overview', async (req, res) => {
+  try {
+    const llmUsage = await getLiteLlmUsage({ force: req.query.usage === 'refresh' });
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true, ...overviewPayload(), llmUsage });
+  }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -1338,22 +1780,43 @@ app.get('/api/flow-diagram', (req, res) => {
 
 // Refreshes the local SDK runtime state. The v4 harness is in-process, so there
 // is no external gateway daemon to restart.
-app.post('/api/gateway/restart', (req, res) => {
+app.post('/api/gateway/restart', async (req, res) => {
   const agentIds = clearAllRuntimeSessions('runtime restart');
-  broadcastLobby('runtime-refresh', { ok: true, runtime: 'agent-sdk', resetAll: true, agentIds });
-  res.json({
-    ok: true,
+  const proxyConfig = currentProxyConfig();
+  const managedProxy = process.env.GLADOS_DESKTOP === '1' && proxyConfig.backend === 'mitmproxy';
+  if (managedProxy) await stopDesktopProxy();
+
+  const blackboard = wipeBlackboard();
+  const proxy = clearProxyTraffic(proxyConfig);
+  if (managedProxy) startDesktopProxy();
+
+  const ok = blackboard.ok && proxy.ok;
+  const result = {
+    ok,
+    refreshId: crypto.randomUUID(),
     runtime: 'agent-sdk',
     resetAll: true,
     resetCount: agentIds.length,
-    message: 'Agent SDK runtime is in-process; no external gateway restart is required.',
-  });
+    agentIds,
+    plansReset: blackboard.ok,
+    blackboardReset: blackboard.ok,
+    proxyReset: proxy.ok,
+    blackboard,
+    proxy,
+    proxyRestarted: managedProxy,
+    message: ok
+      ? 'Agent runtime, blackboard engagement state, plan workflow, and proxy capture state were refreshed.'
+      : 'Runtime sessions were refreshed, but the blackboard or proxy store could not be cleared completely.',
+  };
+  broadcastLobby('runtime-refresh', result);
+  res.status(ok ? 200 : 500).json(result);
 });
 
 // Clears SDK transcript/liveness state so the next turn starts fresh. When
 // agentId === 'glados', cascades to every assessment agent and wipes the
-// blackboard. Evidence files and exported reports on disk are intentionally
-// untouched.
+// blackboard. Durable evidence files and exported reports on disk are
+// intentionally untouched; disposable browser captures at engagement roots
+// are removed during a full GLaDOS reset.
 app.post('/api/agents/:id/reset-session', (req, res) => {
   const agentId = req.params.id;
   try {
@@ -1368,12 +1831,15 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
 
     let blackboard = null;
     let memories = null;
+    let looseArtifacts = null;
     if (agentId === 'glados') {
       pendingGladosKickoff = null;
       blackboard = wipeBlackboard();
       memories = wipeAgentMemories();
+      looseArtifacts = cleanupLooseInvestigationArtifacts(GLADOS_INVESTIGATIONS_DIR);
       broadcastLobby('blackboard-wiped', blackboard);
       broadcastLobby('memories-wiped', memories);
+      broadcastLobby('loose-artifacts-wiped', looseArtifacts);
     }
 
     const primary = results.find(r => r.agentId === agentId) || results[0];
@@ -1387,6 +1853,7 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
       hadSession: !!primary?.hadSession,
       blackboard,
       memories,
+      looseArtifacts,
     });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
@@ -1437,6 +1904,21 @@ app.get('/api/update/status', (req, res) => {
   res.json(updateRunner.updateStatus({ activeAgents: activeAgentStatus().length }));
 });
 
+app.post('/api/update/preservation-snapshot', async (req, res) => {
+  try {
+    const result = await createUpdatePreservationSnapshot({
+      runtimeDir: GLADOS_RUNTIME_DIR,
+      blackboardDb: BLACKBOARD_DB,
+      watchdogDb: WATCHDOG_DB,
+      activeAgents: activeAgentStatus().length,
+      targetVersion: String(req.body?.targetVersion || 'unknown'),
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(409).json({ ok: false, error: error.message });
+  }
+});
+
 app.get('/api/update/stream', (req, res) => {
   updateRunner.startUpdateStream({
     res,
@@ -1446,22 +1928,39 @@ app.get('/api/update/stream', (req, res) => {
 });
 
 app.get('/api/health/proxy', (req, res) => {
-  const store = proxyHealth(currentProxyConfig());
-  const supervised = process.env.GLADOS_DESKTOP === '1' && store.backend === 'mitmproxy';
-  const processHealthy = !supervised || proxyRuntime.status === 'running';
-  res.json({
-    ...store,
-    healthy: store.healthy && processHealthy,
-    processStatus: supervised ? proxyRuntime.status : 'external',
-    pid: supervised ? proxyRuntime.pid : null,
-    startedAt: supervised ? proxyRuntime.startedAt : null,
-    error: store.error || (!processHealthy ? proxyRuntime.error || 'native proxy is not running' : null),
-    stderr: !processHealthy ? proxyRuntime.stderr : undefined,
-  });
+  res.json(currentProxyHealth());
+});
+
+app.post('/api/engagements/:id/end', (req, res) => {
+  const Database = require('better-sqlite3');
+  const reason = String(req.body?.reason || 'operator ended investigation from Overview').slice(0, 1000);
+  const operator = String(req.body?.operator || 'operator').slice(0, 120);
+  const db = new Database(BLACKBOARD_DB);
+  try {
+    const result = endInvestigationForEngagement(db, {
+      engagementId: req.params.id,
+      operator,
+      reason,
+    });
+    stopInvestigationRuntime(result, { reason });
+    broadcastLobby('engagement-ended', {
+      engagement_id: result.engagement_id,
+      status: result.engagement_status,
+      reason,
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ ok: false, error: error.message });
+  } finally {
+    db.close();
+  }
 });
 
 // v4 — Plan-approval workflow endpoints (see routes/plans.js).
-app.use('/api/plans', require('./routes/plans')(broadcastLobby));
+app.use('/api/plans', planRoutes(broadcastLobby, {
+  onApproved: queueApprovedPlanExecution,
+  onEnded: stopInvestigationRuntime,
+}));
 
 // v4.0.0 (Blocker E) — Replan-proposal watcher.
 // Polls blackboard's replan_proposals table every 5s for state='open' rows.

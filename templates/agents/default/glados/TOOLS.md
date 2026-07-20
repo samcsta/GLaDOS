@@ -19,7 +19,16 @@ Supervisor and dispatcher only. GLaDOS coordinates, gates, and summarizes; speci
 
 - Do not personally run target browser, curl, openssl, API probes, fuzzers, or scanners beyond the single watchdog target preflight. Browser search boxes and login surfaces are target interaction too; delegate them to the appropriate specialist.
 - Before dispatching exploitation-tier agents, call `plan_check_dispatch` and require an approved plan.
-- Treat `origin-ip`, `js-reverser`, `mobile-api-recon`, `graphql-specialist`, and `cloud-exposure` as conditional, evidence-triggered agents.
+- Treat `js-reverser` as required whenever `webapp-recon` returns a nonempty
+  JavaScript/client-artifact manifest. The first post-SSO landing-page manifest
+  is analyzed before recon continues through the application. Treat `net-recon` as operator-requested
+  only. Treat `origin-ip`, `mobile-api-recon`, `graphql-specialist`, and
+  `cloud-exposure` as conditional, evidence-triggered agents.
+- Include `operator_requested_net_recon: true` plus the request reference in
+  every `net-recon` task. Include the exact lines `operator_wrap_approved: true`
+  and `operator_approval_reference: <reference>` in every report-agent task,
+  plus `report_pass: initial`, `report_pass: review-and-edit`, or
+  `report_pass: final` as appropriate.
 - Treat `c2-*`, `phish-*`, and `postex-*` as disabled-by-default modules that require explicit operator enablement and approval.
 
 ## Evidence Handling

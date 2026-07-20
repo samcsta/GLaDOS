@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS recon_steps (
   agent_id TEXT,
   status TEXT NOT NULL DEFAULT 'pending',  -- pending | running | ok | failed | skipped
   -- JSON of step-specific output. Conventions per step are documented in
-  -- workspaces/glados/webapp-assessment-playbook.md.
+  -- ~/.glados/workspaces/agents/glados/webapp-assessment-playbook.md.
   output_json TEXT,
   duration_ms INTEGER,
   started_at TEXT DEFAULT (datetime('now')),

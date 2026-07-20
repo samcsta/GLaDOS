@@ -1,31 +1,50 @@
 {
-  "name": "glados-desktop",
+  "name": "glados",
   "version": "4.0.0",
   "private": true,
   "description": "Electron shell for the GLaDOS operator app.",
+  "author": {
+    "name": "GLaDOS Red Team"
+  },
+  "desktopName": "glados.desktop",
   "main": "main.cjs",
   "scripts": {
     "start": "electron .",
-    "pack": "electron-builder --dir",
+    "pack": "PATH=\"$PWD/scripts/bin:$PATH\" electron-builder --dir",
+    "pack:mac:arm64": "PATH=\"$PWD/scripts/bin:$PATH\" electron-builder --dir --mac --arm64",
     "verify:pack": "node scripts/verify-packaged.cjs",
-    "dist": "electron-builder"
+    "verify:native:mac": "node scripts/verify-native-architectures.cjs",
+    "verify:native:ubuntu": "node scripts/verify-native-linux.cjs",
+    "dist": "PATH=\"$PWD/scripts/bin:$PATH\" electron-builder",
+    "dist:mac:arm64": "PATH=\"$PWD/scripts/bin:$PATH\" electron-builder --mac --arm64",
+    "release:mac": "node scripts/release-macos.cjs",
+    "pack:ubuntu": "electron-builder --dir --linux --x64 && node scripts/verify-native-linux.cjs",
+    "dist:ubuntu": "electron-builder --linux AppImage --x64",
+    "dist:ubuntu:docker": "docker build --platform linux/amd64 --target artifacts --output type=local,dest=../artifacts/desktop/ubuntu-x64 -f Dockerfile.ubuntu ..",
+    "smoke:ubuntu:backend:docker": "docker build --platform linux/amd64 --target backend-smoke -f Dockerfile.ubuntu ..",
+    "smoke:ubuntu:gui:docker": "docker build --platform linux/amd64 --target gui-smoke -f Dockerfile.ubuntu ..",
+    "test": "node --test test/*.test.cjs"
   },
   "dependencies": {
-    "electron-updater": "^6.3.9"
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
-    "@electron/notarize": "^2.5.0",
-    "@electron/rebuild": "^3.7.2",
-    "electron": "^33.4.11",
-    "electron-builder": "^25.1.8"
+    "@electron/notarize": "^3.1.1",
+    "@electron/rebuild": "^4.2.0",
+    "electron": "^43.1.1",
+    "electron-builder": "^26.15.3"
   },
   "build": {
     "appId": "com.glados.ops",
     "productName": "GLaDOS",
+    "directories": {
+      "output": "../artifacts/desktop"
+    },
     "asar": false,
     "files": [
       "main.cjs",
       "preload.cjs",
+      "lib/**",
       "build/**",
       "scripts/**",
       "!../**/node_modules/.cache/**",
@@ -40,30 +59,73 @@
           "!test/**"
         ]
       },
-      { "from": "../blackboard", "to": "blackboard" },
-      { "from": "../watchdog", "to": "watchdog" },
-      { "from": "../tools", "to": "tools" },
-      { "from": "../scripts", "to": "scripts" },
-      { "from": "../templates", "to": "templates" },
-      { "from": "../config", "to": "config" },
-      { "from": "../VERSION", "to": "VERSION" }
+      {
+        "from": "../dashboard/node_modules",
+        "to": "dashboard/node_modules",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../blackboard",
+        "to": "blackboard"
+      },
+      {
+        "from": "../watchdog",
+        "to": "watchdog"
+      },
+      {
+        "from": "../watchdog/node_modules",
+        "to": "watchdog/node_modules",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../tools",
+        "to": "tools"
+      },
+      {
+        "from": "../scripts",
+        "to": "scripts"
+      },
+      {
+        "from": "../templates",
+        "to": "templates"
+      },
+      {
+        "from": "../config",
+        "to": "config"
+      },
+      {
+        "from": "../VERSION",
+        "to": "VERSION"
+      }
     ],
     "mac": {
       "icon": "build/icon.icns",
       "category": "public.app-category.developer-tools",
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist"
     },
+    "linux": {
+      "icon": "build/icon-source.png",
+      "category": "Development;Security",
+      "syncDesktopName": true,
+      "target": [
+        "AppImage"
+      ]
+    },
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
     "afterPack": "scripts/rebuild-resources.cjs",
     "afterSign": "scripts/notarize.cjs",
     "publish": [
       {
-        "provider": "github",
-        "owner": "samcsta",
-        "repo": "GLaDOS"
+        "provider": "generic",
+        "url": "https://updates.invalid/glados",
+        "channel": "latest"
       }
     ]
   }

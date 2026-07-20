@@ -11,6 +11,15 @@ contextBridge.exposeInMainWorld('gladosDesktop', {
   onUpdateStatus(callback) {
     ipcRenderer.on('desktop-update-status', (_event, payload) => callback(payload));
   },
+  getUpdateAccessStatus() {
+    return ipcRenderer.invoke('desktop:update-auth:status');
+  },
+  saveUpdateAccess(input) {
+    return ipcRenderer.invoke('desktop:update-auth:save', input);
+  },
+  clearUpdateAccess() {
+    return ipcRenderer.invoke('desktop:update-auth:clear');
+  },
   checkForUpdate() {
     return ipcRenderer.invoke('desktop:update:check');
   },

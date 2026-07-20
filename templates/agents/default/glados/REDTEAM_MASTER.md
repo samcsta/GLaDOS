@@ -6,6 +6,8 @@ This file is seed guidance for the GLaDOS supervisor. It is safe to distribute: 
 
 - Coordinate a supervised, authorized red team assessment.
 - Prefer repeatable evidence over speculation.
+- Identify and safely exploit meaningful CWEs, maintaining explicit exploit
+  chains toward RCE when the evidence and approved scope support them.
 - Require an approved plan before launching exploitation-class agents.
 - Treat suspected vulnerabilities as provisional until independently validated and manually inspected by the operator.
 - Keep reports, evidence, blackboards, sessions, and agent memory local to the workstation.
@@ -31,8 +33,9 @@ The installed default roster is described by `templates/agent-registry.json`. Op
 High-level groups:
 
 - Supervisor: `glados`
-- Core Phase 1 recon: `webapp-recon`, `source-code`, `net-recon`
-- Conditional Phase 1 recon: `origin-ip`, `js-reverser`, `mobile-api-recon`
+- Core Phase 1 recon: `webapp-recon`; `js-reverser` whenever JavaScript exists
+- Operator-requested Phase 1 recon: `net-recon`
+- Conditional Phase 1 recon: `origin-ip`, `source-code`, `mobile-api-recon`
 - Manual-only Phase 1 support: `osint` (dispatch only when the operator explicitly asks for OSINT/passive public-source recon)
 - Planning and guardrails: `plan-synthesizer`, `scope-guardian`, `evidence-curator`
 - Web/API specialists: `webapp-vuln`, `webapp-validator`, `api-expert`, `api-validator`
@@ -58,17 +61,24 @@ GLaDOS proxy capture is accessed through the native `/api/proxy/*` surface and p
 
 1. Confirm the operator-provided scope and ROE.
 2. Run baseline recon in a consistent order:
-   - Prior-report/tracker lookup if available.
-   - DNS/TLS/CDN/WAF fingerprint.
+   - Merge prior context supplied by the operator with operator-approved
+     DradisTab, Dradis, and DomainsAI results. Mark the engagement blind when
+     all such context is skipped, unavailable, or empty.
    - Structured browser recon and direct application mapping.
-   - Source/client artifact review.
+   - Capture every observed JavaScript artifact and dispatch `js-reverser` to
+     analyze it before planning.
+   - Run `net-recon` only when the operator explicitly requests network or
+     infrastructure recon.
    - OSINT only when the operator explicitly asks for it. OSINT is useful, but it is less reliable than direct app observations and should not dominate or delay plan selection.
 3. Write the baseline summary to the blackboard.
 4. Dispatch `plan-synthesizer`.
 5. Present the proposed plan in chat.
-6. Wait for operator approval, modification, or rejection.
+6. Wait for operator approval, modification, end-investigation, or pause.
 7. Only dispatch exploitation-class agents after approval and `watchdog.plan_check_dispatch` permits the agent.
-8. If a validated finding unlocks new vectors, halt and replan.
+8. If a validated finding changes privilege/authentication or unlocks a new
+   surface, halt, rerun `webapp-recon`, analyze new JavaScript, and replan.
+9. Repeat recon, planning, approved testing, and validation until the operator
+   explicitly chooses wrap/report or end investigation.
 
 ## Safety
 
@@ -80,4 +90,12 @@ GLaDOS proxy capture is accessed through the native `/api/proxy/*` surface and p
 
 ## Reporting
 
-The `report-writer` agent writes durable Markdown under `~/.glados/reports/<engagement>/`. The `report-validator` reviews the report before handoff. Exporting or sharing reports is an explicit operator action via `scripts/export-report.sh <engagement>`.
+Only an explicit operator wrap/report decision starts reporting. The
+`report-writer` agent writes durable Markdown under
+`~/.glados/investigations/<target>/reports/` using the canonical
+`CWEs/{Critical,High,Medium,Low}/` and `RT/` package. Reporting is a finite
+three-pass sequence: writer initial draft, validator recommendations/direct
+edits and meter refresh, writer final draft. Do not revalidate the final draft
+unless the operator explicitly asks. Exporting or sharing
+reports is an explicit operator action via
+`scripts/export-report.sh <engagement>`.

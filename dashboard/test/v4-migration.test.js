@@ -155,6 +155,8 @@ test('Atlas is removed from active registry, templates, dashboard routes, and UI
     'watchdog/lib/plan-gate.js',
   ].map(rel => fs.readFileSync(path.join(ROOT, rel), 'utf8')).join('\n');
   assert.equal(/api\/chat\/atlas|ATLAS_UPLOADS|open-chatbot|renderChatBotPane|\batlas\b/i.test(`${server}\n${app}\n${html}\n${enforcement}`), false);
+  const agentDetails = fs.readFileSync(path.join(ROOT, 'dashboard/lib/agent-details.js'), 'utf8');
+  assert.doesNotMatch(agentDetails, /readdirSync\(GLADOS_AGENT_WORKSPACES/);
 });
 
 test('v4 model aliases are bare Anthropic Messages aliases without provider prefixes or leading spaces', () => {
@@ -187,22 +189,68 @@ test('v4 tool manifest provides a managed core and specialist tool surface', () 
   }
 });
 
-test('v4 desktop UI keeps operation buttons in Settings and removes appearance controls', () => {
+test('v4 desktop UI keeps app operations in Settings and agent operations in contextual Actions menus', () => {
   const html = fs.readFileSync(path.join(ROOT, 'dashboard/public/index.html'), 'utf8');
   const app = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
+  const styles = fs.readFileSync(path.join(ROOT, 'dashboard/public/styles.css'), 'utf8');
   const topbarControls = html.match(/<div class="controls">([\s\S]*?)<\/div>/)?.[1] || '';
   assert.equal(/<button\b/i.test(topbarControls), false, 'topbar controls should not contain operation buttons');
   assert.equal(/color-profile-options|density-options|font-size-options|glados-dash\.color-profile|glados-dash\.density|glados-dash\.font-size/i.test(`${html}\n${app}`), false);
   assert.equal(/open-about|openAbout|renderAboutPane|about-pane/i.test(`${html}\n${app}`), false);
   assert.match(app, /<h2>Operations<\/h2>/);
   assert.match(app, /id="update-app"/);
-  assert.match(app, /id="halt-one"/);
-  assert.match(app, /id="resume-one"/);
-  assert.doesNotMatch(app, /id="halt-all"|id="resume-all"/);
+  assert.match(app, /class="agent-actions"/);
+  assert.match(app, /data-agent-action="halt"/);
+  assert.match(app, /data-agent-action="resume"/);
+  assert.match(app, /data-agent-action="reset"/);
+  assert.match(app, /handleHaltAgent\(agentId\)/);
+  assert.match(app, /handleResumeAgent\(agentId\)/);
+  assert.doesNotMatch(app, /id="halt-one"|id="resume-one"|id="halt-all"|id="resume-all"/);
+  assert.match(styles, /\.agent-view-toolbar/);
+  assert.match(styles, /\.agent-actions-menu/);
+  assert.match(styles, /\.agent-runtime-status\.halted/);
+  assert.match(app, /kind === 'operator-event'/);
+  assert.match(styles, /\.entry\.operator-event\.halt-event/);
   assert.match(app, /id="chat-stop"/);
   assert.doesNotMatch(`${html}\n${app}`, /indicators-heading|indicators-group|proxy-rps|refreshIndicators|Proxy RPS|Burp RPS/);
   assert.match(app, /Enter to send, Shift\+Enter for newline/);
   assert.match(app, /ev\.key === 'Enter' && !ev\.shiftKey/);
+});
+
+test('v4 operator workspace exposes overview, search, provenance, notifications, and persistent layout controls', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'dashboard/public/index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
+  const styles = fs.readFileSync(path.join(ROOT, 'dashboard/public/styles.css'), 'utf8');
+  const server = fs.readFileSync(path.join(ROOT, 'dashboard/server.js'), 'utf8');
+  for (const id of ['open-overview', 'agent-search', 'notifications-toggle', 'notification-drawer', 'sidebar-splitter', 'events-splitter']) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.match(server, /app\.get\('\/api\/overview'/);
+  assert.match(server, /getLiteLlmUsage/);
+  assert.match(server, /engagementMetrics\(db, engagement\.id\)/);
+  assert.match(app, /function renderOverviewPane\(/);
+  assert.match(app, /function renderOverviewFindings\(/);
+  assert.match(app, /function renderOverviewPlan\(/);
+  assert.match(app, /function renderOverviewProgress\(/);
+  assert.match(app, /data-overview-reports/);
+  assert.match(server, /topFindings = db\.prepare/);
+  assert.match(server, /plan\.objective = planDocument\.terminal_objective/);
+  assert.match(styles, /\.overview-operations-grid/);
+  assert.match(styles, /\.overview-progress-track/);
+  assert.match(app, /function renderLiteLlmUsage\(/);
+  assert.match(app, /data-usage-share/);
+  assert.match(app, /Assessment cost/);
+  assert.match(app, /Assessment tokens/);
+  assert.match(app, /function openAgentProvenance\(/);
+  assert.match(app, /function openRelatedTraffic\(/);
+  assert.match(app, /function confirmAction\(/);
+  assert.match(app, /glados-dash\.open-tabs/);
+  assert.doesNotMatch(app, /\b(?:alert|confirm)\s*\(/);
+  assert.match(styles, /\.notification-drawer/);
+  assert.match(styles, /\.overview-metrics/);
+  assert.match(styles, /\.overview-usage-summary/);
+  assert.match(styles, /\.usage-model-row/);
+  assert.match(styles, /\.entry\.provenance-focus/);
 });
 
 test('v4 slash commands keep investigation prompt slash-only and omit RPS shortcuts', () => {
@@ -233,6 +281,27 @@ test('v4 transcript renderer ignores orphan stream-end events', () => {
   assert.match(app, /if \(isEnd && !entry\) \{[\s\S]*?return;[\s\S]*?\}\s*\n\s*if \(!entry\)/);
 });
 
+test('v4 long-run workspace bounds transcript memory and retries tab reads', () => {
+  const app = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
+  const server = fs.readFileSync(path.join(ROOT, 'dashboard/server.js'), 'utf8');
+  assert.match(app, /const TRANSCRIPT_EVENT_LIMIT = 600/);
+  assert.match(app, /const TRANSCRIPT_FIELD_CHAR_LIMIT = 64 \* 1024/);
+  assert.match(app, /function compactTranscriptEvent\(ev\)/);
+  assert.match(app, /function pruneTranscriptEvents\(rec\)/);
+  assert.match(app, /fetchJson\('\/api\/reports\/tree', \{ timeoutMs: 30000, retries: 1 \}\)/);
+  assert.match(app, /fetchJson\('\/api\/plans' \+ q, \{ timeoutMs: 20000, retries: 1 \}\)/);
+  assert.match(app, /fetchJson\('\/api\/proxy\/history\?limit=500', \{ timeoutMs: 20000, retries: 1 \}\)/);
+  assert.match(server, /The overview represents the most recently started engagement/);
+  assert.match(server, /blackboardReset: blackboard\.ok/);
+  assert.match(server, /onApproved: queueApprovedPlanExecution/);
+  assert.match(server, /transcriptStore\.listRecent\(agentId, \{ limit: BUFFER_LIMIT \}\)/);
+  assert.match(app, /data-overview-end/);
+  assert.match(app, /load\.inFlight/);
+  assert.match(server, /admitUserTranscript\('glados', message, req\.body\?\.client_id\)/);
+  assert.match(server, /res\.status\(202\)\.json\(\{ ok: true, accepted: true/);
+  assert.doesNotMatch(server, /ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END/);
+});
+
 test('v4 report library provides searchable, source-filtered navigation with durable selection', () => {
   const app = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
   const css = fs.readFileSync(path.join(ROOT, 'dashboard/public/styles.css'), 'utf8');
@@ -241,6 +310,10 @@ test('v4 report library provides searchable, source-filtered navigation with dur
   assert.match(app, /function filterReportTree\(/);
   assert.match(app, /state\.reports\.selectedPath = relPath/);
   assert.match(app, /function formatReportDate\(/);
+  assert.match(app, /function formatReportMarkdownForDisplay\(/);
+  assert.match(app, /#Evidence\\s\+\(\\d\+\)/);
+  assert.match(css, /\.report-document\.severity-critical/);
+  assert.match(css, /--report-tone/);
   assert.match(css, /\.reports-tree \.file\.active[\s\S]*?box-shadow: inset 3px 0 0 var\(--accent\)/);
 });
 
@@ -248,8 +321,15 @@ test('v4 report index budgets reports and investigations independently', () => {
   const source = fs.readFileSync(path.join(ROOT, 'dashboard/lib/reports.js'), 'utf8');
   assert.match(source, /ROOTS\.map\(r => \{\s*const state = \{ count: 0, truncated: false \}/);
   assert.match(source, /truncatedRoots/);
-  assert.match(source, /GLADOS_REPORT_TREE_MAX_ENTRIES \|\| 20000/);
+  assert.match(source, /GLADOS_REPORT_TREE_MAX_ENTRIES \|\| 3000/);
   assert.match(source, /GLADOS_REPORT_TREE_MAX_DEPTH \|\| 16/);
+});
+
+test('runtime agent events create tabs without stealing the active workspace view', () => {
+  const source = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
+  assert.match(source, /function ensureAgentTab\(agentId\)/);
+  assert.match(source, /session-started[\s\S]*?ensureAgentTab\(info\.agentId\)/);
+  assert.doesNotMatch(source, /session-started[\s\S]{0,500}?openAgentTab\(info\.agentId\)/);
 });
 
 test('v4 proxy backend defaults to native mitmproxy capture', () => {
@@ -314,7 +394,11 @@ test('v4 desktop branding uses text header and GLaDOS desktop icon without renam
   assert.equal(fs.existsSync(path.join(ROOT, 'desktop/build/icon.icns')), true);
   assert.equal(fs.existsSync(path.join(ROOT, 'desktop/build/icon-source.png')), true);
   assert.equal(desktopPkg.build.productName, 'GLaDOS');
+  assert.equal(desktopPkg.name, 'glados');
+  assert.equal(desktopPkg.build.directories.output, '../artifacts/desktop');
   assert.equal(desktopPkg.build.mac.icon, 'build/icon.icns');
+  assert.match(main, /path\.join\(runtimeDir, 'electron'\)/);
+  assert.doesNotMatch(main, /Application Support\/glados-desktop/);
 });
 
 test('v4 source tree and desktop resources contain no compatibility runtime artifacts', () => {
@@ -323,6 +407,7 @@ test('v4 source tree and desktop resources contain no compatibility runtime arti
   const serialized = JSON.stringify(resources);
   assert.doesNotMatch(serialized, /openclaw|burp|raw-stream|tag-injector/i);
   for (const rel of [
+    'workspaces',
     'dashboard/lib/openclaw.js',
     'dashboard/lib/agent-watcher.js',
     'dashboard/lib/jsonl-tail.js',
@@ -335,6 +420,17 @@ test('v4 source tree and desktop resources contain no compatibility runtime arti
   ]) {
     assert.equal(fs.existsSync(path.join(ROOT, rel)), false, rel);
   }
+  const ignore = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8');
+  assert.match(ignore, /^\/workspaces\/$/m);
+  assert.match(ignore, /^\/artifacts\/$/m);
+});
+
+test('desktop installer targets one canonical app and never removes operator runtime data', () => {
+  const installer = fs.readFileSync(path.join(ROOT, 'scripts/install-desktop-app.sh'), 'utf8');
+  assert.match(installer, /DEST="\$INSTALL_ROOT\/GLaDOS\.app"/);
+  assert.match(installer, /npm run verify:pack/);
+  assert.match(installer, /rm -rf "\$ROOT\/artifacts"/);
+  assert.doesNotMatch(installer, /rm\s+-rf\s+[^\n]*(?:\.glados|GLADOS_RUNTIME_DIR)/);
 });
 
 test('v4 plan ACL writes under the GLaDOS runtime directory', () => {

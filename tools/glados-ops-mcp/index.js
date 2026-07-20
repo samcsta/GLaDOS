@@ -7,7 +7,11 @@ const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
 const Database = require('better-sqlite3');
+const WebSocket = require('ws');
 const { resolveTool, toolStatus, loadManifest } = require('../../scripts/lib/redteam-tools');
+const { actionRequiresOperator } = require('./lib/scope-risk');
+const { findExplicitOperatorActionApproval } = require('./lib/operator-action-approval');
+const { engagementMetrics } = require('./lib/engagement-metrics');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const GLADOS_RUNTIME_DIR = process.env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), '.glados');
@@ -87,6 +91,20 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'local_auth_login',
+    description: 'Use a host-allowlisted local credential profile to submit a standard username/password login form inside an existing browser MCP/CDP page. Secret values are never returned.',
+    inputSchema: {
+      type: 'object',
+      required: ['profile_id'],
+      properties: {
+        profile_id: { type: 'string', description: 'Local auth profile id.' },
+        target_id: { type: 'string', description: 'Browser MCP targetId from browser.open/snapshot.' },
+        ws_url: { type: 'string', description: 'Optional CDP websocket URL from browser.open.' },
+        cdp_port: { type: 'number', description: 'Loopback CDP port from the agent runtime context.' },
+      },
+    },
+  },
+  {
     name: 'adfs_active_directory_login',
     description: 'Use a local credential profile to complete Ford ADFS Active Directory login inside an existing browser MCP/CDP page. Secret values are never returned.',
     inputSchema: {
@@ -95,6 +113,7 @@ const TOOLS = [
         profile_id: { type: 'string', description: 'Local auth profile id, default ford-sso.' },
         target_id: { type: 'string', description: 'Browser MCP targetId from browser.open/snapshot.' },
         ws_url: { type: 'string', description: 'Optional CDP websocket URL from browser.open.' },
+        cdp_port: { type: 'number', description: 'Loopback CDP port from the agent runtime context.' },
       },
     },
   },
@@ -114,6 +133,18 @@ const TOOLS = [
         screenshots: { type: 'array', items: { type: 'string' } },
         notes: { type: 'string' },
         redactions: { type: 'array', items: { type: 'string' } },
+      },
+    },
+  },
+  {
+    name: 'engagement_metrics',
+    description: 'Read elapsed time, Claude Agent SDK metered spend, captured token usage, and task counts for one engagement. This is local reporting data and does not contact the target.',
+    inputSchema: {
+      type: 'object',
+      required: ['engagement_id'],
+      properties: {
+        engagement_id: { type: 'string' },
+        metered_through: { type: 'string', description: 'Optional ISO-8601 reporting cutoff; defaults to now or completed_at.' },
       },
     },
   },
@@ -243,13 +274,19 @@ function localAuthStatus() {
 
 async function resolveBrowserWsUrl(args) {
   if (args.ws_url) return args.ws_url;
-  if (!args.target_id) throw new Error('target_id or ws_url required');
-  const res = await fetch('http://127.0.0.1:18800/json/list', { signal: AbortSignal.timeout(2000) });
+  const port = Number(args.cdp_port || 18800);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('cdp_port must be a valid TCP port');
+  const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(2000) });
   if (!res.ok) throw new Error(`browser target list failed: HTTP ${res.status}`);
   const targets = await res.json();
-  const target = (Array.isArray(targets) ? targets : []).find(t => t.id === args.target_id || t.targetId === args.target_id);
+  const pages = (Array.isArray(targets) ? targets : []).filter(t => (t.type || 'page') === 'page');
+  const target = args.target_id
+    ? pages.find(t => t.id === args.target_id || t.targetId === args.target_id)
+    : (pages.find(t => /^https?:\/\//i.test(String(t.url || ''))) || pages[0]);
   const wsUrl = target?.webSocketDebuggerUrl || target?.webSocketUrl || target?.wsUrl;
-  if (!wsUrl) throw new Error(`browser target not found for target_id ${args.target_id}`);
+  if (!wsUrl) throw new Error(args.target_id
+    ? `browser target not found for target_id ${args.target_id}`
+    : `no page target found on CDP port ${port}`);
   return wsUrl;
 }
 
@@ -284,6 +321,153 @@ function waitForWsOpen(ws, timeoutMs = 3000) {
     ws.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true });
     ws.addEventListener('error', () => { clearTimeout(timer); reject(new Error('CDP websocket error')); }, { once: true });
   });
+}
+
+function hostAllowedForProfile(host, profile) {
+  const normalized = String(host || '').toLowerCase();
+  const allowedHosts = Array.isArray(profile?.allowed_hosts) ? profile.allowed_hosts : [];
+  return allowedHosts.some(entry => {
+    const allowed = String(entry || '').toLowerCase().trim();
+    if (!allowed) return false;
+    if (allowed.startsWith('*.')) {
+      const suffix = allowed.slice(1);
+      return normalized.endsWith(suffix) && normalized.length > suffix.length;
+    }
+    return normalized === allowed;
+  });
+}
+
+async function localAuthLogin(args) {
+  const profileId = String(args.profile_id || '').trim();
+  const auth = readJsonFile(LOCAL_AUTH, null);
+  const profile = auth?.profiles?.[profileId];
+  if (!profile?.username || !profile?.password) {
+    return { ok: false, status: 'missing_profile', profile_id: profileId, redaction: 'No credential values returned.' };
+  }
+
+  const wsUrl = await resolveBrowserWsUrl(args);
+  const ws = new WebSocket(wsUrl);
+  await waitForWsOpen(ws);
+  try {
+    await cdpCall(ws, 'Runtime.enable');
+    const locationResult = await cdpCall(ws, 'Runtime.evaluate', {
+      expression: '({ href: location.href, host: location.hostname, title: document.title })',
+      returnByValue: true,
+    });
+    const current = locationResult.result?.value || {};
+    const allowedHosts = Array.isArray(profile.allowed_hosts) ? profile.allowed_hosts : [];
+    if (!hostAllowedForProfile(current.host, profile)) {
+      return {
+        ok: false,
+        status: 'host_not_allowed_for_profile',
+        profile_id: profileId,
+        host: current.host || null,
+        allowed_hosts: allowedHosts,
+        redaction: 'No credential values returned.',
+      };
+    }
+
+    const script = `(async (username, password) => {
+      const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+      const visible = el => !!el && !el.disabled && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+      const docs = () => {
+        const out = [document];
+        for (const frame of Array.from(window.frames || [])) {
+          try { if (frame.document) out.push(frame.document); } catch {}
+        }
+        return out;
+      };
+      const all = selector => docs().flatMap(doc => Array.from(doc.querySelectorAll(selector)));
+      const setValue = (el, value) => {
+        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        el.focus();
+        if (setter) setter.call(el, value); else el.value = value;
+        for (const type of ['input', 'change', 'keyup', 'blur']) {
+          el.dispatchEvent(new Event(type, { bubbles: true }));
+        }
+      };
+      const textOf = el => (el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+      const click = el => {
+        if (!visible(el)) return false;
+        el.scrollIntoView({ block: 'center', inline: 'center' });
+        el.click();
+        return true;
+      };
+      const submit = input => {
+        const form = input?.form || all('form').find(visible);
+        const candidates = form
+          ? Array.from(form.querySelectorAll('button,input[type=submit],[role=button]'))
+          : all('button,input[type=submit],[role=button]');
+        const button = candidates.find(el => visible(el) && /sign in|log in|login|continue|submit|next/i.test(textOf(el)))
+          || candidates.find(visible);
+        if (button && click(button)) return true;
+        if (form?.requestSubmit) { form.requestSubmit(); return true; }
+        if (form) { form.submit(); return true; }
+        return false;
+      };
+      const userSelectors = [
+        'input[autocomplete=username]',
+        'input[type=email]',
+        'input[name*=user i]',
+        'input[id*=user i]',
+        'input[name*=email i]',
+        'input[id*=email i]',
+        'input[type=text]'
+      ];
+      const findUser = () => userSelectors.flatMap(selector => all(selector)).find(visible);
+      const findPassword = () => all('input[type=password]').find(visible);
+
+      let usernameInput = findUser();
+      let passwordInput = findPassword();
+      let submitted = false;
+      if (usernameInput) setValue(usernameInput, username);
+      if (passwordInput) setValue(passwordInput, password);
+
+      if (passwordInput) {
+        submitted = true;
+        setTimeout(() => submit(passwordInput), 50);
+      } else if (usernameInput) {
+        submitted = true;
+        setTimeout(() => submit(usernameInput), 50);
+      }
+
+      return {
+        usernameFieldFound: !!usernameInput,
+        passwordFieldFound: !!passwordInput,
+        submitted,
+        finalUrl: location.href,
+        finalHost: location.hostname,
+        title: document.title
+      };
+    })(${JSON.stringify(profile.username)}, ${JSON.stringify(profile.password)})`;
+    const loginResult = await cdpCall(ws, 'Runtime.evaluate', {
+      expression: script,
+      awaitPromise: true,
+      returnByValue: true,
+    }, 15000);
+    const value = loginResult.result?.value || {};
+    const submittedCredentials = !!value.passwordFieldFound && !!value.submitted;
+    return {
+      ok: submittedCredentials,
+      status: submittedCredentials
+        ? 'submitted_credentials'
+        : (value.usernameFieldFound ? 'login_form_incomplete' : 'login_form_not_found'),
+      auth_complete: false,
+      requires_verification: submittedCredentials,
+      requires_operator: !submittedCredentials,
+      profile_id: profileId,
+      username_field_found: !!value.usernameFieldFound,
+      password_field_found: !!value.passwordFieldFound,
+      submitted: !!value.submitted,
+      final_host: value.finalHost || null,
+      final_url: redactedUrl(value.finalUrl),
+      title: value.title || null,
+      redaction: 'Credential values were read from the local secret profile and submitted through CDP, but are never returned. Verify the authenticated landing page before continuing.',
+    };
+  } finally {
+    try { ws.close(); } catch {}
+  }
 }
 
 async function adfsActiveDirectoryLogin(args) {
@@ -511,14 +695,18 @@ function scopeGuard(args) {
   if (!scopeResult.ok) missing.push(scopeResult.reason);
   if (!health.stale && !['healthy', 'unknown'].includes(health.state)) missing.push(`target health is ${health.state}`);
   if (!preApprovedClass && !approved) missing.push('no approved plan includes this agent');
-  const actionText = String(args.action || '');
-  const riskyAction = /post|exploit|mutat|delete|write|send|phish/i.test(actionText);
-  const clearlyNegatedRisk = /\b(no|without|non[- ]?)\s+(post|exploit|exploitation|mutation|mutating|delete|write|send|phish|phishing|fuzzing)\b/i.test(actionText);
-  const requiresOperator = args.risk_to_target === 'high'
-    || (riskyAction && !clearlyNegatedRisk && !(preApprovedClass && args.risk_to_target === 'low'));
+  const requiresOperator = actionRequiresOperator({
+    action: args.action,
+    riskToTarget: args.risk_to_target,
+    preApprovedClass,
+    hasApprovedPlan: !!approved,
+  });
+  const explicitActionApproval = requiresOperator
+    ? findExplicitOperatorActionApproval(blackboard, args)
+    : null;
   return {
-    allowed: missing.length === 0 && !requiresOperator,
-    requires_operator: missing.length === 0 && requiresOperator,
+    allowed: missing.length === 0 && (!requiresOperator || !!explicitActionApproval),
+    requires_operator: missing.length === 0 && requiresOperator && !explicitActionApproval,
     phase: isMeta ? 'meta' : (isPhase1 ? 'phase1' : 'phase3'),
     agent_id: args.agent_id,
     target_url: args.target_url,
@@ -526,8 +714,16 @@ function scopeGuard(args) {
     health,
     scope: scopeResult,
     approved_plan: approved ? { id: approved.id, engagement_id: approved.engagement_id } : null,
+    explicit_action_approval: explicitActionApproval ? {
+      id: explicitActionApproval.id,
+      operator: explicitActionApproval.operator,
+      expires_at: explicitActionApproval.expires_at,
+      reason: explicitActionApproval.reason,
+    } : null,
     missing,
-    reason: missing.length ? missing.join('; ') : (requiresOperator ? 'operator approval required for this action' : 'allowed'),
+    reason: missing.length
+      ? missing.join('; ')
+      : (explicitActionApproval ? 'allowed by explicit operator action approval' : (requiresOperator ? 'operator approval required for this action' : 'allowed')),
   };
 }
 
@@ -645,8 +841,10 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       case 'scope_guard_check': return json(scopeGuard(args));
       case 'operator_context': return json(operatorContext());
       case 'local_auth_status': return json(localAuthStatus());
+      case 'local_auth_login': return json(await localAuthLogin(args));
       case 'adfs_active_directory_login': return json(await adfsActiveDirectoryLogin(args));
       case 'evidence_bundle_create': return json(evidenceBundle(args));
+      case 'engagement_metrics': return json(engagementMetrics(blackboard, args.engagement_id, { meteredThrough: args.metered_through }));
       case 'js_endpoint_extract': return json(jsExtract(args));
       case 'openapi_inventory': return json(openapiInventory(args));
       case 'tool_availability': return json(toolAvailability());

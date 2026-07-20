@@ -2,12 +2,16 @@
   "name": "watchdog-mcp",
   "version": "0.1.0",
   "description": "MCP server exposing GLaDOS watchdog primitives (target health, manual halt/resume, plan gate).",
-  "bin": { "watchdog-mcp": "./index.js" },
+  "bin": {
+    "watchdog-mcp": "./index.js"
+  },
   "main": "index.js",
-  "scripts": { "start": "node index.js" },
+  "scripts": {
+    "start": "node index.js"
+  },
   "type": "commonjs",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "better-sqlite3": "^11.3.0"
+    "better-sqlite3": "^12.11.1"
   }
 }

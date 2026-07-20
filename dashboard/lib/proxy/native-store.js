@@ -15,6 +15,40 @@ function ensureTrafficStore(config = proxyBackendConfig()) {
   return config.trafficJsonl;
 }
 
+function clearProxyTraffic(config = proxyBackendConfig()) {
+  ensureTrafficStore(config);
+  let filesRemoved = 0;
+  let bytesRemoved = 0;
+  const errors = [];
+  let entries = [];
+  try { entries = fs.readdirSync(config.trafficDir, { withFileTypes: true }); }
+  catch (error) { return { ok: false, filesRemoved, bytesRemoved, errors: [error.message] }; }
+
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const file = path.join(config.trafficDir, entry.name);
+    if (file === config.trafficJsonl) continue;
+    if (!/^(?:proxy-events-.+\.jsonl|mitmproxy-.+\.flows)$/i.test(entry.name)) continue;
+    try {
+      try { bytesRemoved += fs.statSync(file).size; } catch {}
+      fs.rmSync(file, { force: true });
+      filesRemoved += 1;
+    } catch (error) {
+      errors.push(`${entry.name}: ${error.message}`);
+    }
+  }
+
+  try {
+    try { bytesRemoved += fs.statSync(config.trafficJsonl).size; } catch {}
+    fs.truncateSync(config.trafficJsonl, 0);
+    fs.chmodSync(config.trafficJsonl, 0o600);
+  } catch (error) {
+    errors.push(`${path.basename(config.trafficJsonl)}: ${error.message}`);
+  }
+
+  return { ok: errors.length === 0, filesRemoved, bytesRemoved, errors };
+}
+
 function parseLine(line) {
   if (!line.trim()) return null;
   try {
@@ -82,41 +116,96 @@ function rowForHistory(event) {
   };
 }
 
-function readEvents(config = proxyBackendConfig()) {
+function trafficFilesNewestFirst(config = proxyBackendConfig()) {
   ensureTrafficStore(config);
   let archives = [];
   try {
     archives = fs.readdirSync(config.trafficDir)
       .filter(name => /^proxy-events-.+\.jsonl$/i.test(name))
       .map(name => path.join(config.trafficDir, name))
-      .sort();
+      .sort()
+      .reverse();
   } catch {}
-  return [...archives, config.trafficJsonl].flatMap(file => {
-    try { return fs.readFileSync(file, 'utf8').split(/\r?\n/).map(parseLine).filter(Boolean); }
-    catch { return []; }
-  });
+  return [config.trafficJsonl, ...archives];
+}
+
+// Read JSONL from the end in bounded chunks. Dashboard polling used to parse
+// every active and archived capture synchronously every two seconds; a long
+// assessment could therefore block the Node event loop long enough that even
+// /api/healthz timed out.
+function forEachLineReverse(file, onLine, chunkSize = 64 * 1024) {
+  let fd;
+  try { fd = fs.openSync(file, 'r'); } catch { return true; }
+  try {
+    let position = fs.fstatSync(fd).size;
+    let carry = Buffer.alloc(0);
+    while (position > 0) {
+      const length = Math.min(chunkSize, position);
+      position -= length;
+      const chunk = Buffer.allocUnsafe(length);
+      fs.readSync(fd, chunk, 0, length, position);
+      const combined = carry.length ? Buffer.concat([chunk, carry]) : chunk;
+      let end = combined.length;
+      for (let index = combined.length - 1; index >= 0; index--) {
+        if (combined[index] !== 0x0a) continue;
+        const line = combined.subarray(index + 1, end).toString('utf8').replace(/\r$/, '');
+        if (line && onLine(line) === false) return false;
+        end = index;
+      }
+      carry = combined.subarray(0, end);
+    }
+    const firstLine = carry.toString('utf8').replace(/\r$/, '');
+    if (firstLine && onLine(firstLine) === false) return false;
+    return true;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function scanEventsReverse(config, onEvent) {
+  for (const file of trafficFilesNewestFirst(config)) {
+    const completed = forEachLineReverse(file, line => {
+      const event = parseLine(line);
+      return !event || onEvent(event) !== false;
+    });
+    if (!completed) return;
+  }
 }
 
 function proxyHistory({ since = 0, limit = DEFAULT_LIMIT, config = proxyBackendConfig() } = {}) {
   const lim = Math.max(1, Math.min(MAX_LIMIT, Number(limit) || DEFAULT_LIMIT));
   const sinceNum = Number(since) || 0;
-  const rows = readEvents(config)
-    .filter(event => !sinceNum || Number(event.id) > sinceNum)
-    .slice(-lim)
-    .map(rowForHistory);
-  return rows;
+  const rows = [];
+  scanEventsReverse(config, event => {
+    const eventId = Number(event.id);
+    if (sinceNum && Number.isFinite(eventId) && eventId <= sinceNum) return false;
+    if (!sinceNum || eventId > sinceNum) rows.push(rowForHistory(event));
+    return rows.length < lim;
+  });
+  return rows.reverse();
 }
 
 function proxyDetail(id, config = proxyBackendConfig()) {
   const wanted = String(id || '');
   if (!wanted) return null;
-  return readEvents(config).find(event => String(event.id) === wanted) || null;
+  let match = null;
+  scanEventsReverse(config, event => {
+    if (String(event.id) !== wanted) return true;
+    match = event;
+    return false;
+  });
+  return match;
 }
 
 function proxyMetrics({ windowSec = 10, config = proxyBackendConfig() } = {}) {
   const windowMs = Math.max(1, Number(windowSec) || 10) * 1000;
   const cutoff = Date.now() - windowMs;
-  const rows = readEvents(config).filter(event => Number(event.ts) >= cutoff);
+  const rows = [];
+  scanEventsReverse(config, event => {
+    if (Number(event.ts) < cutoff) return false;
+    rows.push(event);
+    return true;
+  });
   const byAgent = new Map();
   for (const row of rows) {
     const agent = row.agentTag || '(untagged)';
@@ -149,7 +238,10 @@ function watchProxyEvents({ config = proxyBackendConfig(), fromEnd = true, onEve
     if (closed) return;
     let stat;
     try { stat = fs.statSync(config.trafficJsonl); } catch { return; }
-    if (stat.size < position) position = 0;
+    if (stat.size < position) {
+      position = 0;
+      carry = '';
+    }
     if (stat.size === position) return;
     const fd = fs.openSync(config.trafficJsonl, 'r');
     try {
@@ -200,7 +292,21 @@ function proxyHealth(config = proxyBackendConfig()) {
   }
 }
 
+function combineProxyRuntimeHealth(store, runtime, { supervised = false } = {}) {
+  const processHealthy = !supervised || runtime?.status === 'running';
+  return {
+    ...store,
+    healthy: !!store?.healthy && processHealthy,
+    processStatus: supervised ? runtime?.status || 'stopped' : 'external',
+    pid: supervised ? runtime?.pid || null : null,
+    startedAt: supervised ? runtime?.startedAt || null : null,
+    error: store?.error || (!processHealthy ? runtime?.error || 'native proxy is not running' : null),
+    stderr: !processHealthy ? runtime?.stderr : undefined,
+  };
+}
+
 module.exports = {
+  clearProxyTraffic,
   ensureTrafficStore,
   normalizeEvent,
   proxyHistory,
@@ -208,4 +314,5 @@ module.exports = {
   proxyMetrics,
   watchProxyEvents,
   proxyHealth,
+  combineProxyRuntimeHealth,
 };

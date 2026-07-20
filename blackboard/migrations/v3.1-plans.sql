@@ -36,4 +36,18 @@ CREATE TABLE IF NOT EXISTS plan_approvals (
 
 CREATE INDEX IF NOT EXISTS idx_plan_approvals_plan ON plan_approvals(plan_id);
 
+CREATE TABLE IF NOT EXISTS operator_action_approvals (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  target_url TEXT NOT NULL,
+  method TEXT NOT NULL DEFAULT '*',
+  risk_to_target TEXT NOT NULL DEFAULT '*',
+  operator TEXT NOT NULL DEFAULT 'operator',
+  reason TEXT,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_operator_action_approvals_match
+  ON operator_action_approvals(agent_id, target_url, method, expires_at);
+
 COMMIT;

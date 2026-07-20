@@ -1,0 +1,11 @@
+{
+  "name": "glados-private-update-feed",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.cjs",
+    "token": "node generate-token.cjs",
+    "test": "node --test test/*.test.cjs"
+  },
+  "engines": { "node": ">=20" }
+}

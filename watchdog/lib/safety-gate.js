@@ -63,15 +63,21 @@ function isLoopback(value) {
 function extractTargets(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value || {});
   const found = new Set();
-  for (const match of text.matchAll(/https?:\/\/[^\s'"`<>]+/gi)) {
+  const urlPattern = /https?:\/\/[^\s'"`<>]+/gi;
+  const urlSpans = [];
+  for (const match of text.matchAll(urlPattern)) {
     const cleaned = match[0].replace(/[),.;]+$/, '');
+    urlSpans.push([match.index, match.index + match[0].length]);
     if (!isLoopback(cleaned)) found.add(cleaned);
   }
-  for (const match of text.matchAll(/\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b/gi)) {
+  const bareTargetText = [...text].map((char, index) => (
+    urlSpans.some(([start, end]) => index >= start && index < end) ? ' ' : char
+  )).join('');
+  for (const match of bareTargetText.matchAll(/\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b/gi)) {
     const host = match[0].toLowerCase();
     if (!isLoopback(host)) found.add(`https://${host}`);
   }
-  for (const match of text.matchAll(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)) {
+  for (const match of bareTargetText.matchAll(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)) {
     if (!isLoopback(match[0])) found.add(`https://${match[0]}`);
   }
   return [...found];
@@ -89,10 +95,11 @@ function classifyToolUse(toolName, input = {}) {
   const commandName = shellCommandName(command);
   const browser = /mcp__browser(?:-[a-z0-9._-]+)?__browser_/i.test(name);
   const browserNavigation = browser && /__browser_(?:navigate|tabs|click|press_key|fill_form|type|select_option|evaluate)$/i.test(name);
+  const browserNavigateToUrl = browser && /__browser_navigate$/i.test(name);
   const webFetch = name === 'WebFetch';
   const networkShell = name === 'Bash' && NETWORK_COMMANDS.has(commandName) && !/\s--?(?:version|help)\b/.test(command);
   const mutating = /(?:\s|^)(?:-X\s*)?(?:POST|PUT|PATCH|DELETE)\b/i.test(command)
-    || /(?:--data(?:-raw|-binary)?|-d)\s/i.test(command)
+    || /(?:--data(?:-raw|-binary)?|-d)\s/.test(command)
     || /\b(?:sqlmap|ffuf|nuclei|masscan|nikto|gobuster|feroxbuster)\b/i.test(command)
     || (browser && /__browser_(?:click|fill_form|type|select_option|file_upload|evaluate)$/i.test(name));
   const targetCapable = webFetch || networkShell || browserNavigation
@@ -106,7 +113,13 @@ function classifyToolUse(toolName, input = {}) {
     httpShell: networkShell && HTTP_COMMANDS.has(commandName),
     mutating,
     targetCapable,
-    targets: targetCapable ? extractTargets(input) : [],
+    // Current-page browser tools (click, fill, evaluate, and so on) contain
+    // selectors or JavaScript, not network targets. Scope them to the targets
+    // extracted from the operator turn instead of parsing expressions such as
+    // document.cookie as hostnames.
+    targets: browserNavigateToUrl
+      ? extractTargets(input.url)
+      : ((webFetch || networkShell) ? extractTargets(input) : []),
   };
 }
 

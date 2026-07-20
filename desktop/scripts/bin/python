@@ -1,0 +1,8 @@
+#!/bin/sh
+# electron-builder's macOS DMG helper still probes for `python`. Modern macOS
+# installations generally expose Python 3 as `python3` only, so keep the build
+# self-contained without asking operators or CI runners to alter /usr/local/bin.
+if [ -x /usr/bin/python3 ]; then
+  exec /usr/bin/python3 "$@"
+fi
+exec "$(command -v python3)" "$@"

@@ -1,6 +1,9 @@
 const crypto = require('node:crypto');
 const Database = require('better-sqlite3');
 
+const DEFAULT_RECENT_LIMIT = 600;
+const DEFAULT_TRANSPORT_FIELD_CHARS = 64 * 1024;
+
 function openTranscriptDb(dbPath) {
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
@@ -24,6 +27,18 @@ class DashboardTranscriptStore {
       FROM dashboard_transcript_events
       WHERE agent_id = ?
       ORDER BY id ASC
+    `);
+    this.listRecentByAgent = this.db.prepare(`
+      SELECT id, agent_id, client_event_id, kind,
+             substr(text, 1, ?) AS text,
+             length(text) AS text_length,
+             CASE WHEN length(event_json) <= ? THEN event_json ELSE NULL END AS event_json,
+             length(event_json) AS event_json_length,
+             ts
+      FROM dashboard_transcript_events
+      WHERE agent_id = ?
+      ORDER BY id DESC
+      LIMIT ?
     `);
     this.deleteByAgent = this.db.prepare(`
       DELETE FROM dashboard_transcript_events WHERE agent_id = ?
@@ -67,6 +82,38 @@ class DashboardTranscriptStore {
         sseId: `dashboard:${row.id}`,
       });
     });
+  }
+
+  // Dashboard reconnects only need a bounded working set. Reading every full
+  // event made one large specialist transcript capable of blocking the Node
+  // event loop — and therefore every Overview/Plans/Settings/Proxy request.
+  listRecent(agentId, options = {}) {
+    const limit = Math.max(1, Math.min(5000, Number(options.limit) || DEFAULT_RECENT_LIMIT));
+    const maxFieldChars = Math.max(1024, Math.min(1024 * 1024,
+      Number(options.maxFieldChars) || DEFAULT_TRANSPORT_FIELD_CHARS));
+    return this.listRecentByAgent.all(maxFieldChars, maxFieldChars, agentId, limit)
+      .reverse()
+      .map(row => {
+        let ev = null;
+        try { ev = row.event_json ? JSON.parse(row.event_json) : null; } catch {}
+        const transportTruncated = Number(row.text_length || 0) > maxFieldChars
+          || Number(row.event_json_length || 0) > maxFieldChars;
+        return normalizeEvent(row.agent_id, {
+          ...(ev && typeof ev === 'object' ? ev : {}),
+          agentId: row.agent_id,
+          kind: ev?.kind || row.kind,
+          text: ev?.text ?? row.text,
+          ts: ev?.ts || row.ts,
+          id: ev?.id || row.client_event_id || `dashboard:${row.id}`,
+          dashboardEventId: row.id,
+          sseId: `dashboard:${row.id}`,
+          ...(transportTruncated ? {
+            transportTruncated: true,
+            originalTextChars: Number(row.text_length || 0),
+            originalEventChars: Number(row.event_json_length || 0),
+          } : {}),
+        });
+      });
   }
 
   clearAgents(agentIds) {
@@ -119,6 +166,39 @@ function dashboardTranscriptEvent(event, options = {}) {
   if (ev.kind === 'result' && !ev.isError && !includeStream) return null;
   if (ev.kind === 'harness-init' || ev.kind === 'liveness') return null;
   return ev;
+}
+
+function truncateTransportField(value, maxFieldChars = DEFAULT_TRANSPORT_FIELD_CHARS) {
+  if (typeof value !== 'string' || value.length <= maxFieldChars) return value;
+  return `${value.slice(0, maxFieldChars)}\n\n[dashboard transport preview truncated; ${value.length - maxFieldChars} chars remain durable]`;
+}
+
+function compactTranscriptEventForTransport(event, options = {}) {
+  if (!event || typeof event !== 'object') return event;
+  const maxFieldChars = Math.max(1024, Math.min(1024 * 1024,
+    Number(options.maxFieldChars) || DEFAULT_TRANSPORT_FIELD_CHARS));
+  const out = { ...event };
+  let truncated = false;
+  for (const key of ['text', 'error', 'content', 'delta']) {
+    if (typeof out[key] !== 'string' || out[key].length <= maxFieldChars) continue;
+    out[key] = truncateTransportField(out[key], maxFieldChars);
+    truncated = true;
+  }
+  for (const key of ['arguments', 'toolInput']) {
+    const value = out[key];
+    if (!value || typeof value !== 'object') continue;
+    let serialized;
+    try { serialized = JSON.stringify(value); } catch { continue; }
+    if (serialized.length <= maxFieldChars) continue;
+    out[key] = {
+      dashboardTransportPreviewTruncated: true,
+      originalChars: serialized.length,
+      preview: truncateTransportField(serialized, maxFieldChars),
+    };
+    truncated = true;
+  }
+  if (truncated) out.transportTruncated = true;
+  return out;
 }
 
 function normalizeTs(ts) {
@@ -195,6 +275,7 @@ function sseFrame(ev, options = {}) {
 
 module.exports = {
   DashboardTranscriptStore,
+  compactTranscriptEventForTransport,
   eventSseId,
   normalizeEvent,
   dashboardTranscriptEvent,

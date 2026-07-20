@@ -123,11 +123,11 @@
     {
       "name": "unmounted-tool-deny",
       "agentId": "webapp-validator",
-      "toolName": "NotebookEdit",
+      "toolName": "MultiEdit",
       "toolInput": {
         "notebook_path": "scratch.ipynb"
       },
-      "expectedDecisionReason": "NotebookEdit is not mounted for webapp-validator"
+      "expectedDecisionReason": "MultiEdit is not mounted for webapp-validator"
     }
   ]
 }

@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { mitmCaPaths, checkMitmCaPermissions } = require('./mitm-ca');
@@ -8,6 +9,8 @@ function proxyBackendConfig(env = process.env) {
   const defaultBin = [
     '/opt/homebrew/bin/mitmdump',
     '/usr/local/bin/mitmdump',
+    path.join(os.homedir(), '.local', 'bin', 'mitmdump'),
+    '/usr/bin/mitmdump',
   ].find(candidate => {
     try { fs.accessSync(candidate, fs.constants.X_OK); return true; } catch { return false; }
   }) || 'mitmdump';
@@ -46,6 +49,45 @@ function buildMitmproxyArgs(config = proxyBackendConfig(), outFile = flowFile(co
   ];
   if (config.rawFlows) args.push('-w', outFile);
   return args;
+}
+
+function isGladosMitmproxyCommand(command, config = proxyBackendConfig()) {
+  const text = String(command || '');
+  return /(?:^|\/)mitmdump(?:\s|$)/.test(text)
+    && text.includes(`--listen-port ${config.listenPort}`)
+    && text.includes(`confdir=${config.mitmproxyConfDir}`);
+}
+
+function listeningPids(config = proxyBackendConfig()) {
+  const lsof = ['/usr/sbin/lsof', '/usr/bin/lsof'].find(fs.existsSync);
+  if (!lsof) return [];
+  const result = cp.spawnSync(lsof, ['-nP', '-a', `-iTCP:${config.listenPort}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' });
+  if (result.status !== 0 && !result.stdout) return [];
+  return String(result.stdout || '').split(/\s+/).map(Number).filter(Number.isInteger);
+}
+
+function processCommand(pid) {
+  const result = cp.spawnSync('/bin/ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' });
+  return result.status === 0 ? String(result.stdout || '').trim() : '';
+}
+
+function processAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function stopStaleOwnedMitmproxy(config = proxyBackendConfig(), { timeoutMs = 2500 } = {}) {
+  const owned = listeningPids(config).filter(pid => isGladosMitmproxyCommand(processCommand(pid), config));
+  for (const pid of owned) {
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (owned.some(processAlive) && Date.now() < deadline) {
+    cp.spawnSync('/bin/sleep', ['0.05']);
+  }
+  for (const pid of owned.filter(processAlive)) {
+    try { process.kill(pid, 'SIGKILL'); } catch {}
+  }
+  return owned;
 }
 
 function retainedTrafficFiles(config = proxyBackendConfig()) {
@@ -105,6 +147,7 @@ function startMitmproxy(config = proxyBackendConfig()) {
   fs.chmodSync(config.trafficDir, 0o700);
   pruneTrafficFiles(config);
   prepareMitmproxyCa(config, process.env);
+  stopStaleOwnedMitmproxy(config);
   const outFile = flowFile(config);
   const args = buildMitmproxyArgs(config, outFile);
   const child = cp.spawn(config.mitmproxyBin, args, {
@@ -145,6 +188,8 @@ module.exports = {
   proxyBackendConfig,
   flowFile,
   buildMitmproxyArgs,
+  isGladosMitmproxyCommand,
+  stopStaleOwnedMitmproxy,
   prepareMitmproxyCa,
   retainedTrafficFiles,
   pruneTrafficFiles,

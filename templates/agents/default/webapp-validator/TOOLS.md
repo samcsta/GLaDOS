@@ -14,6 +14,7 @@ Independent validator for web findings. Reproduces or rejects suspected findings
 - GLaDOS native proxy for request and response evidence; keep target HTTP(S) observable unless the operator approves an exception.
 - Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
 - Local parsing helpers (`jq`, `python3`, `rg`) for comparing evidence.
+- CWE cascade policy, when needed, is at `~/.glados/workspaces/agents/glados/cwe-cascade.json`.
 
 ## Tool Rules
 
@@ -25,8 +26,14 @@ Independent validator for web findings. Reproduces or rejects suspected findings
 - Do not put quote-heavy HTML/regex parsers in `python3 -c`; write and run a
   temporary script so shell quoting cannot alter the program.
 - Use positive/negative controls, cache/auth-state checks, and false-positive analysis.
+- Never use a missing/non-existent object ID to reject an authorization
+  hypothesis; require a known real authorized second object/account or backend
+  evidence, otherwise return disputed.
+- Stop at a confirmed auth/privilege/surface pivot and signal
+  `requires_post_pivot_recon=true` to GLaDOS.
 - Do not expand scope, intensify payloads, or continue into exploitation without GLaDOS/operator approval.
 - Use `blackboard_finding_validate` only when evidence is strong and manual inspection requirements are clear.
+- Never search the whole filesystem (`find /`) for GLaDOS policy or evidence. Use the documented runtime/workspace paths and bounded `rg`/`find` roots.
 
 ## Evidence Handling
 

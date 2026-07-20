@@ -5,8 +5,8 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { checkMitmCaPermissions, mitmCaPaths } = require('../lib/proxy/mitm-ca');
-const { buildMitmproxyArgs, prepareMitmproxyCa, proxyBackendConfig, pruneTrafficFiles, shadowDiffSummary } = require('../lib/proxy/mitmproxy-runner');
-const { proxyHistory, proxyDetail, proxyMetrics, proxyHealth } = require('../lib/proxy/native-store');
+const { buildMitmproxyArgs, isGladosMitmproxyCommand, prepareMitmproxyCa, proxyBackendConfig, pruneTrafficFiles, shadowDiffSummary } = require('../lib/proxy/mitmproxy-runner');
+const { clearProxyTraffic, proxyHistory, proxyDetail, proxyMetrics, proxyHealth, combineProxyRuntimeHealth } = require('../lib/proxy/native-store');
 const { ownerOnlyModeOk, readFallbackSecret, llmSecretPath } = require('../lib/secrets/llm-secrets');
 const gladosLocal = require('../../scripts/lib/glados-local');
 
@@ -56,6 +56,25 @@ test('mitmproxy runner builds supervised shadow backend arguments', () => {
   assert.ok(args.includes('-w'));
   assert.equal('burpProxy' in config, false);
   assert.equal('burpExtApi' in config, false);
+});
+
+test('mitmproxy ownership detection only matches the GLaDOS listener and CA directory', () => {
+  const config = proxyBackendConfig({ GLADOS_RUNTIME_DIR: tempRuntime(), GLADOS_MITM_LISTEN_PORT: '19090' });
+  const command = `/opt/homebrew/bin/mitmdump --listen-host 127.0.0.1 --listen-port 19090 --set confdir=${config.mitmproxyConfDir} -s /Applications/GLaDOS.app/addon.py`;
+  assert.equal(isGladosMitmproxyCommand(command, config), true);
+  assert.equal(isGladosMitmproxyCommand(command.replace('19090', '19091'), config), false);
+  assert.equal(isGladosMitmproxyCommand(command.replace(config.mitmproxyConfDir, '/tmp/other'), config), false);
+});
+
+test('supervised proxy health fails when its process is offline', () => {
+  const store = { healthy: true, backend: 'mitmproxy', trafficDir: '/tmp/traffic' };
+  const failed = combineProxyRuntimeHealth(store, { status: 'failed', error: 'mitmproxy exited (1)', stderr: 'startup failed' }, { supervised: true });
+  assert.equal(failed.healthy, false);
+  assert.equal(failed.processStatus, 'failed');
+  assert.equal(failed.error, 'mitmproxy exited (1)');
+  const running = combineProxyRuntimeHealth(store, { status: 'running', pid: 123 }, { supervised: true });
+  assert.equal(running.healthy, true);
+  assert.equal(running.pid, 123);
 });
 
 test('proxy retention removes expired and over-budget archives without deleting the active store', () => {
@@ -185,6 +204,56 @@ test('native proxy store serves history, detail, metrics, and health', () => {
   assert.equal(metrics.rps > 0, true);
   assert.equal(metrics.agents[0].agent, 'webapp-vuln');
   assert.equal(proxyHealth(config).healthy, true);
+});
+
+test('proxy polling scans newest JSONL records without whole-file reads', () => {
+  const dir = tempRuntime();
+  const config = proxyBackendConfig({ GLADOS_RUNTIME_DIR: dir });
+  fs.mkdirSync(config.trafficDir, { recursive: true, mode: 0o700 });
+  const oldTs = Date.now() - 60_000;
+  fs.writeFileSync(path.join(config.trafficDir, 'proxy-events-2026-07-14.jsonl'), [
+    JSON.stringify({ id: 1, ts: oldTs, url: 'https://target.test/one', status: 200 }),
+    JSON.stringify({ id: 2, ts: oldTs, url: 'https://target.test/two', status: 200 }),
+    '',
+  ].join('\n'), { mode: 0o600 });
+  fs.writeFileSync(config.trafficJsonl, [
+    JSON.stringify({ id: 3, ts: Date.now(), url: 'https://target.test/three', status: 200, agentTag: 'webapp-recon' }),
+    JSON.stringify({ id: 4, ts: Date.now(), url: 'https://target.test/four', status: 500, agentTag: 'webapp-vuln' }),
+    '',
+  ].join('\n'), { mode: 0o600 });
+
+  const originalReadFileSync = fs.readFileSync;
+  fs.readFileSync = () => { throw new Error('whole-file reads are forbidden in proxy polling'); };
+  try {
+    assert.deepEqual(proxyHistory({ config, limit: 2 }).map(row => row.id), [3, 4]);
+    assert.equal(proxyDetail(1, config).url, 'https://target.test/one');
+    assert.deepEqual(proxyMetrics({ config, windowSec: 10 }).agents.map(row => row.agent).sort(), ['webapp-recon', 'webapp-vuln']);
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+  }
+});
+
+test('runtime refresh clears active and archived proxy capture state', () => {
+  const dir = tempRuntime();
+  const config = proxyBackendConfig({ GLADOS_RUNTIME_DIR: dir });
+  fs.mkdirSync(config.trafficDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(config.trafficJsonl, '{"id":1}\n', { mode: 0o600 });
+  const archive = path.join(config.trafficDir, 'proxy-events-old.jsonl');
+  const flows = path.join(config.trafficDir, 'mitmproxy-old.flows');
+  const unrelated = path.join(config.trafficDir, 'keep.txt');
+  fs.writeFileSync(archive, '{"id":2}\n', { mode: 0o600 });
+  fs.writeFileSync(flows, 'flow', { mode: 0o600 });
+  fs.writeFileSync(unrelated, 'keep', { mode: 0o600 });
+
+  const result = clearProxyTraffic(config);
+  assert.equal(result.ok, true);
+  assert.equal(result.filesRemoved, 2);
+  assert.equal(fs.readFileSync(config.trafficJsonl, 'utf8'), '');
+  assert.equal(fs.statSync(config.trafficJsonl).mode & 0o777, 0o600);
+  assert.equal(fs.existsSync(archive), false);
+  assert.equal(fs.existsSync(flows), false);
+  assert.equal(fs.readFileSync(unrelated, 'utf8'), 'keep');
+  assert.deepEqual(proxyHistory({ config }), []);
 });
 
 test('v4 update paths preserve runtime data and have no legacy config or token payload', () => {

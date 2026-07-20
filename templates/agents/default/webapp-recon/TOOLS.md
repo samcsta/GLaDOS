@@ -13,7 +13,8 @@ Core Phase 1 recon agent. Maps the application and writes baseline data; does no
 - Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
 - Watchdog MCP (`target_health`, `plan_check_dispatch`) for health and phase gates.
 - glados-ops `local_auth_status` and `adfs_active_directory_login` only for approved Ford ADFS dependency login.
-- glados-ops `js_endpoint_extract` when captured JS assets need endpoint extraction.
+- glados-ops `js_endpoint_extract` for a quick first pass over captured assets;
+  this never replaces the required `js-reverser` handoff.
 
 ## Tool Rules
 
@@ -32,11 +33,32 @@ Core Phase 1 recon agent. Maps the application and writes baseline data; does no
 - In browser `evaluate` functions, avoid `//` comments in compact one-line
   JavaScript because they comment out the rest of the function. Prefer `/* */`
   comments and keep each evaluation small.
+- Prefer snapshot/find/fill/click/upload tools over `browser_run_code_unsafe`.
+  `browser_evaluate` takes a function string and has no `page` variable.
+  `browser_run_code_unsafe` has a Node callback; create browser globals such as
+  `URLSearchParams` inside `page.evaluate`, not in that outer callback.
+- Create upload payloads under `~/.glados/investigations` or
+  `~/.glados/workspaces`, never `/tmp`. After clicking a file input and opening
+  the chooser, call `browser_file_upload` immediately; do not click again.
 - Stay inside exact scope; record discovered out-of-scope hosts as scope expansion candidates only.
 - Do not fuzz, exploit, mutate data, upload files, send messages, purchase/book, or validate high-impact leads.
+- Inspect raw HTML/DOM attributes in addition to accessibility snapshots and
+  extract UUIDs, hidden inputs, classes, `data-*` fields, comments, and object
+  identifiers from every distinct template.
+- Capture every observed inline/external JavaScript artifact, worker, source
+  map, bootstrapped JSON/config, and dynamically loaded chunk. Save in-scope
+  bodies with hashes and return a complete `js_handoff` to GLaDOS; never omit a
+  script because it looks small.
+- Capture complete proxy-visible request shapes for state-changing workflows,
+  including hidden authorization/ownership fields, without submitting them.
 - Screenshot landing page, auth boundary, forms, error states, and meaningful app states.
+- After any privilege or authentication pivot, remap the newly visible surface
+  and inventory every form/search/filter/import/export input before declaring
+  recon complete.
 - If MFA, unsupported auth, ambiguous landing page, or target health degradation appears, stop and report to GLaDOS.
 
 ## Evidence Handling
 
-- Write `baseline.webapp_recon.*` with routes, forms, auth flow, screenshots, tech stack, and hypothesis-only attack vector leads.
+- Write `baseline.webapp_recon.*` with routes, forms, auth flow, raw artifacts,
+  identity graph, request shapes, JavaScript manifest/handoff, screenshots,
+  technology, coverage ledger, and hypothesis-only meaningful CWE leads.

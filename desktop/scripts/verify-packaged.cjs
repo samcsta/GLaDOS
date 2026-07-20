@@ -4,12 +4,17 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 const desktopDir = path.resolve(__dirname, '..');
-const distDir = path.join(desktopDir, 'dist');
+const distDir = path.resolve(desktopDir, '..', 'artifacts', 'desktop');
+const requested = process.argv[2] ? path.resolve(process.argv[2]) : null;
+const requestedExecutable = requested && requested.endsWith('.app')
+  ? path.join(requested, 'Contents', 'MacOS', 'GLaDOS')
+  : requested;
 const candidates = [
+  requestedExecutable,
   path.join(distDir, 'mac-arm64', 'GLaDOS.app', 'Contents', 'MacOS', 'GLaDOS'),
   path.join(distDir, 'mac', 'GLaDOS.app', 'Contents', 'MacOS', 'GLaDOS'),
   path.join(distDir, 'mac-universal', 'GLaDOS.app', 'Contents', 'MacOS', 'GLaDOS'),
-];
+].filter(Boolean);
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -32,11 +37,11 @@ function portIsOpen(port) {
   });
 }
 
-async function main() {
-  const executable = candidates.find(fs.existsSync);
-  if (!executable) throw new Error('No packaged GLaDOS.app was found. Run npm run pack first.');
+async function runSmoke(executable, architecture = null, label = architecture || process.arch) {
   const proxyPort = await freePort();
-  const child = spawn(executable, [], {
+  const command = architecture ? '/usr/bin/arch' : executable;
+  const args = architecture ? [`-${architecture}`, executable] : [];
+  const child = spawn(command, args, {
     cwd: desktopDir,
     env: {
       ...process.env,
@@ -64,7 +69,21 @@ async function main() {
   if (await portIsOpen(proxyPort)) {
     throw new Error(`Packaged GLaDOS left its proxy listening on ${proxyPort} after shutdown.`);
   }
-  process.stdout.write(`GLADOS_PACKAGED_PROXY_STOP_OK ${proxyPort}\n`);
+  process.stdout.write(`GLADOS_PACKAGED_PROXY_STOP_OK ${label} ${proxyPort}\n`);
+}
+
+async function main() {
+  const executable = candidates.find(fs.existsSync);
+  if (!executable) throw new Error('No packaged GLaDOS.app was found. Run npm run pack first.');
+  const archs = process.platform === 'darwin'
+    ? require('node:child_process').execFileSync('/usr/bin/lipo', ['-archs', executable], { encoding: 'utf8' }).trim().split(/\s+/)
+    : [process.arch];
+  await runSmoke(executable, null, archs.length > 1 ? process.arch : archs[0]);
+  if (process.arch === 'arm64' && archs.includes('x86_64') && archs.includes('arm64')) {
+    const probe = require('node:child_process').spawnSync('/usr/bin/arch', ['-x86_64', '/usr/bin/true']);
+    if (probe.status !== 0) throw new Error('Rosetta is required to smoke-test the universal x86_64 slice on Apple Silicon');
+    await runSmoke(executable, 'x86_64');
+  }
 }
 
 main().catch(error => {

@@ -9,6 +9,7 @@
 //   POST   /api/plans/:id/approve      — body: {vectors?: [cwe...], operator?, reason?} → state=approved
 //   POST   /api/plans/:id/modify       — body: {plan_json, reason?} → creates child plan, old → superseded
 //   POST   /api/plans/:id/reject       — body: {reason} → state=rejected
+//   POST   /api/plans/:id/end          — operator terminal decision; cancels engagement without reporting
 //   POST   /api/plans/:id/complete     — state=complete
 //
 // Every state-changing call emits a lobby SSE event so the dashboard re-renders.
@@ -17,6 +18,7 @@ const express = require('express');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const net = require('node:net');
 const os = require('node:os');
 const Database = require('better-sqlite3');
 
@@ -41,10 +43,16 @@ const PHASE1_SURFACES = {
 function extractTargetHosts(plan) {
   const hosts = new Set();
   const rs = plan?.recon_summary || {};
-  if (rs.target) hosts.add(String(rs.target).toLowerCase());
-  if (rs.dns?.a) for (const a of rs.dns.a) hosts.add(String(a).toLowerCase());
-  if (rs.dns?.cname_chain) for (const c of rs.dns.cname_chain) hosts.add(String(c).toLowerCase());
-  if (rs.tls?.san) for (const s of rs.tls.san) hosts.add(String(s).toLowerCase());
+  const add = value => {
+    if (!value) return;
+    try {
+      hosts.add(new URL(String(value).includes('://') ? String(value) : `http://${value}`).hostname.toLowerCase());
+    } catch {}
+  };
+  add(rs.target);
+  if (rs.dns?.a) for (const a of rs.dns.a) add(a);
+  if (rs.dns?.cname_chain) for (const c of rs.dns.cname_chain) add(c);
+  if (rs.tls?.san) for (const s of rs.tls.san) add(s.replace(/^\*\./, ''));
   return [...hosts].filter(Boolean);
 }
 function buildAclFromPlan(plan) {
@@ -54,7 +62,7 @@ function buildAclFromPlan(plan) {
   if (targetHosts.length) {
     agents['webapp-recon'] = { allow: targetHosts };
     // Wildcards: if target is `example.com`, also allow `*.example.com`.
-    const wildcards = targetHosts.filter(h => !h.startsWith('*.')).map(h => '*.' + h);
+    const wildcards = targetHosts.filter(h => !net.isIP(h) && !h.startsWith('*.')).map(h => '*.' + h);
     const expanded = [...new Set([...targetHosts, ...wildcards])];
     for (const a of (plan?.agent_chain || [])) {
       if (PHASE1_SURFACES[a]) continue; // don't overwrite Phase 1 surface
@@ -89,8 +97,8 @@ const DB_PATH = path.resolve(
   process.env.BLACKBOARD_DB || path.join(os.homedir(), '.glados', 'blackboard', 'blackboard.db')
 );
 
-function openDb() {
-  const db = new Database(DB_PATH);
+function openDb(dbPath = DB_PATH) {
+  const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   return db;
 }
@@ -115,11 +123,111 @@ function validatePlanJson(raw) {
   return { ok: true, plan: obj };
 }
 
-module.exports = function makeRouter(broadcastLobby) {
+function endInvestigationForEngagement(db, {
+  engagementId,
+  operator = 'operator',
+  reason = 'operator ended investigation',
+  requiredPlanId = null,
+}) {
+  const engagement = db.prepare('SELECT id, status FROM engagements WHERE id = ?').get(engagementId);
+  if (!engagement) {
+    const error = new Error('engagement not found');
+    error.statusCode = 404;
+    throw error;
+  }
+  if (String(engagement.status || '').toLowerCase() === 'cancelled') {
+    return {
+      ok: true,
+      already_ended: true,
+      state: 'rejected',
+      decision: 'end_investigation',
+      engagement_id: engagement.id,
+      engagement_status: 'cancelled',
+      tasks_cancelled: 0,
+      reports_started: false,
+    };
+  }
+  const actionableStates = ['pending_approval', 'approved', 'executing'];
+  const activePlans = db.prepare(`SELECT id, engagement_id, state FROM plans
+    WHERE engagement_id = ? AND state IN ('pending_approval','approved','executing')
+    ORDER BY rowid DESC`).all(engagement.id);
+  if (requiredPlanId && !activePlans.some(plan => plan.id === requiredPlanId)) {
+    const required = db.prepare('SELECT id, engagement_id, state FROM plans WHERE id = ?').get(requiredPlanId);
+    const error = new Error(!required
+      ? 'plan not found'
+      : required.engagement_id !== engagement.id
+        ? 'plan does not belong to engagement'
+        : `cannot end investigation from plan state=${required.state}`);
+    error.statusCode = !required ? 404 : 409;
+    throw error;
+  }
+  const now = new Date().toISOString();
+  let tasksCancelled = 0;
+  let jobsCancelled = 0;
+  const tx = db.transaction(() => {
+    for (const plan of activePlans) {
+      if (!actionableStates.includes(plan.state)) continue;
+      db.prepare("UPDATE plans SET state='rejected', rejected_at=? WHERE id = ?").run(now, plan.id);
+      db.prepare(`INSERT INTO plan_approvals (plan_id, decision, operator, reason)
+        VALUES (?, 'end_investigation', ?, ?)`).run(plan.id, operator, reason);
+    }
+    tasksCancelled = db.prepare(`UPDATE tasks
+      SET status='cancelled', updated_at=?
+      WHERE engagement_id=? AND status NOT IN ('completed','failed','cancelled')`)
+      .run(now, engagement.id).changes;
+    db.prepare("UPDATE engagements SET status='cancelled', completed_at=? WHERE id = ?")
+      .run(now, engagement.id);
+    try {
+      db.prepare("UPDATE replan_proposals SET state='dismissed', resolved_at=?, resolved_by=? WHERE engagement_id=? AND state='open'")
+        .run(now, operator, engagement.id);
+    } catch {}
+    try {
+      jobsCancelled = db.prepare(`UPDATE controller_jobs
+        SET status='cancelled', cancel_requested=1, updated_at=?, finished_at=?
+        WHERE engagement_id=? AND status IN ('queued','running')`)
+        .run(now, now, engagement.id).changes;
+    } catch {}
+    try {
+      db.prepare(`UPDATE controller_goals SET status='cancelled', updated_at=?, completed_at=?
+        WHERE engagement_id=? AND status NOT IN ('complete','completed','cancelled','failed')`)
+        .run(now, now, engagement.id);
+    } catch {}
+  });
+  tx();
+  return {
+    ok: true,
+    state: 'rejected',
+    decision: 'end_investigation',
+    engagement_id: engagement.id,
+    engagement_status: 'cancelled',
+    tasks_cancelled: tasksCancelled,
+    jobs_cancelled: jobsCancelled,
+    plans_ended: activePlans.map(plan => plan.id),
+    reports_started: false,
+  };
+}
+
+function endInvestigationForPlan(db, { planId, operator = 'operator', reason = 'operator ended investigation' }) {
+  const plan = db.prepare('SELECT id, engagement_id, state FROM plans WHERE id = ?').get(planId);
+  if (!plan) {
+    const error = new Error('plan not found');
+    error.statusCode = 404;
+    throw error;
+  }
+  return endInvestigationForEngagement(db, {
+    engagementId: plan.engagement_id,
+    operator,
+    reason,
+    requiredPlanId: planId,
+  });
+}
+
+function makeRouter(broadcastLobby, { onApproved = null, onEnded = null, dbPath = DB_PATH } = {}) {
   const router = express.Router();
+  const openRouterDb = () => openDb(dbPath);
 
   router.get('/', (req, res) => {
-    const db = openDb();
+    const db = openRouterDb();
     try {
       const where = [];
       const args = [];
@@ -134,7 +242,7 @@ module.exports = function makeRouter(broadcastLobby) {
   });
 
   router.get('/:id', (req, res) => {
-    const db = openDb();
+    const db = openRouterDb();
     try {
       const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(req.params.id);
       if (!plan) return res.status(404).json({ error: 'plan not found' });
@@ -149,7 +257,7 @@ module.exports = function makeRouter(broadcastLobby) {
     if (!check.ok) return res.status(400).json({ error: check.error });
     const plan = check.plan;
     const id = req.body.id || 'plan_' + crypto.randomBytes(6).toString('hex');
-    const db = openDb();
+    const db = openRouterDb();
     try {
       const parent = plan.parent_plan_id || null;
       // If replanning, mark the parent as superseded.
@@ -195,7 +303,7 @@ module.exports = function makeRouter(broadcastLobby) {
   router.post('/:id/approve', (req, res) => {
     const { vectors, operator = 'operator', reason, writeAcl = true } = req.body || {};
     const decision = Array.isArray(vectors) && vectors.length ? 'approve_selected' : 'approve_all';
-    const db = openDb();
+    const db = openRouterDb();
     try {
       const row = db.prepare("SELECT id, state, plan_json, engagement_id FROM plans WHERE id = ?").get(req.params.id);
       if (!row) return res.status(404).json({ error: 'plan not found' });
@@ -272,14 +380,41 @@ module.exports = function makeRouter(broadcastLobby) {
         return res.status(500).json({ ok: false, error: 'plan-approve txn failed; ACL rolled back: ' + txErr.message });
       }
 
-      broadcastLobby('plan-approved', { id: req.params.id, decision, vectors: vectors || null, acl: aclResult });
-      res.json({ ok: true, state: 'approved', decision, acl: aclResult });
+      let execution = { executionQueued: false };
+      if (typeof onApproved === 'function') {
+        try {
+          execution = onApproved({
+            id: req.params.id,
+            engagement_id: row.engagement_id,
+            decision,
+            vectors: vectors || null,
+          }) || execution;
+        } catch (error) {
+          execution = { executionQueued: false, executionError: error.message };
+        }
+      }
+      broadcastLobby('plan-approved', {
+        id: req.params.id,
+        engagement_id: row.engagement_id,
+        decision,
+        vectors: vectors || null,
+        acl: aclResult,
+        execution_queued: !!execution.executionQueued,
+      });
+      res.json({
+        ok: true,
+        state: 'approved',
+        decision,
+        acl: aclResult,
+        execution_queued: !!execution.executionQueued,
+        execution_error: execution.executionError || null,
+      });
     } finally { db.close(); }
   });
 
   // Preview endpoint — returns the ACL that WOULD be written without approval.
   router.get('/:id/acl-preview', (req, res) => {
-    const db = openDb();
+    const db = openRouterDb();
     try {
       const row = db.prepare("SELECT id, plan_json, engagement_id FROM plans WHERE id = ?").get(req.params.id);
       if (!row) return res.status(404).json({ error: 'plan not found' });
@@ -293,7 +428,7 @@ module.exports = function makeRouter(broadcastLobby) {
   router.post('/:id/modify', (req, res) => {
     const check = validatePlanJson(req.body.plan_json);
     if (!check.ok) return res.status(400).json({ error: check.error });
-    const db = openDb();
+    const db = openRouterDb();
     try {
       const parent = db.prepare('SELECT id, engagement_id, version FROM plans WHERE id = ?').get(req.params.id);
       if (!parent) return res.status(404).json({ error: 'plan not found' });
@@ -319,7 +454,7 @@ module.exports = function makeRouter(broadcastLobby) {
 
   router.post('/:id/reject', (req, res) => {
     const { reason = '', operator = 'operator' } = req.body || {};
-    const db = openDb();
+    const db = openRouterDb();
     try {
       const plan = db.prepare("SELECT id, state FROM plans WHERE id = ?").get(req.params.id);
       if (!plan) return res.status(404).json({ error: 'plan not found' });
@@ -334,8 +469,30 @@ module.exports = function makeRouter(broadcastLobby) {
     } finally { db.close(); }
   });
 
+  router.post('/:id/end', (req, res) => {
+    const { reason = 'operator ended investigation', operator = 'operator' } = req.body || {};
+    const db = openRouterDb();
+    try {
+      const result = endInvestigationForPlan(db, {
+        planId: req.params.id,
+        operator,
+        reason,
+      });
+      broadcastLobby('plan-ended', result);
+      broadcastLobby('engagement-ended', {
+        engagement_id: result.engagement_id,
+        status: result.engagement_status,
+        reason,
+      });
+      if (typeof onEnded === 'function') onEnded(result, { reason, operator });
+      res.json(result);
+    } catch (error) {
+      res.status(error.statusCode || 500).json({ ok: false, error: error.message });
+    } finally { db.close(); }
+  });
+
   router.post('/:id/complete', (req, res) => {
-    const db = openDb();
+    const db = openRouterDb();
     try {
       const now = new Date().toISOString();
       const r = db.prepare("UPDATE plans SET state='complete', completed_at=? WHERE id = ? AND state IN ('approved','executing')")
@@ -347,4 +504,10 @@ module.exports = function makeRouter(broadcastLobby) {
   });
 
   return router;
-};
+}
+
+module.exports = makeRouter;
+module.exports.extractTargetHosts = extractTargetHosts;
+module.exports.buildAclFromPlan = buildAclFromPlan;
+module.exports.endInvestigationForPlan = endInvestigationForPlan;
+module.exports.endInvestigationForEngagement = endInvestigationForEngagement;

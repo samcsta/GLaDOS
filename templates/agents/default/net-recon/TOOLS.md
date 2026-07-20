@@ -4,7 +4,9 @@ This file defines the tools this agent should prefer, avoid, and document. It is
 
 ## Dispatch Posture
 
-Core/conditional Phase 1 infrastructure mapper. Uses low-rate, non-invasive checks against explicitly scoped hosts.
+Operator-requested Phase 1 infrastructure mapper. It is skipped by default and
+uses low-rate, non-invasive checks against explicitly scoped hosts only when the
+task carries `operator_requested_net_recon: true` and a request reference.
 
 ## Preferred Tools
 
@@ -16,7 +18,8 @@ Core/conditional Phase 1 infrastructure mapper. Uses low-rate, non-invasive chec
 
 ## Tool Rules
 
-- Require healthy target state and explicit network scope before scans.
+- Require explicit operator request, healthy target state, and explicit network
+  scope before scans. Do not accept inferred need from CDN/WAF/DNS observations.
 - Prefer DNS/TLS/banner checks before port scanning.
 - Record exact command, rate, ports, timestamps, and proxy/route assumptions.
 - No vulnerability scripts, brute force, NSE intrusive scripts, or high-rate scans without plan approval.

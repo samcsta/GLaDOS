@@ -1,0 +1,145 @@
+# GLaDOS Apple-Silicon and Ubuntu Distribution Plan
+
+## Recommended channel
+
+Ship GLaDOS directly as a Developer ID-signed and Apple-notarized DMG. Use the
+DMG for first installation and the signed ZIP plus `latest-mac.yml` for
+`electron-updater` updates. This stays outside the Mac App Store while giving
+Gatekeeper a verifiable developer identity and notarization ticket.
+
+Use a dedicated HTTPS update origin as the production feed. A public GitHub
+Release is acceptable if the binaries are not sensitive. Do not embed a GitHub
+token in the app to access a private repository; use an authenticated update
+service or CDN with short-lived operator credentials instead.
+
+References:
+
+- [Apple Developer ID](https://developer.apple.com/developer-id/)
+- [Apple notarization workflow](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
+- [electron-builder macOS auto-update](https://www.electron.build/docs/features/auto-update/)
+
+## Release-readiness gates
+
+1. **Apple identity**
+   - Enroll the release owner in the Apple Developer Program.
+   - Create a `Developer ID Application` certificate.
+   - Create an App Store Connect API key for CI notarization.
+   - Keep `com.glados.ops` stable; changing the bundle ID after release breaks
+     upgrade and data-path continuity.
+
+2. **Supported architecture matrix**
+   - macOS: Apple Silicon (`arm64`) only.
+   - Ubuntu 24.04: Intel/AMD (`x86_64`) only, using AppImage for installation
+     and in-app self-update.
+   - Publish separate `/macos/arm64` and `/linux/x64` feeds. Recursively audit
+     `better-sqlite3`, `node-pty`, Electron, and every packaged helper for the
+     target architecture before publishing.
+
+3. **First-run prerequisites**
+   - The current app expects machine-level tools, most notably `mitmdump`, and
+     the broader assessment toolchain. A release must either bundle licensed
+     versions of those tools or provide a first-run prerequisite wizard that
+     runs the existing doctor/bootstrap flow with explicit operator consent.
+   - First launch must stop with a clear actionable diagnostic when a required
+     dependency is missing. It must not present a healthy proxy or assessment
+     state when the dependency failed.
+
+4. **Release build must fail closed**
+   - Add `forceCodeSigning: true`; never publish when signing credentials are
+     missing.
+   - Use hardened runtime and only the entitlements that are required.
+   - Notarize with `notarytool`, staple the ticket, and inspect the notary log.
+   - Keep signing and notarization credentials only in the protected CI release
+     environment.
+
+## CI release pipeline
+
+Trigger the production job only from a protected semantic-version tag such as
+`v4.0.1`, with a manual production-environment approval.
+
+1. Check that `VERSION` and `desktop/package.json` match the tag.
+2. Install locked dependencies and run the complete dashboard test suite.
+3. Build macOS arm64 on an Apple-silicon macOS runner and Ubuntu x64 on a
+   native Ubuntu 24.04 x64 runner.
+4. Sign every executable/native module with Developer ID and hardened runtime.
+5. Notarize and staple the application/distribution artifact.
+6. Run all release verification gates:
+   - `codesign --verify --deep --strict --verbose=2 GLaDOS.app`
+   - `spctl --assess --verbose --type exec GLaDOS.app`
+   - `xcrun stapler validate GLaDOS.app`
+   - packaged dashboard/proxy smoke test
+   - clean-Mac first-install test
+   - upgrade test from the previous stable release while preserving
+     `~/.glados`
+7. Generate the DMG, update ZIP, AppImage, blockmaps, platform channel
+   metadata, SHA-256 manifests, and release notes.
+8. Upload artifacts first and publish the channel metadata last. This prevents
+   clients from seeing an update whose payload is not available yet.
+
+## Installed-user update flow
+
+The `electron-updater` integration now uses an authenticated generic HTTPS
+feed. Each operator configures a per-user bearer token, encrypted through the
+OS credential store, and the Electron main process attaches it to metadata,
+artifact, and range requests. The dashboard renderer can query only sanitized
+configuration status.
+
+- Check the stable feed after launch and periodically (for example every 24
+  hours), with a manual **Check now** action retained.
+- Notify before download. Never install while an assessment agent is active.
+- Persist the downloaded-update state, then ask the operator to restart and
+  install at a safe point.
+- Back up the SQLite runtime and model/config state before installation. The
+  implemented preservation snapshot lives under `~/.glados/backups/updates/`.
+  Migrations must remain forward-only, transactional, and tested from the
+  oldest supported release.
+- Preserve `~/.glados`, reports, evidence, credentials, proxy history, and
+  operator-edited agent workspaces. They are runtime data, never update
+  payload.
+- Support `beta` and `latest` channels. Promote an identical signed artifact
+  from beta to stable instead of rebuilding it.
+- Use staged rollout metadata: internal pilot, 10%, 50%, then 100% after health
+  review. A rollback is a new higher patch version containing the prior known-
+  good code; never replace an already published version in place.
+
+## Update-origin choice
+
+### Preferred for an internal/private app
+
+Use a generic HTTPS feed backed by object storage/CDN. Authenticate operators
+through the organization, issue short-lived feed/download authorization, and
+store any refresh credential in macOS Keychain. Publish channel metadata and
+artifacts atomically. This avoids placing a reusable repository token in every
+installed app.
+
+### Acceptable for non-sensitive public binaries
+
+Keep the existing GitHub provider and publish signed release assets from CI.
+GitHub is simple, but the electron-builder private-GitHub client mode expects a
+token on each user machine and is explicitly not intended for general users.
+
+## Rollout and support
+
+1. Test on a clean Apple-silicon Mac and a clean Ubuntu 24.04 x64 workstation,
+   including first launch, proxy startup, browser MCP, one harmless assessment
+   fixture, update, rollback release, and uninstall/reinstall with data
+   preservation.
+2. Pilot with two or three internal operators for at least one complete
+   investigation each.
+3. Review crash logs, dashboard health latency, first-activity timeouts, update
+   failures, and migration failures before each rollout increase.
+4. Publish a support bundle action that exports version, architecture, signing
+   status, sanitized health data, dependency doctor results, and recent app
+   errors without credentials or target evidence.
+
+## Current repository gaps before the first external release
+
+- Local builds currently skip Developer ID signing and notarization when
+  credentials are absent.
+- There is no protected CI release workflow.
+- Machine-level assessment dependencies need a first-run installation/doctor
+  experience.
+- Production still needs your Developer ID identity, notarization credential,
+  update hostname, and protected server/CI environments.
+- Ubuntu packaging and native-module audits are configured, but the final
+  application-level artifact signature and clean-host acceptance test remain.

@@ -8,22 +8,17 @@
 *.pfx
 *.der
 
-# Local runtime state. These directories are per-workstation and must not be
-# shared through Git.
-.glados/
-Reports/
-reports/
-investigations/
-archive/
+# Local runtime state belongs under ~/.glados, never inside the checkout.
+/.glados/
+/Reports/
+/reports/
+/investigations/
+/archive/
+/workspaces/
 blackboard/*.db
 blackboard/*.db-*
 watchdog/*.db
 watchdog/*.db-*
-workspaces/glados/MEMORY.md
-workspaces/*/MEMORY.md
-workspaces/glados/memory/
-workspaces/glados/investigations/
-workspaces/glados/target-hunting/
 
 # Build and dependency output
 node_modules/
@@ -36,9 +31,11 @@ watchdog/watchdog-mcp/node_modules/
 tools/glados-ops-mcp/node_modules/
 desktop/dist/
 desktop/dist-verify/
+/artifacts/
 .playwright-mcp/
 .venv/
-tmp/
+/tmp/
+/dashboard/.claude/
 
 # OS/editor noise
 .DS_Store

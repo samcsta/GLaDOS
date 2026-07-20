@@ -9,6 +9,11 @@ const {
 const Database = require("better-sqlite3");
 const path = require("path");
 const os = require("os");
+const { updateEngagement } = require("../lib/engagement-lifecycle");
+const { createOrReuseEngagement } = require("../lib/engagement-create");
+const { createOrReusePlan } = require("../lib/plan-create");
+const { upsertBaseline } = require("../lib/baseline-upsert");
+const { compactBaselineSummary } = require("../lib/baseline-summary");
 
 const GLADOS_RUNTIME_DIR = process.env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), ".glados");
 
@@ -121,7 +126,7 @@ const TOOLS = [
   },
   {
     name: "blackboard_engagement_create",
-    description: "Create a new engagement entry.",
+    description: "Create a new engagement entry, or safely reuse the existing entry when id, target, and scope match.",
     inputSchema: {
       type: "object",
       properties: {
@@ -132,20 +137,47 @@ const TOOLS = [
       required: ["id", "target_name"],
     },
   },
+  {
+    name: "blackboard_engagement_update",
+    description: "Set an engagement active, complete, or cancelled. Completion is rejected while any tracked task is still pending or in progress.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        engagement_id: { type: "string", description: "Engagement ID to update" },
+        status: { type: "string", enum: ["active", "complete", "cancelled"] },
+      },
+      required: ["engagement_id", "status"],
+    },
+  },
+  {
+    name: "blackboard_plan_create",
+    description: "Persist a PLAN_SCHEMA-compatible proposed attack plan in the canonical Plans table. Exact retries are idempotent and remain pending operator approval.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Optional stable plan id" },
+        plan: { type: "object", description: "Full PLAN_SCHEMA-compatible plan object" },
+      },
+      required: ["plan"],
+    },
+  },
   // v3.1.04252026 (Blocker D) — Baseline recon state. Phase 1 agents call
   // these so plan-synthesizer has a canonical source of truth.
   {
     name: "blackboard_baseline_get",
-    description: "Read the baseline recon summary for an engagement (Phase 1 output). Returns { summary_json, complete, started_at, completed_at }.",
+    description: "Read baseline recon for an engagement. Defaults to a bounded summary suitable for agents; request mode=full only for targeted debugging.",
     inputSchema: {
       type: "object",
-      properties: { engagement_id: { type: "string" } },
+      properties: {
+        engagement_id: { type: "string" },
+        mode: { type: "string", enum: ["summary", "full"], description: "Bounded summary (default) or parsed full payload" },
+      },
       required: ["engagement_id"],
     },
   },
   {
     name: "blackboard_baseline_upsert",
-    description: "Merge keys into baseline_recon.summary_json for an engagement. Top-level keys are replaced, not deep-merged. Pass complete=true to mark Phase 1 done.",
+    description: "Merge keys into baseline_recon.summary_json for an engagement. Top-level keys are replaced, not deep-merged. Pass complete=true to mark Phase 1 done; later merges preserve completed state when complete is omitted or false.",
     inputSchema: {
       type: "object",
       properties: {
@@ -366,9 +398,22 @@ function handleEngagementStatus(args) {
 }
 
 function handleEngagementCreate(args) {
-  const stmt = db.prepare("INSERT INTO engagements (id, target_name, scope) VALUES (?, ?, ?)");
-  stmt.run(args.id, args.target_name, args.scope || null);
-  return { content: [{ type: "text", text: `Created engagement '${args.id}'` }] };
+  const result = createOrReuseEngagement(db, args);
+  const action = result.created ? "Created" : "Reused existing";
+  return { content: [{ type: "text", text: `${action} engagement '${args.id}'` }] };
+}
+
+function handleEngagementUpdate(args) {
+  const engagement = updateEngagement(db, {
+    engagementId: args.engagement_id,
+    status: args.status,
+  });
+  return { content: [{ type: "text", text: JSON.stringify({ ok: true, engagement }, null, 2) }] };
+}
+
+function handlePlanCreate(args) {
+  const result = createOrReusePlan(db, args.plan, args.id || null);
+  return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...result }, null, 2) }] };
 }
 
 // --- v3.1.04252026 (Blocker D) — baseline recon handlers ---
@@ -376,42 +421,28 @@ function handleBaselineGet(args) {
   const row = db.prepare(
     "SELECT engagement_id, summary_json, complete, started_at, completed_at, updated_at FROM baseline_recon WHERE engagement_id = ?"
   ).get(args.engagement_id);
-  if (!row) return { content: [{ type: "text", text: JSON.stringify({ engagement_id: args.engagement_id, summary_json: "{}", complete: 0, exists: false }, null, 2) }] };
-  return { content: [{ type: "text", text: JSON.stringify({ ...row, exists: true, summary: safeJson(row.summary_json) }, null, 2) }] };
+  if (!row) return { content: [{ type: "text", text: JSON.stringify({ engagement_id: args.engagement_id, summary: {}, complete: 0, exists: false, mode: "summary" }, null, 2) }] };
+  const parsed = safeJson(row.summary_json);
+  const mode = args.mode === "full" ? "full" : "summary";
+  const bounded = mode === "full"
+    ? { summary: parsed, originalBytes: Buffer.byteLength(row.summary_json || "{}"), summaryBytes: Buffer.byteLength(row.summary_json || "{}"), truncated: false }
+    : compactBaselineSummary(parsed);
+  const { summary_json: _rawSummary, ...metadata } = row;
+  return { content: [{ type: "text", text: JSON.stringify({
+    ...metadata,
+    exists: true,
+    mode,
+    summary: bounded.summary,
+    original_summary_bytes: bounded.originalBytes,
+    returned_summary_bytes: bounded.summaryBytes,
+    truncated: bounded.truncated,
+  }, null, 2) }] };
 }
 
 function handleBaselineUpsert(args) {
   const eng = args.engagement_id;
-  const merge = (args.merge && typeof args.merge === "object") ? args.merge : {};
-  // Begin transaction so concurrent Phase-1 agents writing different keys
-  // don't trample each other.
-  const tx = db.transaction(() => {
-    const existing = db.prepare("SELECT summary_json, complete FROM baseline_recon WHERE engagement_id = ?").get(eng);
-    let merged = {};
-    if (existing) {
-      try { merged = JSON.parse(existing.summary_json) || {}; } catch (_) { merged = {}; }
-    }
-    for (const [k, v] of Object.entries(merge)) merged[k] = v;
-    const nextJson = JSON.stringify(merged);
-    if (existing) {
-      const setComplete = args.complete === true;
-      if (setComplete) {
-        db.prepare("UPDATE baseline_recon SET summary_json=?, complete=1, completed_at=datetime('now'), updated_at=datetime('now') WHERE engagement_id=?")
-          .run(nextJson, eng);
-      } else {
-        db.prepare("UPDATE baseline_recon SET summary_json=?, updated_at=datetime('now') WHERE engagement_id=?")
-          .run(nextJson, eng);
-      }
-    } else {
-      const completeFlag = args.complete === true ? 1 : 0;
-      const completedAt = completeFlag ? new Date().toISOString() : null;
-      db.prepare("INSERT INTO baseline_recon (engagement_id, summary_json, complete, completed_at) VALUES (?, ?, ?, ?)")
-        .run(eng, nextJson, completeFlag, completedAt);
-    }
-    return merged;
-  });
-  const merged = tx();
-  return { content: [{ type: "text", text: JSON.stringify({ ok: true, engagement_id: eng, complete: args.complete === true, summary: merged }, null, 2) }] };
+  const result = upsertBaseline(db, args);
+  return { content: [{ type: "text", text: JSON.stringify({ ok: true, engagement_id: eng, ...result }, null, 2) }] };
 }
 
 function handleReconStepLog(args) {
@@ -544,6 +575,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "blackboard_task_create": return handleTaskCreate(args);
       case "blackboard_engagement_status": return handleEngagementStatus(args);
       case "blackboard_engagement_create": return handleEngagementCreate(args);
+      case "blackboard_engagement_update": return handleEngagementUpdate(args);
+      case "blackboard_plan_create": return handlePlanCreate(args);
       case "blackboard_baseline_get": return handleBaselineGet(args);
       case "blackboard_baseline_upsert": return handleBaselineUpsert(args);
       case "blackboard_recon_step_log": return handleReconStepLog(args);

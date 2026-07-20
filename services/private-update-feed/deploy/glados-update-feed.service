@@ -1,0 +1,30 @@
+[Unit]
+Description=GLaDOS authenticated private update feed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=glados-updates
+Group=glados-updates
+WorkingDirectory=/opt/glados/private-update-feed
+EnvironmentFile=/etc/glados/update-feed.env
+ExecStart=/usr/bin/node /opt/glados/private-update-feed/server.cjs
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

@@ -54,8 +54,17 @@ part of the default baseline checklist.
    - Else skip both.
 
 7. **Summary card write** — merge steps 1–6 into `baseline.summary` JSON
-   matching `recon_summary` in `workspaces/plan-synthesizer/PLAN_SCHEMA.md`.
+   matching `recon_summary` in `~/.glados/workspaces/agents/plan-synthesizer/PLAN_SCHEMA.md`.
    Set `recon.complete=true`, `recon.complete_at=<iso8601>`.
+
+8. **Post-pivot surface delta (repeatable)** — whenever a later validated
+   finding unlocks a new role, tenant, or route set, dispatch `webapp-recon`
+   again in post-pivot mode. Require an input inventory for every newly visible
+   form, search/filter/sort/pagination control, admin action, upload/import,
+   export, API request, and cookie/header parameter. Merge the result into
+   `baseline.webapp_recon.post_pivot[]`, update the coverage ledger, and re-run
+   plan synthesis for meaningful leads. A captured flag is not a completion
+   condition when the operator requested broad vulnerability coverage.
 
 ## Gate to Phase 2
 

@@ -1,211 +1,265 @@
-# GLaDOS Red Team — CWE Report Template
-*Canonical Dradis-ready CWE report format for GLaDOS report agents.*
+# GLaDOS Red Team Report Contract
 
----
+This is the canonical output contract for every operator-approved GLaDOS
+investigation report. Report agents must create the complete directory tree,
+write every required file, and keep each CWE file directly importable into
+Dradis without heading conversion.
 
-## File Naming Convention
+## Required Directory Layout
 
 ```text
-CWE-{NUMBER}-{short-slug}.md
+reports/
+├── CWEs/
+│   ├── Critical/
+│   │   └── CWE-XXX-short-name.md
+│   ├── High/
+│   │   └── CWE-XXX-short-name.md
+│   ├── Medium/
+│   │   └── CWE-XXX-short-name.md
+│   └── Low/
+│       └── CWE-XXX-short-name.md
+└── RT/
+    ├── Timeline.md
+    ├── Errors.md
+    ├── ExecSummary.md
+    └── Writeup.md
 ```
 
-Examples:
+Canonical report paths:
 
-- `CWE-287-306-639-auth-bypass.md`
-- `CWE-200-prometheus-metrics-exposure.md`
-- `CWE-798-522-hardcoded-credentials.md`
+- `CWEs/Critical/`
+- `CWEs/High/`
+- `CWEs/Medium/`
+- `CWEs/Low/`
+- `RT/Timeline.md`
+- `RT/Errors.md`
+- `RT/ExecSummary.md`
+- `RT/Writeup.md`
 
-Use the primary/root CWE first. Keep slugs short, hyphenated, lowercase, and
-descriptive.
+- Create all four severity directories even when one is empty.
+- Write one file per distinct actionable CWE finding under its assessed
+  severity. Never combine unrelated CWEs into one file.
+- Do not create an `Informational/` severity directory. Tested-negative,
+  informational, rejected, and explicitly deferred leads belong in
+  `RT/Writeup.md` under the coverage ledger.
+- Use `CWE-{NUMBER}-{short-lowercase-slug}.md` filenames.
+- Store this tree under
+  `~/.glados/investigations/<target>/reports/`.
 
----
+## Exact Dradis CWE Format
 
-## Report File Structure
+Every file under `CWEs/<Severity>/` must use the following field names and
+order exactly. Do not add Markdown `##` headings, metadata banners, YAML front
+matter, or alternate field names.
 
 ```markdown
-# [Finding Title — Clear, specific, technical]
-**CWE:** CWE-XXX [/ CWE-YYY if multiple] | **Severity:** [Critical/High/Medium/Low] | **CVSS:** X.X
+#CWE-XXX: [NAME]#
 
-**Status:** [STILL ACTIVE / REMEDIATED / PARTIAL] ([re-validation note])
-**Affected Endpoint:** `[URL or endpoint path]`
+#Summary#
 
-## Overview
+[A dense technical summary of the vulnerability, affected endpoint/component,
+validation status, exploit chain position, demonstrated impact, and evidence
+references. Use “Red Team” as the acting subject. Do not include generic CWE
+definition boilerplate.]
 
-[2–3 sentences. Cover: why this application is vulnerable, how Red Team
-exploited or validated it during the assessment, and what remediation requires.
-Use dense technical prose. Do not include generic CWE definition boilerplate.]
+#Remediation#
 
----
+[Specific, technically feasible remediation ordered by urgency. Include the
+primary code/configuration fix and relevant regression tests.]
 
-## Steps to Reproduce
+#CVSS 3.1 Score#
 
-### Action 1: [Short, active-voice title]
+[Numeric score] — `[complete CVSS:3.1 vector]`
 
-**Action:** Red Team [verb]ed [what] to [purpose/goal].
+[One concise sentence explaining the metric choices and any chained-impact
+assumption.]
 
-```bash
-[exact command if applicable]
+#Action#
+
+[Action 1]
+
+[Describe chronologically what Red Team did and why. Reproduce the exact
+sanitized command, raw HTTP request, payload, or browser/tool action that was
+actually executed. Put commands and requests in fenced code blocks. Never
+replace an exact value with prose except where a secret must be shown as
+`[REDACTED]`.]
+
+```text
+[Exact command, request, payload, or tool action]
 ```
 
-*Evidence 1: [Short Label]*
+#Evidence 1: [Title]#
 
-![Screenshot - Action 1](_attachments/screenshot-action1.png)
+![Evidence 1: [Title]](../../../evidence/[exact-screenshot-filename].png)
 
-[One or two sentences continuing the narrative: what Red Team observed, what
-happened next, and any constants, IDs, tokens, headers, or values extracted.]
+[Explain exactly what this screenshot or artifact proves. For non-image
+evidence, use a Markdown link to the durable artifact and quote only the
+minimal relevant excerpt.]
 
-**Result:** [1–2 sentences. State the achieved result directly.]
+[Action 2]
 
----
+[Continue with each material reproduction/validation step and its exact
+command/request/tool action. Add Action 3, Action 4, and so on as required.]
 
-### Action 2: [Short, active-voice title]
-
-**Action:** [...]
-
-*Evidence 2: [Label]*
-
-![Screenshot - Action 2](_attachments/screenshot-action2.png)
-
-**Result:** [...]
-
----
-
-## Remediation
-
-- **(CRITICAL — 24h)** [Specific technical action.]
-- **(HIGH — 48h)** [...]
-- **(MEDIUM — 1 week)** [...]
-- **(LOW — 1 month)** [...]
+```text
+[Exact command, request, payload, or tool action]
 ```
 
----
+#Evidence 2: [Title]#
 
-## Style Rules
+[Embed the screenshot with Markdown image syntax or link the exact durable
+evidence artifact, followed by a concise explanation of what it proves.]
 
-### Subject
+#Result#
 
-- Always use **"Red Team"**.
-- Do not write "the tester", "I", or vague passive phrasing.
-- Preferred verbs: "Red Team issued", "Red Team navigated", "Red Team
-  constructed", "Red Team loaded", "Red Team validated".
+[Final Result]
 
-### Action Blocks
+[State the final independently supported outcome, exact impact, validation
+status/confidence, and relevant evidence references. Do not introduce new
+claims here.]
+```
 
-- **Action** is past-tense narrative prose. Explain what Red Team did, why, and
-  what was observed along the way.
-- Screenshots are embedded inside the Action block as `*Evidence N: Label*`
-  followed by the image on the next line.
-- Narrative may continue after the screenshot before the Result.
-- **Result** is the short conclusion. Include exact values, counts, HTTP codes,
-  or IDs when they reinforce impact.
+### CWE Writing Rules
 
-### Overview Paragraph
+- Preserve the exact `#Field#` syntax because these are Dradis fields.
+- The title must be `#CWE-XXX: Name#`; use the primary CWE for the file.
+- `#Action#` contains `[Action 1]`, `[Action 2]`, and subsequent numbered
+  actions in chronological order.
+- Every action must show the exact sanitized command, raw HTTP request, payload,
+  browser operation, or tool action that Red Team actually executed. Preserve
+  methods, routes, headers relevant to the vulnerability, parameters, encoding,
+  and response status. Never invent a shell command for a browser-only action.
+- Put exact commands, requests, payloads, and material response excerpts in
+  fenced code blocks. Redact only secrets and sensitive unrelated data, using
+  explicit `[REDACTED]` markers without changing exploit-relevant values.
+- Place each supporting screenshot or artifact immediately after the action it
+  proves. Caption every item using the exact syntax
+  `#Evidence X: [Title]#`, replacing `X` with a sequential integer and
+  `[Title]` with a specific descriptive title.
+- Evidence numbering starts at 1 in each CWE file and increases without gaps.
+  The number and title in a screenshot's Markdown alt text must match its
+  `#Evidence X: Title#` caption.
+- Embed screenshots in place using Markdown image syntax and their exact
+  durable evidence path. Link non-image artifacts at their exact durable path;
+  do not substitute a bare evidence ID or an unresolvable filename.
+- `#Result#` contains one `[Final Result]` block, not a result after every
+  action.
+- Include exact HTTP methods, routes, parameters, payload fragments, status
+  codes, identifiers, function names, and evidence paths when supported.
+- Reference screenshots and artifacts by durable engagement-relative path.
+- Never place plaintext passwords, session cookies, tokens, or unredacted
+  secrets in a report.
+- CVSS must be CVSS 3.1. Recalculate the numeric score from the printed vector;
+  do not copy a stale blackboard score without checking it.
 
-- Dense technical context.
-- No CWE definition boilerplate.
-- State the vulnerability, exploitation/validation, and fix in one tight
-  paragraph.
-- Avoid hedging. State facts.
+## RT/Timeline.md
 
-### Technical Detail Level
+`Timeline.md` is the chronological audit trail of what the agents actually did.
+It must include the complete assessment window, not only successful findings.
 
-- Include exact command strings when used.
-- Include exact response values: HTTP status codes, header values, function
-  names, IDs, client IDs, route names, and payload fragments.
-- Include exact payloads inline when short; reference separate PoC files for
-  large scripts.
-- Extract and display tables of disclosed data where applicable.
-
-### Screenshot Blocks
+Required columns:
 
 ```markdown
-*Evidence N: Short Descriptive Label*
+# Investigation Timeline
 
-![Screenshot - Action N](_attachments/screenshot-slugname.png)
+| UTC Timestamp | Elapsed | Agent | Task/Plan | Action | Result | Evidence |
+| --- | ---: | --- | --- | --- | --- | --- |
 ```
 
-Keep a blank line before and after the image line.
+Requirements:
 
-### Severity Tags in Remediation
+- Start with engagement creation and end with report validation/closure.
+- Include recon, JavaScript analysis, plan creation/approval/editing,
+  exploitation, validation, pivots, reauthentication, reporting, and closure.
+- Include failed, cancelled, blocked, or retried work in its true position.
+- Derive timestamps and durations from blackboard task/recon/plan records and
+  transcript evidence. Never invent missing timestamps.
 
-| Priority | Timeline | Use For |
-| --- | --- | --- |
-| CRITICAL | 24h | Immediately exploitable issues, CVSS >= 9.0, credential exposure |
-| HIGH | 48h | CVSS 7–9, indirect enablement, incomplete fixes |
-| MEDIUM | 1 week | Defense-in-depth, partial mitigations |
-| LOW | 1 month | Hardening, best practices, low-impact cleanups |
+## RT/Errors.md
 
----
-
-## Dradis Pro Field Mapping
-
-| Report Section | Dradis Field |
-| --- | --- |
-| Overview paragraph | `#[Summary]#` |
-| Action steps + embedded evidence | `#[Action]#` |
-| Result paragraph(s) | `#[Result]#` |
-| Remediation bullets | `#[Remediation]#` |
-| Assessment date | `#[Timestamp]#` |
-| Network source | `#[Source]#` |
-
-Screenshots in local Markdown reports use:
+`Errors.md` is the candid process and runtime defect record.
 
 ```markdown
-![Alt](_attachments/filename.png)
+# Investigation Errors
+
+| UTC Timestamp | Agent/Component | Stage | Error | Impact/Time Lost | Fix or Workaround | Status |
+| --- | --- | --- | --- | --- | --- | --- |
 ```
 
----
+Include tool failures, malformed calls, false conclusions later overturned,
+approval/gate mismatches, dispatch stalls, timeouts, session expiry, evidence
+hygiene gaps, and operator-side errors that affected the run. Separate directly
+evidenced facts from operator-reported observations. If there were no errors,
+write an explicit “No investigation errors were recorded” statement.
 
-## Example: Minimal Report Skeleton
+## RT/ExecSummary.md
 
-```markdown
-# SQL Injection in Search Parameter
-**CWE:** CWE-89 | **Severity:** HIGH | **CVSS:** 8.8
+`ExecSummary.md` is the concise leadership-facing report. It must cover:
 
-**Status:** STILL ACTIVE (re-validated YYYY-MM-DD)
-**Affected Endpoint:** `https://target.example.com/search?q=`
+- target and authorized assessment scope;
+- assessment objective and whether it was achieved;
+- overall risk rating;
+- highest-impact findings and validated attack chains;
+- business impact in plain language;
+- the most urgent remediation priorities;
+- important limitations or deferred coverage.
 
-## Overview
+Do not include plaintext credentials, long payloads, or an exhaustive action
+log in the executive summary.
 
-The target application's search endpoint passes the `q` parameter directly into
-an unsanitized SQL query without parameterization. During the assessment, Red
-Team confirmed time-based blind SQL injection delays against the parameter in a
-single session. Remediation requires replacing dynamic SQL string concatenation
-with parameterized queries or prepared statements.
+## RT/Writeup.md
 
----
+`Writeup.md` is the complete technical narrative. At minimum include:
 
-## Steps to Reproduce
+1. Scope, objective, assumptions, and starting access.
+2. Assessment methodology and agent workflow.
+3. Initial and post-pivot attack-surface inventories.
+4. Plan history and operator decisions.
+5. Full exploit-chain narrative with cross-links to CWE files and evidence.
+6. Findings index sorted Critical, High, Medium, then Low.
+7. Coverage ledger for validated, rejected, tested-negative, deferred, and
+   untested leads with reasons.
+8. Accepted collateral and safety constraints.
+9. Assessment metrics: elapsed time, token usage, and metered cost.
+10. Evidence index and final conclusion.
 
-### Action 1: Probe the Search Endpoint for SQL Error Behavior
+### Required Assessment Metrics
 
-**Action:** Red Team submitted a single-quote character as the search parameter
-to detect raw SQL error exposure.
+Immediately before writing metrics, call
+`glados-ops__engagement_metrics` with the exact engagement ID. Print:
 
-```bash
-curl -s "https://target.example.com/search?q='"
-```
+- assessment start in UTC;
+- completion time, or the `meteredThrough` cutoff if still active;
+- elapsed wall-clock time in seconds and human-readable form;
+- Claude Agent SDK metered spend in USD;
+- input, output, cache-read, cache-creation, and total tokens when available;
+- model/agent cost breakdown when available;
+- the metering source, attribution method, and cutoff caveat.
 
-*Evidence 1: SQL Error Response*
+Never estimate missing cost or tokens. If unavailable, state “Unavailable from
+the runtime meter” and explain why. The currently executing reporting turn is
+not included until it returns, so the cutoff must always be explicit.
 
-![Screenshot - Action 1](_attachments/screenshot-sqli-action1-error.png)
+## Report Validation Contract
 
-The server returned HTTP 500 with a raw database error message.
+The report validator must:
 
-**Result:** Unparameterized SQL query construction was confirmed because user
-input reached the query directly without sanitization.
+1. Confirm the exact directory tree and four RT filenames exist.
+2. Validate every CWE file against the exact Dradis fields and field order,
+   exact executed commands/requests, and sequential
+   `#Evidence X: [Title]#` captions. Confirm screenshots are embedded in place,
+   artifact links resolve, and captions match their image alt text.
+3. Confirm severity-directory placement matches the assessed severity.
+4. Recalculate every CVSS 3.1 score from its vector.
+5. Trace every claim to blackboard/evidence and scan for secrets and
+   cross-engagement contamination.
+6. Call `glados-ops__engagement_metrics` again and update
+   `RT/Writeup.md` with the newest available meter cutoff before returning a
+   pass verdict.
+7. Use the finite wrap sequence once: writer initial draft, validator
+   recommendations plus direct edits, writer final draft. The validator returns
+   its edited manifest and recommendations to the final writer; it does not
+   revalidate the final draft or create a writer/validator loop unless the
+   operator explicitly requests another review.
 
----
-
-## Remediation
-
-- **(HIGH — 48h)** Replace dynamic SQL string concatenation in the search
-  handler with parameterized queries using the database driver's prepared
-  statement API.
-- **(MEDIUM — 1 week)** Add regression tests for SQL metacharacters across all
-  search/query endpoints.
-```
-
----
-
-Template maintained by GLaDOS Red Team. Last updated: 2026-04-28.
+Template maintained by GLaDOS Red Team. Last updated: 2026-07-15.

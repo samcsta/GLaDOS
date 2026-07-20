@@ -2,19 +2,28 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { GLADOS_REPORTS_DIR, GLADOS_INVESTIGATIONS_DIR } = require('./config');
+const { isLoosePlaywrightArtifact } = require('./runtime-reset');
 
 const REPORTS_ROOT = path.resolve(GLADOS_REPORTS_DIR || path.join(os.homedir(), '.glados', 'reports'));
 const INVESTIGATIONS_ROOT = path.resolve(
   GLADOS_INVESTIGATIONS_DIR || path.join(os.homedir(), '.glados', 'investigations')
 );
 const ROOTS = [
-  { key: 'reports', name: 'reports', root: REPORTS_ROOT },
-  { key: 'investigations', name: 'investigations', root: INVESTIGATIONS_ROOT },
+  { key: 'reports', name: 'Published Reports', root: REPORTS_ROOT },
+  { key: 'investigations', name: 'Investigation Workspaces', root: INVESTIGATIONS_ROOT },
 ];
-// The client renders directory contents lazily, so indexing the full operator
-// corpus is inexpensive and avoids a large evidence folder hiding later reports.
-const MAX_TREE_ENTRIES = Math.max(100, Number(process.env.GLADOS_REPORT_TREE_MAX_ENTRIES || 20000));
+// Directory rows are rendered lazily, but the complete index still crosses the
+// process boundary as JSON. Keep the default payload bounded for large evidence
+// corpora; operators can raise the limit explicitly when they need deep history.
+const MAX_TREE_ENTRIES = Math.max(100, Number(process.env.GLADOS_REPORT_TREE_MAX_ENTRIES || 3000));
 const MAX_TREE_DEPTH = Math.max(1, Number(process.env.GLADOS_REPORT_TREE_MAX_DEPTH || 16));
+const IGNORED_DIRECTORY_NAMES = new Set([
+  '.git', '.hg', '.svn',
+  '.venv', 'venv', 'env', '.env',
+  'node_modules', 'site-packages', '__pycache__',
+  '.tox', '.nox',
+  'repo', 'repos', 'repository', 'repositories',
+]);
 
 // Extensions previewed inline as text (syntax-highlighting is client-side / off).
 const TEXT_EXTS = new Set([
@@ -48,6 +57,22 @@ function kindForExt(ext) {
   return 'binary';
 }
 
+function shouldIgnoreDirectory(name, fullPath) {
+  const normalizedName = String(name || '').toLowerCase();
+  if (IGNORED_DIRECTORY_NAMES.has(normalizedName)) return true;
+  if (/(?:^|[\s._-])(?:repo|repos|repository|repositories)(?:$|[\s._-])/.test(normalizedName)) return true;
+  try {
+    if (fs.existsSync(path.join(fullPath, '.git'))) return true;
+    if (fs.existsSync(path.join(fullPath, 'pyvenv.cfg'))) return true;
+  } catch {}
+  return false;
+}
+
+function shouldIgnoreFile(name, rel = '') {
+  const depth = String(rel || '').split('/').filter(Boolean).length;
+  return depth <= 1 && isLoosePlaywrightArtifact(name);
+}
+
 function walk(dir, rel = '', state = { count: 0, truncated: false }, depth = 0) {
   if (state.count >= MAX_TREE_ENTRIES || depth > MAX_TREE_DEPTH) {
     state.truncated = true;
@@ -67,10 +92,14 @@ function walk(dir, rel = '', state = { count: 0, truncated: false }, depth = 0) 
     const full = path.join(dir, e.name);
     const r = rel ? `${rel}/${e.name}` : e.name;
     if (e.isDirectory()) {
+      if (shouldIgnoreDirectory(e.name, full)) continue;
       state.count += 1;
       const children = walk(full, r, state, depth + 1);
       if (children.length) out.push({ type: 'dir', name: e.name, path: r, children });
     } else if (e.isFile()) {
+      // Playwright MCP emits disposable page snapshots and console captures at
+      // its output root. Evidence saved inside an engagement remains visible.
+      if (shouldIgnoreFile(e.name, rel)) continue;
       state.count += 1;
       const ext = path.extname(e.name).toLowerCase();
       let size = 0, mtime = 0;
@@ -161,4 +190,15 @@ function writeMarkdown(relPath, content) {
   return { ok: true, path: relPath, size: st.size, mtime: st.mtimeMs };
 }
 
-module.exports = { tree, readFile, sendRaw, deleteFile, writeMarkdown, INVESTIGATIONS_ROOT, REPORTS_ROOT };
+module.exports = {
+  tree,
+  readFile,
+  sendRaw,
+  deleteFile,
+  writeMarkdown,
+  walk,
+  shouldIgnoreDirectory,
+  shouldIgnoreFile,
+  INVESTIGATIONS_ROOT,
+  REPORTS_ROOT,
+};

@@ -18,10 +18,18 @@ const {
   mountedToolsForAgent,
   autoApprovedToolsForAgent,
   mapSdkMessageToEvents,
+  waitForCoreMcpServers,
   streamAgentTurn,
   browserServerName,
+  normalizeToolInput,
+  toolTargetsForAgent,
+  rememberToolTargets,
+  resolveSdkWorkingDirectory,
+  investigationDispatchContractViolation,
 } = require('../lib/harness/agent-sdk');
 const { SdkSessionRegistry } = require('../lib/harness/session-registry');
+const { ResumeCoordinator } = require('../lib/harness/resume-coordinator');
+const { classifyToolUse, extractTargets } = require('glados-watchdog/lib/safety-gate');
 
 function baseTestEnv(extra = {}) {
   const env = { ...process.env, ANTHROPIC_AUTH_TOKEN: 'test-token', ...extra };
@@ -31,31 +39,98 @@ function baseTestEnv(extra = {}) {
   return env;
 }
 
+test('resume coordinator preserves the exact interrupted specialist assignment', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-resume-state-'));
+  const filePath = path.join(root, 'state', 'paused-agent-work.json');
+  const coordinator = new ResumeCoordinator({ filePath });
+  coordinator.capture('webapp-recon', {
+    parentAgentId: 'glados',
+    taskDescription: 'Proxy smoke test',
+    taskPrompt: 'Perform exactly one GET to https://www.ford.com and stop.',
+    operatorPrompt: 'Spawn webapp-recon for a one-request proxy test.',
+  });
+
+  assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.dirname(filePath)).mode & 0o777, 0o700);
+
+  const restored = new ResumeCoordinator({ filePath });
+  const snapshot = restored.take('webapp-recon');
+  const continuation = coordinator.buildContinuationPrompt(snapshot);
+  assert.equal(snapshot.agentId, 'webapp-recon');
+  assert.match(continuation, /Re-dispatch exactly webapp-recon/);
+  assert.match(continuation, /Perform exactly one GET to https:\/\/www\.ford\.com and stop\./);
+  assert.match(continuation, /Spawn webapp-recon for a one-request proxy test\./);
+  assert.match(continuation, /Relay the resumed agent's final result back to the operator/);
+  assert.doesNotMatch(continuation, /net-recon|subagent_type: claude/);
+  assert.equal(restored.take('webapp-recon'), null, 'a paused task can only be consumed once');
+  assert.equal(new ResumeCoordinator({ filePath }).take('webapp-recon'), null, 'consumption persists across restarts');
+});
+
 test('normalizes LiteLLM model aliases for the Anthropic Messages route', () => {
   assert.equal(bareModelAlias(' custom-llmapi-redteamstuff-com/claude-sonnet-4-6 '), 'claude-sonnet-4-6');
   assert.equal(bareModelAlias(' claude-sonnet-4-6 '), 'claude-sonnet-4-6');
   assert.equal(bareModelAlias('claude-opus-4-8'), 'claude-opus-4-8');
 });
 
-test('uses per-agent tools as the existence allowlist and PreToolUse as hard deny', async () => {
+test('enforces operator-only net recon and operator-controlled report wrap dispatches', () => {
+  assert.match(
+    investigationDispatchContractViolation('net-recon', { prompt: 'Run network recon.' }),
+    /operator_requested_net_recon: true/
+  );
+  assert.equal(investigationDispatchContractViolation('net-recon', {
+    prompt: 'operator_requested_net_recon: true\noperator_request_reference: chat-message-42',
+  }), null);
+
+  for (const agent of ['report-writer', 'report-validator']) {
+    assert.match(
+      investigationDispatchContractViolation(agent, { prompt: 'The assessment seems done.' }),
+      /operator_wrap_approved: true/
+    );
+    assert.equal(investigationDispatchContractViolation(agent, {
+      prompt: `operator_wrap_approved: true\noperator_approval_reference: chat-message-73\nreport_pass: ${agent === 'report-writer' ? 'initial' : 'review-and-edit'}`,
+    }), null);
+    assert.equal(investigationDispatchContractViolation(agent, {
+      prompt: `operator_wrap_approved: true\noperator_wrap_reference: supervising-operator-20260715\nreport_pass: ${agent === 'report-writer' ? 'final' : 'review-and-edit'}`,
+    }), null, 'the documented wrap-reference synonym must not false-reject a valid approval');
+  }
+  assert.match(investigationDispatchContractViolation('report-writer', {
+    prompt: 'operator_wrap_approved: true\noperator_approval_reference: chat-message-73',
+  }), /report_pass: initial/);
+  assert.match(investigationDispatchContractViolation('report-validator', {
+    prompt: 'operator_wrap_approved: true\noperator_approval_reference: chat-message-73',
+  }), /review-and-edit/);
+});
+
+test('uses the caller tool policy and PreToolUse hard deny for direct turns', async () => {
   const opts = buildAgentSdkOptions('webapp-recon', {
     env: baseTestEnv(),
     turnTargets: ['https://ford.com'],
   });
+  const intendedTools = mountedToolsForAgent('webapp-recon');
   assert.equal(opts.includePartialMessages, true);
   assert.equal(opts.forwardSubagentText, true);
   assert.equal(opts.permissionMode, 'dontAsk');
-  assert.deepEqual(opts.tools, mountedToolsForAgent('webapp-recon'));
-  assert.equal(opts.tools.includes('Task'), false);
-  assert.equal(opts.tools.includes('Agent'), false);
-  assert.ok(opts.tools.includes('Bash'));
-  assert.equal(opts.tools.includes('WebFetch'), false);
-  assert.ok(opts.tools.includes('WebSearch'));
-  assert.ok(opts.tools.includes('mcp__glados-ops'));
+  assert.deepEqual(opts.tools, intendedTools.filter(tool => !tool.startsWith('mcp__')));
+  assert.deepEqual(opts.gladosMountedTools, intendedTools);
+  assert.equal(intendedTools.includes('Task'), false);
+  assert.equal(intendedTools.includes('Agent'), false);
+  assert.ok(intendedTools.includes('Bash'));
+  assert.ok(intendedTools.includes('ToolSearch'));
+  assert.equal(intendedTools.includes('WebFetch'), false);
+  assert.ok(intendedTools.includes('WebSearch'));
+  assert.ok(intendedTools.includes('Write'));
+  assert.ok(intendedTools.includes('Edit'));
+  assert.ok(intendedTools.includes('NotebookEdit'));
+  assert.ok(intendedTools.includes('TodoWrite'));
+  assert.ok(intendedTools.includes('mcp__glados-ops__scope_guard_check'));
+  assert.ok(intendedTools.includes('mcp__glados-ops__local_auth_login'));
+  assert.ok(intendedTools.includes('mcp__glados-ops__engagement_metrics'));
+  assert.equal(intendedTools.includes('mcp__glados-ops'), false);
   assert.equal(opts.allowedTools.includes('Task'), false);
   assert.equal(opts.allowedTools.includes('Agent'), false);
-  assert.deepEqual(opts.allowedTools, autoApprovedToolsForAgent(opts.tools));
+  assert.deepEqual(opts.allowedTools, autoApprovedToolsForAgent(intendedTools));
   assert.equal(opts.disallowedTools.includes('Bash'), false);
+  assert.equal(opts.disallowedTools.includes('ToolSearch'), false);
   assert.ok(opts.env.GLADOS_PROXY_URL.endsWith(':18080'));
 
   const hook = opts.hooks.PreToolUse[0].hooks[0];
@@ -64,11 +139,18 @@ test('uses per-agent tools as the existence allowlist and PreToolUse as hard den
       .hookSpecificOutput.permissionDecision,
     'allow'
   );
-  assert.deepEqual(await hook({ tool_name: 'NotebookEdit', tool_input: {}, tool_use_id: 't1b' }), {
+  assert.deepEqual(await hook({ tool_name: 'NotebookEdit', tool_input: { notebook_path: '/tmp/glados-test.ipynb' }, tool_use_id: 't1b' }), {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'allow',
+      permissionDecisionReason: 'NotebookEdit is a local or passive operation',
+    },
+  });
+  assert.deepEqual(await hook({ tool_name: 'MultiEdit', tool_input: {}, tool_use_id: 't1c' }), {
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       permissionDecision: 'deny',
-      permissionDecisionReason: 'NotebookEdit is not mounted for webapp-recon',
+      permissionDecisionReason: 'MultiEdit is not mounted for webapp-recon',
     },
   });
   assert.deepEqual(await hook({ tool_name: 'Agent', tool_input: { subagent_type: 'webapp-vuln' }, tool_use_id: 't3' }), {
@@ -92,18 +174,30 @@ test('GLaDOS process mounts fleet tools but enforces caller-specific permissions
   const rootTools = mountedToolsForAgent('glados', loadPolicy(), { env });
   const webappBrowserMount = `mcp__${browserServerName('webapp-recon')}`;
   assert.ok(opts.tools.includes('Agent'));
-  assert.ok(opts.tools.includes('Bash'));
-  assert.ok(opts.tools.includes(webappBrowserMount));
+  assert.ok(opts.gladosMountedTools.includes('Agent'));
+  assert.ok(opts.gladosMountedTools.includes('SendMessage'));
+  assert.ok(opts.gladosMountedTools.includes('Bash'));
+  assert.ok(opts.gladosMountedTools.includes(`${webappBrowserMount}__browser_navigate`));
+  assert.equal(opts.gladosMountedTools.includes(webappBrowserMount), false);
+  assert.equal(opts.tools.some(tool => tool.startsWith('mcp__')), false);
   assert.equal(rootTools.includes('Bash'), true);
   assert.equal(rootTools.some(tool => tool.startsWith('mcp__browser-')), false);
   assert.equal(opts.allowedTools.includes('Agent'), false);
+  assert.equal(opts.allowedTools.includes('SendMessage'), true);
+  assert.equal(opts.maxTurns, 40);
   assert.equal(opts.allowedTools.includes('Bash'), true);
   assert.equal(opts.allowedTools.includes(webappBrowserMount), false);
+  assert.equal(opts.allowedTools.includes(`${webappBrowserMount}__browser_navigate`), true);
+  assert.equal(opts.allowedTools.includes(`${webappBrowserMount}__browser_snapshot`), true);
+  assert.equal(opts.allowedTools.includes(`${webappBrowserMount}__browser_take_screenshot`), true);
   assert.equal('glados' in opts.agents, false);
   assert.equal('claude' in opts.agents, false);
   assert.ok(opts.agents['webapp-recon'].tools.includes('Bash'));
-  assert.ok(opts.agents['webapp-recon'].tools.includes(webappBrowserMount));
+  assert.ok(opts.agents['webapp-recon'].tools.includes(`${webappBrowserMount}__browser_navigate`));
+  assert.ok(opts.agents['webapp-recon'].tools.includes(`${webappBrowserMount}__browser_run_code_unsafe`));
   assert.equal(opts.agents['webapp-recon'].tools.includes('Agent'), false);
+  assert.equal(opts.agents['webapp-recon'].tools.includes('SendMessage'), false);
+  assert.equal(opts.agents['webapp-recon'].maxTurns, 100);
   assert.deepEqual(opts.agents['webapp-recon'].mcpServers, ['blackboard', 'watchdog', 'glados-ops', browserServerName('webapp-recon')]);
 
   const hook = opts.hooks.PreToolUse[0].hooks[0];
@@ -145,12 +239,54 @@ test('GLaDOS process mounts fleet tools but enforces caller-specific permissions
     tool_input: { command: 'true' },
     tool_use_id: 'root-bash-1',
   })).hookSpecificOutput.permissionDecision, 'allow');
-  assert.equal((await hook({
+  const dispatchDecision = await hook({
     hook_event_name: 'PreToolUse',
     tool_name: 'Agent',
     tool_input: { subagent_type: 'webapp-recon' },
     tool_use_id: 'root-agent-1',
-  })).hookSpecificOutput.permissionDecision, 'allow');
+  });
+  assert.equal(dispatchDecision.hookSpecificOutput.permissionDecision, 'allow');
+  assert.deepEqual(dispatchDecision.hookSpecificOutput.updatedInput, {
+    subagent_type: 'webapp-recon',
+    name: 'webapp-recon',
+    run_in_background: false,
+  });
+  assert.deepEqual(await opts.canUseTool('Agent', {
+    subagent_type: 'webapp-recon',
+    run_in_background: true,
+    prompt: 'Perform the assigned recon and return the result.',
+  }, { toolUseID: 'root-agent-can-use' }), {
+    behavior: 'deny',
+    message: 'Agent background dispatch is disabled; retry the same named GLaDOS agent with run_in_background=false so its final result returns to glados',
+    interrupt: false,
+    toolUseID: 'root-agent-can-use',
+  });
+  assert.deepEqual(await opts.canUseTool('Agent', {
+    subagent_type: 'webapp-recon',
+    run_in_background: false,
+    prompt: 'Perform the assigned recon and return the result.',
+  }, { toolUseID: 'root-agent-foreground' }), {
+    behavior: 'allow',
+    toolUseID: 'root-agent-foreground',
+    updatedInput: {
+      subagent_type: 'webapp-recon',
+      name: 'webapp-recon',
+      run_in_background: false,
+      prompt: 'Perform the assigned recon and return the result.',
+    },
+  });
+  assert.deepEqual(await hook({
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Agent',
+    tool_input: { subagent_type: 'net-recon', run_in_background: true },
+    tool_use_id: 'root-agent-background',
+  }), {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: 'Agent background dispatch is disabled; retry the same named GLaDOS agent with run_in_background=false so its final result returns to glados',
+    },
+  });
   assert.equal((await hook({
     hook_event_name: 'PreToolUse',
     tool_name: 'Agent',
@@ -170,12 +306,13 @@ test('GLaDOS process mounts fleet tools but enforces caller-specific permissions
 });
 
 test('optional browser MCP mounts only when enabled and uses the active GLaDOS proxy', () => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-browser-mcp-'));
   const serverName = browserServerName('webapp-recon');
   const mount = `mcp__${serverName}`;
   const disabled = buildAgentSdkOptions('webapp-recon', {
     env: baseTestEnv(),
   });
-  assert.equal(disabled.tools.includes(mount), false);
+  assert.equal(disabled.gladosMountedTools.includes(mount), false);
   assert.equal(serverName in disabled.mcpServers, false);
 
   const enabled = buildAgentSdkOptions('webapp-recon', {
@@ -183,18 +320,36 @@ test('optional browser MCP mounts only when enabled and uses the active GLaDOS p
       ...baseTestEnv(),
       GLADOS_BROWSER_MCP: '1',
       GLADOS_MITM_LISTEN_PORT: '19090',
+      GLADOS_RUNTIME_DIR: runtimeDir,
     },
+    turnTargets: ['https://ford.com'],
   });
-  assert.ok(enabled.tools.includes(mount));
-  assert.ok(enabled.allowedTools.includes(`${mount}__*`));
+  assert.equal(enabled.gladosMountedTools.includes(mount), false);
+  assert.ok(enabled.gladosMountedTools.includes(`${mount}__browser_navigate`));
+  assert.equal(enabled.allowedTools.includes(`${mount}__*`), false);
+  assert.ok(enabled.allowedTools.includes(`${mount}__browser_navigate`));
+  assert.ok(enabled.allowedTools.includes(`${mount}__browser_snapshot`));
+  assert.ok(enabled.allowedTools.includes(`${mount}__browser_take_screenshot`));
   assert.ok(enabled.mcpServers[serverName].command);
   const configFlag = enabled.mcpServers[serverName].args.indexOf('--config');
   assert.notEqual(configFlag, -1);
   const browserConfig = JSON.parse(fs.readFileSync(enabled.mcpServers[serverName].args[configFlag + 1], 'utf8'));
   assert.equal(browserConfig.browser.launchOptions.proxy.server, 'http://127.0.0.1:19090');
+  assert.ok(browserConfig.browser.launchOptions.args.includes('--remote-debugging-address=127.0.0.1'));
+  assert.equal(browserConfig.browser.launchOptions.args.some(arg => /^--remote-debugging-port=19\d{3}$/.test(arg)), true);
   assert.equal(browserConfig.browser.contextOptions.ignoreHTTPSErrors, true);
   assert.equal(browserConfig.browser.contextOptions.extraHTTPHeaders['X-GLaDOS-Agent'], 'webapp-recon');
   assert.equal(browserConfig.browser.contextOptions.extraHTTPHeaders['X-GLaDOS-Transport'], 'browser-mcp');
+  assert.equal(browserConfig.outputDir, path.join(runtimeDir, 'investigations'));
+  assert.equal(fs.statSync(browserConfig.outputDir).mode & 0o777, 0o700);
+  const fillDecision = enabled.hooks.PreToolUse[0].hooks[0]({
+    hook_event_name: 'PreToolUse',
+    tool_name: `${mount}__browser_fill_form`,
+    tool_input: {
+      fields: [{ element: 'Username', type: 'textbox', target: 'ref=f3e28', value: 'mustang' }],
+    },
+    tool_use_id: 'fill-normalize-1',
+  });
   assert.equal(decideToolUse({
     agentId: 'webapp-recon',
     toolName: `${mount}__browser_navigate`,
@@ -211,25 +366,216 @@ test('optional browser MCP mounts only when enabled and uses the active GLaDOS p
     env: enabled.env,
     turnTargets: ['https://ford.com'],
   }).allowed, true);
+  return fillDecision.then(result => {
+    assert.equal(result.hookSpecificOutput.permissionDecision, 'allow');
+    assert.deepEqual(result.hookSpecificOutput.updatedInput.fields, [{
+      element: 'Username',
+      name: 'Username',
+      type: 'textbox',
+      target: 'f3e28',
+      value: 'mustang',
+    }]);
+  });
 });
 
-test('SDK resume ids persist outside the app payload and feed the resume option', () => {
+test('subagent dispatch prompt seeds current-page browser authorization targets', () => {
+  const options = {
+    turnTargets: [],
+    browserTargetsByAgent: new Map(),
+  };
+  rememberToolTargets('glados', 'Agent', {
+    subagent_type: 'webapp-vuln',
+    prompt: 'Assess only http://136.116.95.87:56453/ and its subpaths.',
+    run_in_background: false,
+  }, { allowed: true }, options);
+
+  assert.deepEqual(toolTargetsForAgent('webapp-vuln', options), [
+    'http://136.116.95.87:56453/',
+  ]);
+  assert.deepEqual(toolTargetsForAgent('net-recon', options), []);
+});
+
+test('successful browser navigation authorizes current-page actions for that agent only', async () => {
+  const env = baseTestEnv({ GLADOS_BROWSER_MCP: '1' });
+  const opts = buildAgentSdkOptions('webapp-recon', {
+    env,
+    turnTargets: ['https://ford.com'],
+  });
+  const hook = opts.hooks.PreToolUse[0].hooks[0];
+  const navigate = await hook({
+    hook_event_name: 'PreToolUse',
+    tool_name: 'mcp__browser-webapp-recon__browser_navigate',
+    tool_input: { url: 'https://ford.com/account' },
+    tool_use_id: 'navigate-remember-target',
+  });
+  assert.equal(navigate.hookSpecificOutput.permissionDecision, 'allow');
+
+  const click = await hook({
+    hook_event_name: 'PreToolUse',
+    tool_name: 'mcp__browser-webapp-recon__browser_click',
+    tool_input: { ref: 'save-button' },
+    tool_use_id: 'click-remembered-target',
+  });
+  assert.equal(click.hookSpecificOutput.permissionDecision, 'allow');
+});
+
+test('runtime prompt requires absolute browser evidence filenames', () => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-browser-evidence-'));
+  const env = baseTestEnv({ GLADOS_RUNTIME_DIR: runtimeDir, GLADOS_BROWSER_MCP: '1' });
+  const opts = buildAgentSdkOptions('webapp-recon', { env });
+  assert.match(opts.systemPrompt, /When browser_take_screenshot has a filename, use an absolute path/);
+  assert.match(opts.systemPrompt, /Create payload files there, never in \/tmp/);
+  assert.match(opts.systemPrompt, /while the file chooser modal is open, call browser_file_upload directly/);
+  assert.match(opts.systemPrompt, /URLSearchParams must be created inside page\.evaluate/);
+  assert.doesNotMatch(opts.systemPrompt, /Save screenshots with a path relative to this root/);
+});
+
+test('browser contract rejects unsupported Node globals and upload paths before Playwright', async () => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-browser-contract-'));
+  const env = baseTestEnv({ GLADOS_RUNTIME_DIR: runtimeDir, GLADOS_BROWSER_MCP: '1' });
+  const opts = buildAgentSdkOptions('webapp-recon', {
+    env,
+    turnTargets: ['https://example.test'],
+  });
+  const hook = opts.hooks.PreToolUse[0].hooks[0];
+
+  const unsafe = await hook({
+    tool_name: 'mcp__browser-webapp-recon__browser_run_code_unsafe',
+    tool_input: { code: 'async (page) => new URLSearchParams("q=test")' },
+    tool_use_id: 'unsafe-url-search-params',
+  });
+  assert.equal(unsafe.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(unsafe.hookSpecificOutput.permissionDecisionReason, /inside page\.evaluate/);
+
+  const outsideRoot = await hook({
+    tool_name: 'mcp__browser-webapp-recon__browser_file_upload',
+    tool_input: { paths: ['/tmp/xxe_probe.xml'] },
+    tool_use_id: 'outside-upload-root',
+  });
+  assert.equal(outsideRoot.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(outsideRoot.hookSpecificOutput.permissionDecisionReason, /outside allowed roots/);
+
+  const allowedPath = path.join(runtimeDir, 'investigations', 'target', 'evidence', 'probe.xml');
+  const insideRoot = await hook({
+    tool_name: 'mcp__browser-webapp-recon__browser_file_upload',
+    tool_input: { paths: [allowedPath] },
+    tool_use_id: 'inside-upload-root',
+  });
+  assert.equal(insideRoot.hookSpecificOutput.permissionDecision, 'allow');
+});
+
+test('Bash contract denies root-wide find while allowing bounded absolute searches', () => {
+  const base = {
+    agentId: 'report-validator',
+    toolName: 'Bash',
+    policy: loadPolicy(),
+    workspaceRoot: path.join(os.homedir(), '.glados', 'workspaces', 'agents'),
+    env: baseTestEnv(),
+    turnTargets: [],
+  };
+  const denied = decideToolUse({
+    ...base,
+    input: { command: "find / -iname 'REPORT-TEMPLATE.md' 2>/dev/null" },
+  });
+  assert.equal(denied.allowed, false);
+  assert.match(denied.reason, /whole-filesystem find is denied/);
+
+  const nestedDenied = decideToolUse({
+    ...base,
+    input: { command: "eval 'find / -name REPORT-TEMPLATE.md'" },
+  });
+  assert.equal(nestedDenied.allowed, false);
+
+  const allowed = decideToolUse({
+    ...base,
+    input: { command: "find /Users/samcsta/.glados/reports -name REPORT-TEMPLATE.md" },
+  });
+  assert.equal(allowed.allowed, true);
+});
+
+test('scope parsing ignores URL paths and browser JavaScript while preserving the turn target', () => {
+  const target = 'http://136.116.95.87:56453/robots.txt';
+  assert.deepEqual(extractTargets(target), [target]);
+
+  const headersOnlyGet = classifyToolUse('Bash', {
+    command: `/usr/bin/curl -x http://127.0.0.1:18080 -D - -H "X-GLaDOS-Agent: webapp-recon" ${target}`,
+  });
+  assert.equal(headersOnlyGet.mutating, false, 'curl -D dumps headers and is not curl -d request data');
+  assert.deepEqual(headersOnlyGet.targets, [target]);
+
+  const evaluate = classifyToolUse('mcp__browser-webapp-recon__browser_evaluate', {
+    function: '() => ({ html: document.documentElement.outerHTML, cookies: document.cookie })',
+  });
+  assert.equal(evaluate.targetCapable, true);
+  assert.deepEqual(evaluate.targets, []);
+
+  const navigate = classifyToolUse('mcp__browser-webapp-recon__browser_navigate', { url: target });
+  assert.deepEqual(navigate.targets, [target]);
+});
+
+test('browser form input normalization repairs missing names and ref-prefixed targets', () => {
+  assert.deepEqual(normalizeToolInput('mcp__browser-webapp-recon__browser_fill_form', {
+    fields: [
+      { element: 'Username', type: 'textbox', target: 'ref=f3e28', value: 'mustang' },
+      { name: 'Password', type: 'textbox', target: 'f3e29', value: 'secret' },
+    ],
+  }), {
+    fields: [
+      { element: 'Username', name: 'Username', type: 'textbox', target: 'f3e28', value: 'mustang' },
+      { name: 'Password', type: 'textbox', target: 'f3e29', value: 'secret' },
+    ],
+  });
+});
+
+test('reporting tool normalization paginates reads and requests compact baseline data', () => {
+  assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/large.md' }, { agentId: 'report-writer' }), {
+    file_path: '/tmp/large.md',
+    limit: 300,
+  });
+  assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/large.md', offset: 301, limit: 900 }, { agentId: 'report-validator' }), {
+    file_path: '/tmp/large.md',
+    offset: 301,
+    limit: 300,
+  });
+  assert.deepEqual(normalizeToolInput('mcp__blackboard__blackboard_baseline_get', {
+    engagement_id: 'eng-1',
+    mode: 'full',
+  }, { agentId: 'report-writer' }), {
+    engagement_id: 'eng-1',
+    mode: 'summary',
+  });
+  assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/large.md' }, { agentId: 'webapp-recon' }), {
+    file_path: '/tmp/large.md',
+  });
+});
+
+test('SDK resume ids are scoped to the durable SDK working directory', () => {
   const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-sdk-resume-'));
   const registry = new SdkSessionRegistry({ runtimeDir: runtime });
-  registry.set('glados', 'session-one');
-  assert.equal(registry.get('glados'), 'session-one');
+  const cwd = resolveSdkWorkingDirectory({ env: { GLADOS_RUNTIME_DIR: runtime } });
+  registry.set('glados', 'session-one', cwd);
+  assert.equal(registry.get('glados', cwd), 'session-one');
   assert.equal(fs.statSync(path.dirname(registry.file)).mode & 0o077, 0);
   assert.equal(fs.statSync(registry.file).mode & 0o077, 0);
   const opts = buildAgentSdkOptions('glados', {
-    env: baseTestEnv(),
-    resumeSessionId: registry.get('glados'),
+    env: baseTestEnv({ GLADOS_RUNTIME_DIR: runtime }),
+    resumeSessionId: registry.get('glados', cwd),
   });
+  assert.equal(opts.cwd, cwd);
   assert.equal(opts.resume, 'session-one');
+  assert.equal(registry.get('glados', path.join(runtime, 'relocated-app')), null);
   registry.clear('glados');
   assert.equal(registry.get('glados'), null);
 });
 
-test('every enabled subagent mounts the core operational tool and MCP baseline', () => {
+test('legacy unscoped SDK resume ids are rejected when a cwd scope is required', () => {
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-sdk-legacy-resume-'));
+  const registry = new SdkSessionRegistry({ runtimeDir: runtime });
+  registry.set('glados', 'legacy-session');
+  assert.equal(registry.get('glados', path.join(runtime, 'workspaces')), null);
+});
+
+test('every enabled subagent mounts the local-work tool and MCP baseline', () => {
   const policy = loadPolicy();
   const env = baseTestEnv({ GLADOS_BROWSER_MCP: '1' });
   const required = [
@@ -238,9 +584,15 @@ test('every enabled subagent mounts the core operational tool and MCP baseline',
     'Grep',
     'Bash',
     'WebSearch',
-    'mcp__blackboard',
-    'mcp__watchdog',
-    'mcp__glados-ops',
+    'Write',
+    'Edit',
+    'NotebookEdit',
+    'TodoWrite',
+    'mcp__blackboard__blackboard_read',
+    'mcp__blackboard__blackboard_plan_create',
+    'mcp__watchdog__target_health',
+    'mcp__glados-ops__scope_guard_check',
+    'mcp__glados-ops__local_auth_login',
   ];
   const missingByAgent = [];
   for (const row of loadRegistry({ env })) {
@@ -256,7 +608,7 @@ test('every enabled subagent mounts the core operational tool and MCP baseline',
     }
     const browserMount = `mcp__${browserServerName(row.id)}`;
     assert.equal(
-      tools.includes(browserMount),
+      tools.includes(`${browserMount}__browser_navigate`),
       policy.browserMcpAgents.includes(row.id),
       `${row.id} browser MCP existence must match its explicit policy`
     );
@@ -264,18 +616,20 @@ test('every enabled subagent mounts the core operational tool and MCP baseline',
   assert.deepEqual(missingByAgent, []);
 });
 
-test('every enabled agent mounts Bash and only GLaDOS can dispatch', () => {
+test('every enabled agent mounts the full local-work baseline and only GLaDOS can dispatch', () => {
   const policy = loadPolicy();
   const env = baseTestEnv({ GLADOS_BROWSER_MCP: '1' });
-  const missingBash = [];
+  const localWorkTools = ['Read', 'Glob', 'Grep', 'Bash', 'WebSearch', 'Write', 'Edit', 'NotebookEdit', 'TodoWrite'];
+  const missingByAgent = [];
   const dispatchCapable = [];
   for (const row of loadRegistry({ env })) {
     if (!row?.id || !agentEnabled(row.id, { policy })) continue;
     const tools = mountedToolsForAgent(row.id, policy, { env });
-    if (!tools.includes('Bash')) missingBash.push(row.id);
+    const missing = localWorkTools.filter(tool => !tools.includes(tool));
+    if (missing.length) missingByAgent.push(`${row.id}: ${missing.join(', ')}`);
     if (tools.includes('Task') || tools.includes('Agent')) dispatchCapable.push(row.id);
   }
-  assert.deepEqual(missingBash, []);
+  assert.deepEqual(missingByAgent, []);
   assert.deepEqual(dispatchCapable, ['glados']);
 });
 
@@ -360,6 +714,8 @@ test('operator workspace edits change assembled prompts and expose skills', () =
     env: { ...process.env, ANTHROPIC_AUTH_TOKEN: 'test-token' },
   });
   assert.ok(opts.systemPrompt.includes('edited by operator'));
+  assert.match(opts.systemPrompt, new RegExp(`Persistent writable workspace: ${agentDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(opts.systemPrompt, /Never write operator state into repository templates or the packaged GLaDOS\.app Resources directory/);
   assert.ok(opts.systemPrompt.includes('Active model for this turn: claude-sonnet-5'));
   assert.ok(opts.systemPrompt.includes('Do not infer current model names from static roster tables'));
   assert.ok(opts.systemPrompt.includes('Operator-requested proxy smoke tests are diagnostics'));
@@ -373,6 +729,19 @@ test('proxy smoke-test instructions override formal investigation preflight', ()
   const glados = buildAgentSdkOptions('glados', { env });
   assert.ok(glados.systemPrompt.includes('Operator-requested proxy smoke tests are diagnostics'));
   assert.ok(glados.systemPrompt.includes('Do not first run Glob/Read/Grep over local context'));
+  assert.ok(glados.systemPrompt.includes('Privilege-expansion gate'));
+  assert.ok(glados.systemPrompt.includes('obtaining a flag or one critical chain is not completion'));
+  assert.ok(glados.systemPrompt.includes('Context-intake gate'));
+  assert.ok(glados.systemPrompt.includes('context_mode=blind'));
+  assert.ok(glados.systemPrompt.includes('net-recon is operator-optional'));
+  assert.ok(glados.systemPrompt.includes('JavaScript gate'));
+  assert.ok(glados.systemPrompt.includes('landing_js_checkpoint'));
+  assert.ok(glados.systemPrompt.includes('SQLi escalation contract'));
+  assert.ok(glados.systemPrompt.includes('requested edits go back to plan-synthesizer'));
+  assert.ok(glados.systemPrompt.includes('Investigation loop'));
+  assert.ok(glados.systemPrompt.includes('Wrap gate'));
+  assert.ok(glados.systemPrompt.includes('operator_wrap_approved: true'));
+  assert.match(glados.systemPrompt, /report-writer with report_pass: initial.*report-validator with report_pass: review-and-edit.*report-writer with report_pass: final/);
   assert.match(glados.systemPrompt, /Do not search local files,\s+prior reports,\s+operator context,\s+blackboard/);
   assert.match(glados.systemPrompt, /do not run\s+`target_probe`\s+or\s+`scope_guard_check`\s+first/);
 
@@ -380,10 +749,14 @@ test('proxy smoke-test instructions override formal investigation preflight', ()
   assert.ok(webappRecon.systemPrompt.includes('Proxy Smoke Test Mode'));
   assert.ok(webappRecon.systemPrompt.includes('/usr/bin/curl -x "$GLADOS_PROXY_URL"'));
   assert.ok(webappRecon.systemPrompt.includes('Do not authenticate, crawl, enumerate'));
+  assert.ok(webappRecon.systemPrompt.includes('Post-Pivot Recon Mode'));
+  assert.match(webappRecon.systemPrompt, /landing-page JavaScript checkpoint/i);
+  assert.ok(webappRecon.systemPrompt.includes('manage users'));
+  assert.ok(webappRecon.systemPrompt.includes('SQL injection'));
 
   const definitions = buildAgentDefinitions(loadPolicy(), { env });
   assert.ok(definitions['webapp-recon'].tools.includes('Bash'));
-  assert.ok(definitions['webapp-recon'].tools.includes(`mcp__${browserServerName('webapp-recon')}`));
+  assert.ok(definitions['webapp-recon'].tools.includes(`mcp__${browserServerName('webapp-recon')}__browser_navigate`));
   assert.equal(definitions['webapp-recon'].permissionMode, 'dontAsk');
   assert.equal(definitions['webapp-recon'].background, false);
   assert.match(definitions['webapp-recon'].criticalSystemReminder_EXPERIMENTAL, /GLaDOS subagent named webapp-recon/);
@@ -397,7 +770,7 @@ test('all assembled enabled-agent prompts avoid legacy proxy or harness instruct
     const opts = buildAgentSdkOptions(row.id, { env });
     assert.doesNotMatch(
       opts.systemPrompt,
-      /OpenClaw|openclaw|OPENCLAW|Burp|burp|BURP_|127\.0\.0\.1:8080|localhost:1337|raw-stream|tag-injector|patch-openclaw|GLaDOS proxy Pro/,
+      /OpenClaw|openclaw|OPENCLAW|Burp|burp|BURP_|127\.0\.0\.1:8080|localhost:1337|raw-stream|tag-injector|patch-openclaw|GLaDOS proxy Pro|circuit_status/,
       row.id
     );
   }
@@ -472,6 +845,11 @@ test('maps SDK partial stream, tool calls, tool results, result, and liveness ev
       subtype: 'success',
       result: 'ok',
       num_turns: 2,
+      total_cost_usd: 1.25,
+      duration_ms: 500,
+      duration_api_ms: 300,
+      usage: { input_tokens: 100, output_tokens: 20 },
+      modelUsage: { 'claude-sonnet-5': { costUSD: 1.25 } },
       uuid: 'result-1',
       session_id: 's1',
     }, context),
@@ -485,6 +863,111 @@ test('maps SDK partial stream, tool calls, tool results, result, and liveness ev
   assert.equal(events[3].parentToolUseId, 'parent-1');
   assert.equal(events[3].text, 'done');
   assert.equal(events[4].live, true);
+  assert.equal(events[5].costUsd, 1.25);
+  assert.equal(events[5].durationMs, 500);
+  assert.deepEqual(events[5].usage, { input_tokens: 100, output_tokens: 20 });
+  assert.deepEqual(events[5].modelUsage, { 'claude-sonnet-5': { costUSD: 1.25 } });
+});
+
+test('redacts generated and browser-entered credentials from durable transcript events', () => {
+  const context = {};
+  const browserCall = mapSdkMessageToEvents('webapp-vuln', {
+    type: 'assistant',
+    message: { content: [{
+      type: 'tool_use',
+      id: 'password-fill',
+      name: 'mcp__browser-webapp-vuln__browser_fill_form',
+      input: { fields: [{ name: 'Password', type: 'textbox', target: 'password', value: 'do-not-store-me' }] },
+    }] },
+  }, context)[0];
+  assert.equal(browserCall.toolInput.fields[0].value, '[REDACTED]');
+  assert.equal(browserCall.arguments.fields[0].value, '[REDACTED]');
+
+  const browserResult = mapSdkMessageToEvents('webapp-vuln', {
+    type: 'user',
+    message: { content: [{
+      type: 'tool_result',
+      tool_use_id: 'password-fill',
+      content: 'await page.getByRole(\'textbox\', { name: \'Password\' }).fill(\'do-not-store-me\');',
+    }] },
+  }, context)[0];
+  assert.doesNotMatch(browserResult.text, /do-not-store-me/);
+  assert.match(browserResult.text, /REDACTED/);
+
+  mapSdkMessageToEvents('webapp-vuln', {
+    type: 'assistant',
+    message: { content: [{
+      type: 'tool_use',
+      id: 'generate-password',
+      name: 'Bash',
+      input: { command: 'openssl rand -base64 24', description: 'Generate strong random credential' },
+    }] },
+  }, context);
+  const generatedResult = mapSdkMessageToEvents('webapp-vuln', {
+    type: 'user',
+    message: { content: [{ type: 'tool_result', tool_use_id: 'generate-password', content: 'raw-secret-output' }] },
+  }, context)[0];
+  assert.equal(generatedResult.text, '[REDACTED: generated credential]');
+
+  mapSdkMessageToEvents('webapp-validator', {
+    type: 'assistant',
+    message: { content: [{
+      type: 'tool_use',
+      id: 'read-credential',
+      name: 'Read',
+      input: { file_path: '/tmp/admin-takeover-credential.txt' },
+    }] },
+  }, context);
+  const credentialRead = mapSdkMessageToEvents('webapp-validator', {
+    type: 'user',
+    message: { content: [{ type: 'tool_result', tool_use_id: 'read-credential', content: 'new_password: do-not-store-me' }] },
+  }, context)[0];
+  assert.equal(credentialRead.text, '[REDACTED: credential file contents]');
+});
+
+test('maps SDK background task lifecycle into authoritative subagent liveness', () => {
+  const context = {};
+  mapSdkMessageToEvents('glados', {
+    type: 'assistant',
+    message: { content: [{ type: 'tool_use', id: 'tool-net', name: 'Task', input: { subagent_type: 'net-recon' } }] },
+    uuid: 'dispatch-net',
+    session_id: 's-task',
+  }, context);
+  const [started] = mapSdkMessageToEvents('glados', {
+    type: 'system',
+    subtype: 'task_started',
+    task_id: 'task-net',
+    tool_use_id: 'tool-net',
+    subagent_type: 'net-recon',
+    description: 'Low-impact network recon',
+    uuid: 'task-started-net',
+    session_id: 's-task',
+  }, context);
+  const [progress] = mapSdkMessageToEvents('glados', {
+    type: 'system',
+    subtype: 'task_progress',
+    task_id: 'task-net',
+    description: 'Writing baseline',
+    usage: { total_tokens: 10, tool_uses: 2, duration_ms: 50 },
+    uuid: 'task-progress-net',
+    session_id: 's-task',
+  }, context);
+  const [completed] = mapSdkMessageToEvents('glados', {
+    type: 'system',
+    subtype: 'task_notification',
+    task_id: 'task-net',
+    status: 'completed',
+    output_file: '/tmp/internal-output',
+    summary: 'Network recon complete',
+    uuid: 'task-completed-net',
+    session_id: 's-task',
+  }, context);
+
+  assert.deepEqual([started.kind, progress.kind, completed.kind], ['liveness', 'liveness', 'liveness']);
+  assert.deepEqual([started.agentId, progress.agentId, completed.agentId], ['net-recon', 'net-recon', 'net-recon']);
+  assert.deepEqual([started.live, progress.live, completed.live], [true, true, false]);
+  assert.equal(completed.state, 'completed');
+  assert.equal(completed.text, 'Network recon complete');
 });
 
 test('maps assistant thinking blocks and content block stops into visible thinking events', () => {
@@ -626,6 +1109,111 @@ test('streams SDK messages through the dashboard event mapper without raw JSONL 
   assert.deepEqual(events.map(ev => ev.text), ['hello', 'done']);
 });
 
+test('stale SDK conversations clear and retry once without resume', async () => {
+  const attempts = [];
+  const persisted = [];
+  const invalidated = [];
+  function fakeQuery({ options }) {
+    attempts.push(options.resume || null);
+    return {
+      async *[Symbol.asyncIterator]() {
+        if (options.resume) {
+          yield {
+            type: 'result',
+            subtype: 'error_during_execution',
+            is_error: true,
+            errors: [`No conversation found with session ID: ${options.resume}`],
+            session_id: options.resume,
+          };
+          return;
+        }
+        yield { type: 'result', subtype: 'success', result: 'recovered', session_id: 'fresh-session' };
+      },
+    };
+  }
+  const events = await streamAgentTurn({
+    agentId: 'glados',
+    prompt: 'continue',
+    store: false,
+    queryImpl: fakeQuery,
+    options: {
+      sdkOptions: { includePartialMessages: true, resume: 'stale-session' },
+      onSessionId: sessionId => persisted.push(sessionId),
+      onInvalidSession: sessionId => invalidated.push(sessionId),
+      haltPollMs: 0,
+    },
+  });
+  assert.deepEqual(attempts, ['stale-session', null]);
+  assert.deepEqual(invalidated, ['stale-session']);
+  assert.deepEqual(persisted, ['fresh-session']);
+  assert.deepEqual(events.map(event => event.text), ['recovered']);
+});
+
+test('waits for core MCP servers before consuming an agent turn', async () => {
+  let statusCalls = 0;
+  const iterable = {
+    async mcpServerStatus() {
+      statusCalls += 1;
+      const status = statusCalls >= 2 ? 'connected' : 'pending';
+      const tools = {
+        blackboard: ['blackboard_read'],
+        watchdog: ['target_probe'],
+        'glados-ops': ['scope_guard_check'],
+      };
+      return ['blackboard', 'watchdog', 'glados-ops'].map(name => ({
+        name,
+        status,
+        tools: status === 'connected' ? tools[name].map(tool => ({ name: tool })) : undefined,
+      }));
+    },
+  };
+  const statuses = await waitForCoreMcpServers(iterable, {
+    mcpServers: { blackboard: {}, watchdog: {}, 'glados-ops': {}, browser: {} },
+    tools: [
+      'mcp__blackboard__blackboard_read',
+      'mcp__watchdog__target_probe',
+      'mcp__glados-ops__scope_guard_check',
+    ],
+  }, { mcpReadyTimeoutMs: 100, mcpReadyPollMs: 1 });
+  assert.equal(statusCalls, 2);
+  assert.ok(statuses.every(status => status.status === 'connected'));
+});
+
+test('core MCP readiness requires every mounted concrete tool to be discovered', async () => {
+  const iterable = {
+    async mcpServerStatus() {
+      return [
+        { name: 'blackboard', status: 'connected', tools: [{ name: 'blackboard_read' }] },
+      ];
+    },
+  };
+  await assert.rejects(
+    waitForCoreMcpServers(iterable, {
+      mcpServers: { blackboard: {} },
+      tools: ['mcp__blackboard__blackboard_read', 'mcp__blackboard__blackboard_task_read'],
+    }, { requiredMcpServers: ['blackboard'], mcpReadyTimeoutMs: 0 }),
+    /blackboard:connected missing-tools=blackboard_task_read/
+  );
+});
+
+test('fails clearly when a core MCP server never becomes ready', async () => {
+  const iterable = {
+    async mcpServerStatus() {
+      return [
+        { name: 'blackboard', status: 'connected' },
+        { name: 'watchdog', status: 'failed' },
+        { name: 'glados-ops', status: 'pending' },
+      ];
+    },
+  };
+  await assert.rejects(
+    waitForCoreMcpServers(iterable, {
+      mcpServers: { blackboard: {}, watchdog: {}, 'glados-ops': {} },
+    }, { mcpReadyTimeoutMs: 0, mcpReadyPollMs: 1 }),
+    /blackboard:connected, watchdog:failed, glados-ops:pending/
+  );
+});
+
 test('streamAgentTurn interrupts the SDK query when an abort signal fires', async () => {
   const ac = new AbortController();
   let interruptCalls = 0;
@@ -668,6 +1256,64 @@ test('streamAgentTurn interrupts the SDK query when an abort signal fires', asyn
   const events = await promise;
   assert.equal(interruptCalls, 1);
   assert.deepEqual(events.map(ev => ev.text), ['first']);
+});
+
+test('streamAgentTurn interrupts a turn that produces no first model activity', async () => {
+  let interrupted = false;
+  const queryImpl = () => ({
+    interrupt: async () => { interrupted = true; },
+    [Symbol.asyncIterator]() { return this; },
+    next() { return new Promise(() => {}); },
+  });
+
+  await assert.rejects(
+    streamAgentTurn({
+      agentId: 'glados',
+      prompt: 'continue the approved action',
+      store: false,
+      queryImpl,
+      options: { firstActivityTimeoutMs: 25, haltPollMs: 0 },
+    }),
+    error => error.code === 'GLADOS_FIRST_ACTIVITY_TIMEOUT'
+  );
+  assert.equal(interrupted, true);
+});
+
+test('streamAgentTurn drops a resumed session and retries once after first-activity timeout', async () => {
+  let calls = 0;
+  let invalidated = null;
+  const queryImpl = ({ options }) => {
+    calls += 1;
+    if (options.resume) {
+      return {
+        interrupt: async () => {},
+        [Symbol.asyncIterator]() { return this; },
+        next() { return new Promise(() => {}); },
+      };
+    }
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'assistant', message: { content: [{ type: 'text', text: 'recovered' }] }, session_id: 'fresh-session' };
+        yield { type: 'result', subtype: 'success', result: 'recovered', session_id: 'fresh-session' };
+      },
+    };
+  };
+
+  const events = await streamAgentTurn({
+    agentId: 'glados',
+    prompt: 'continue the approved action',
+    store: false,
+    queryImpl,
+    options: {
+      resumeSessionId: 'stale-session',
+      firstActivityTimeoutMs: 25,
+      haltPollMs: 0,
+      onInvalidSession: (sessionId, error) => { invalidated = { sessionId, code: error.code }; },
+    },
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(invalidated, { sessionId: 'stale-session', code: 'GLADOS_FIRST_ACTIVITY_TIMEOUT' });
+  assert.equal(events.some(event => event.kind === 'assistant-text' && event.text === 'recovered'), true);
 });
 
 test('streamAgentTurn interrupts an in-flight agent when its halt marker becomes active', async () => {

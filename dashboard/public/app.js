@@ -7,6 +7,15 @@ const state = {
   agentsLoadedOnce: false,
   update: { lines: [], running: false, es: null, autoStart: false },
   reports: { query: '', scope: 'all', selectedPath: null },
+  overview: null,
+  agentFilter: (() => { try { return localStorage.getItem('glados-dash.agent-filter') || 'all'; } catch { return 'all'; } })(),
+  agentQuery: (() => { try { return localStorage.getItem('glados-dash.agent-query') || ''; } catch { return ''; } })(),
+  notifications: (() => {
+    try { return JSON.parse(localStorage.getItem('glados-dash.notifications') || '[]').slice(-100); }
+    catch { return []; }
+  })(),
+  unreadNotifications: 0,
+  provenanceFocus: null,
 };
 
 const tabsEl = document.getElementById('tabs');
@@ -15,6 +24,115 @@ const agentListEl = document.getElementById('agent-list');
 const eventsEl = document.getElementById('events');
 const errorsOnlyEl = document.getElementById('errors-only');
 const debugModeEl = document.getElementById('debug-mode');
+const notificationDrawerEl = document.getElementById('notification-drawer');
+const notificationListEl = document.getElementById('notification-list');
+
+function storageGetJson(key, fallback) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || 'null');
+    return parsed === null ? fallback : parsed;
+  } catch { return fallback; }
+}
+
+function persistWorkspaceState() {
+  try {
+    localStorage.setItem('glados-dash.open-tabs', JSON.stringify(state.openTabs));
+    localStorage.setItem('glados-dash.current-tab', state.currentTab || '');
+  } catch {}
+}
+
+function persistNotifications() {
+  state.notifications = state.notifications.slice(-100);
+  try { localStorage.setItem('glados-dash.notifications', JSON.stringify(state.notifications)); } catch {}
+}
+
+function notificationTone(kind) {
+  if (/error|failed|halt|denied|offline/.test(kind)) return 'danger';
+  if (/warn|pending|approval/.test(kind)) return 'warning';
+  if (/resume|started|success|complete|live/.test(kind)) return 'success';
+  return 'info';
+}
+
+function renderNotifications() {
+  const badge = document.getElementById('notifications-badge');
+  const summary = document.getElementById('notification-summary');
+  if (badge) {
+    badge.textContent = String(state.unreadNotifications);
+    badge.classList.toggle('hidden', state.unreadNotifications === 0);
+  }
+  if (summary) summary.textContent = state.unreadNotifications ? `${state.unreadNotifications} unread` : 'All caught up';
+  if (!notificationListEl) return;
+  notificationListEl.innerHTML = '';
+  if (!state.notifications.length) {
+    notificationListEl.innerHTML = '<div class="notification-empty">Operational events and alerts will appear here.</div>';
+    return;
+  }
+  for (const item of [...state.notifications].reverse()) {
+    const row = document.createElement('div');
+    row.className = `notification-item ${notificationTone(item.kind)}`;
+    row.innerHTML = `<span class="notification-dot"></span><div><strong>${escapeHtml(item.label || 'GLaDOS')}</strong>` +
+      `<p>${escapeHtml(item.text)}</p><time>${new Date(item.ts).toLocaleString()}</time></div>`;
+    notificationListEl.appendChild(row);
+  }
+}
+
+function pushNotification(kind, text, { toast = false, label = null, unread = true } = {}) {
+  const item = { id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, kind, text: String(text), label, ts: Date.now() };
+  state.notifications.push(item);
+  if (unread && notificationDrawerEl?.getAttribute('aria-hidden') !== 'false') state.unreadNotifications++;
+  persistNotifications();
+  renderNotifications();
+  if (toast) showToast(text, { kind, label });
+  return item;
+}
+
+function showToast(text, { kind = 'info', label = null, timeoutMs = 5000 } = {}) {
+  const region = document.getElementById('toast-region');
+  if (!region) return;
+  const toast = document.createElement('div');
+  toast.className = `toast ${notificationTone(kind)}`;
+  toast.innerHTML = `<span class="toast-mark"></span><div>${label ? `<strong>${escapeHtml(label)}</strong>` : ''}<p>${escapeHtml(text)}</p></div>` +
+    '<button type="button" aria-label="Dismiss notification">×</button>';
+  const remove = () => toast.remove();
+  toast.querySelector('button').addEventListener('click', remove);
+  region.appendChild(toast);
+  setTimeout(remove, timeoutMs);
+}
+
+function showDialog({ title, message, confirmLabel = 'OK', cancelLabel = null, danger = false, detail = false }) {
+  return new Promise(resolve => {
+    const root = document.getElementById('modal-root');
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `<section class="app-modal" role="dialog" aria-modal="true" aria-labelledby="app-modal-title">` +
+      `<header><h2 id="app-modal-title">${escapeHtml(title)}</h2><button type="button" data-modal-close aria-label="Close">×</button></header>` +
+      `<div class="app-modal-copy ${detail ? 'detail' : ''}">${detail ? `<pre>${escapeHtml(message)}</pre>` : `<p>${escapeHtml(message)}</p>`}</div>` +
+      `<footer>${cancelLabel ? `<button type="button" data-modal-cancel>${escapeHtml(cancelLabel)}</button>` : ''}` +
+      `<button type="button" data-modal-confirm class="${danger ? 'danger' : 'safe'}">${escapeHtml(confirmLabel)}</button></footer></section>`;
+    const finish = value => { backdrop.remove(); resolve(value); };
+    backdrop.querySelector('[data-modal-close]').addEventListener('click', () => finish(false));
+    backdrop.querySelector('[data-modal-cancel]')?.addEventListener('click', () => finish(false));
+    backdrop.querySelector('[data-modal-confirm]').addEventListener('click', () => finish(true));
+    backdrop.addEventListener('click', event => { if (event.target === backdrop) finish(false); });
+    root.replaceChildren(backdrop);
+    backdrop.querySelector('[data-modal-confirm]').focus();
+  });
+}
+
+function confirmAction({ title, message, confirmLabel = 'Continue', danger = false }) {
+  return showDialog({ title, message, confirmLabel, cancelLabel: 'Cancel', danger });
+}
+
+function openNotificationDrawer(open = true) {
+  if (!notificationDrawerEl) return;
+  notificationDrawerEl.setAttribute('aria-hidden', open ? 'false' : 'true');
+  notificationDrawerEl.inert = !open;
+  notificationDrawerEl.classList.toggle('open', open);
+  if (open) {
+    state.unreadNotifications = 0;
+    renderNotifications();
+  }
+}
 
 errorsOnlyEl.addEventListener('change', () => {
   document.body.classList.toggle('errors-only', errorsOnlyEl.checked);
@@ -28,71 +146,150 @@ function applyDebugMode() {
 debugModeEl.addEventListener('change', applyDebugMode);
 applyDebugMode();
 
-function selectedAgentForControls() {
-  const tabId = state.currentTab;
-  const tab = state.openTabs.find(t => t.id === tabId);
-  if (tab?.kind === 'chat') return 'glados';
-  if (tab?.kind === 'agent') return tab.id;
-  return null;
+function setAgentHaltedState(agentId, halted) {
+  const agent = state.agents.find(entry => entry.id === agentId);
+  if (agent) agent.halted = !!halted;
+  renderAgentList();
+  syncAgentViewToolbars(agentId);
 }
 
-function syncOperationControls() {
-  const haltBtn = document.getElementById('halt-one');
-  const resumeBtn = document.getElementById('resume-one');
-  const resetBtn = document.getElementById('reset-session');
-  const agentId = selectedAgentForControls();
-  const selected = state.agents.find(agent => agent.id === agentId);
-  if (haltBtn) haltBtn.disabled = !agentId || !!selected?.halted;
-  if (resumeBtn) resumeBtn.disabled = !agentId || !selected?.halted;
-  if (resetBtn) resetBtn.disabled = !agentId;
+function syncAgentViewToolbars(agentId = null) {
+  document.querySelectorAll('.agent-view-toolbar').forEach(toolbar => {
+    const id = toolbar.dataset.agentId;
+    if (agentId && id !== agentId) return;
+    const agent = state.agents.find(entry => entry.id === id);
+    const halted = !!agent?.halted;
+    const active = state.active.has(id);
+    const status = toolbar.querySelector('.agent-runtime-status');
+    if (status) {
+      status.className = `agent-runtime-status ${halted ? 'halted' : (active ? 'running' : 'idle')}`;
+      status.textContent = halted ? 'Halted' : (active ? 'Running' : 'Idle');
+    }
+    const halt = toolbar.querySelector('[data-agent-action="halt"]');
+    const resume = toolbar.querySelector('[data-agent-action="resume"]');
+    if (halt) halt.disabled = halted;
+    if (resume) resume.disabled = !halted;
+    toolbar.querySelector('.agent-actions')?.classList.toggle('halted', halted);
+  });
 }
 
-async function fetchJson(url, { timeoutMs = 10000, ...options } = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+function createAgentViewToolbar(agentId) {
+  const toolbar = document.createElement('div');
+  toolbar.className = 'agent-view-toolbar';
+  toolbar.dataset.agentId = agentId;
+  const resetLabel = agentId === 'glados' ? 'Reset investigation' : 'Reset session';
+  toolbar.innerHTML = `
+    <div class="agent-view-identity">
+      <strong>${escapeHtml(agentId === 'glados' ? 'GLaDOS' : agentId)}</strong>
+      <span class="agent-runtime-status idle">Idle</span>
+    </div>
+    <details class="agent-actions">
+      <summary>Actions</summary>
+      <div class="agent-actions-menu" role="menu" aria-label="${escapeHtml(agentId)} actions">
+        <button type="button" class="danger" data-agent-action="halt" role="menuitem">Halt agent</button>
+        <button type="button" data-agent-action="resume" role="menuitem">Resume agent</button>
+        <div class="agent-actions-separator"></div>
+        <button type="button" data-agent-action="reset" role="menuitem">${resetLabel}</button>
+      </div>
+    </details>`;
+  const details = toolbar.querySelector('.agent-actions');
+  toolbar.querySelector('[data-agent-action="halt"]').addEventListener('click', async () => {
+    details.open = false;
+    await handleHaltAgent(agentId);
+  });
+  toolbar.querySelector('[data-agent-action="resume"]').addEventListener('click', async () => {
+    details.open = false;
+    await handleResumeAgent(agentId);
+  });
+  toolbar.querySelector('[data-agent-action="reset"]').addEventListener('click', async () => {
+    details.open = false;
+    await handleResetAgentSession(agentId);
+  });
+  return toolbar;
+}
+
+document.addEventListener('click', event => {
+  document.querySelectorAll('details.agent-actions[open]').forEach(details => {
+    if (!details.contains(event.target)) details.open = false;
+  });
+});
+
+async function fetchJson(url, { timeoutMs = 10000, retries = 0, ...options } = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
+      return json;
+    } catch (e) {
+      lastError = e?.name === 'AbortError'
+        ? new Error(`timed out loading ${url}`)
+        : e;
+      if (attempt >= retries) throw lastError;
+      // Yield before retrying so a transcript burst cannot monopolize the UI
+      // task queue and immediately starve the replacement request as well.
+      await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError || new Error(`failed loading ${url}`);
+}
+
+async function handleHaltAgent(agentId) {
   try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    const json = await res.json();
-    if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
-    return json;
-  } catch (e) {
-    if (e?.name === 'AbortError') throw new Error(`timed out loading ${url}`);
-    throw e;
-  } finally {
-    clearTimeout(timer);
+    const result = await fetchJson('/api/halt/' + encodeURIComponent(agentId), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: `operator halt from ${agentId} agent view` }),
+    });
+    setAgentHaltedState(agentId, true);
+    logEvent('ended', `halted ${agentId}${result.interruptedParent ? `; interrupted ${result.interruptedParent}` : ''}`);
+    pushNotification('halt', `${agentId} was halted. GLaDOS has been notified.`, { toast: true, label: 'Agent halted' });
+  } catch (error) {
+    pushNotification('error', `Could not halt ${agentId}: ${error.message}`, { toast: true, label: 'Halt failed' });
   }
 }
 
-async function handleHaltSelectedAgent() {
-  const agentId = selectedAgentForControls();
-  if (!agentId) return;
-  const r = await fetch('/api/halt/' + encodeURIComponent(agentId), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ reason: 'dashboard halt' }),
-  });
-  const j = await r.json();
-  logEvent('ended', `halt ${agentId} -> ${j.ok ? 'ok' : (j.error || 'error')}`);
-  await loadAgents();
-  syncOperationControls();
+async function handleResumeAgent(agentId) {
+  try {
+    const result = await fetchJson('/api/resume/' + encodeURIComponent(agentId), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    setAgentHaltedState(agentId, false);
+    logEvent('started', `resumed ${agentId}${result.continuationScheduled ? '; saved work queued through GLaDOS' : ''}`);
+    pushNotification('resume', `${agentId} resumed${result.continuationScheduled ? ' and its saved task was queued through GLaDOS' : ''}.`, { toast: true, label: 'Agent resumed' });
+  } catch (error) {
+    pushNotification('error', `Could not resume ${agentId}: ${error.message}`, { toast: true, label: 'Resume failed' });
+  }
 }
 
-async function handleResumeSelectedAgent() {
-  const agentId = selectedAgentForControls();
-  if (!agentId) return;
-  const r = await fetch('/api/resume/' + encodeURIComponent(agentId), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: '{}',
-  });
-  const j = await r.json();
-  logEvent('started', `resume ${agentId} -> ${j.ok ? 'ok' : (j.error || 'error')}`);
-  await loadAgents();
-  syncOperationControls();
+let lastRuntimeSurfaceRefresh = null;
+
+function applyRuntimeSurfaceRefresh(info = {}) {
+  if (info.refreshId && info.refreshId === lastRuntimeSurfaceRefresh) return;
+  if (info.refreshId) lastRuntimeSurfaceRefresh = info.refreshId;
+  if (info.proxyReset) clearProxyClientState();
+  if (info.plansReset || info.blackboardReset) clearPlanClientState();
+  const kind = state.openTabs.find(tab => tab.id === state.currentTab)?.kind;
+  if ((info.proxyReset && kind === 'proxy')
+      || ((info.plansReset || info.blackboardReset) && kind === 'plans')
+      || (info.blackboardReset && kind === 'overview')) renderPane();
+  if (info.plansReset) refreshPlansBadge();
 }
 
 async function handleRefreshRuntime() {
-  if (!confirm('Restart the local Agent SDK runtime state? This stops in-flight turns and clears every agent transcript/chat pane.')) return;
+  if (!await confirmAction({
+    title: 'Refresh runtime',
+    message: 'Refresh the local runtime? This stops in-flight turns and clears every agent transcript plus all blackboard engagement, finding, task, recon, plan, and Proxy capture/history rows. Evidence files and exported reports are kept.',
+    confirmLabel: 'Refresh runtime',
+    danger: true,
+  })) return;
   const btn = document.getElementById('refresh-runtime');
   const orig = btn?.textContent || 'Refresh runtime';
   if (btn) { btn.disabled = true; btn.textContent = 'Refreshing...'; }
@@ -100,25 +297,24 @@ async function handleRefreshRuntime() {
     const r = await fetch('/api/gateway/restart', { method: 'POST' });
     const j = await r.json();
     if (!j.ok) throw new Error(j.error || 'refresh failed');
+    applyRuntimeSurfaceRefresh(j);
     if (btn) {
       btn.textContent = 'Refreshed';
       setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1500);
     }
   } catch (e) {
-    alert('runtime refresh failed: ' + e.message);
+    pushNotification('error', 'Runtime refresh failed: ' + e.message, { toast: true, label: 'Runtime' });
     if (btn) { btn.textContent = orig; btn.disabled = false; }
   }
 }
 
-async function handleResetSession() {
-  const tabId = state.currentTab;
-  const tab = state.openTabs.find(t => t.id === tabId);
-  const agentId = selectedAgentForControls();
-  if (!agentId) { alert('Select an agent or GLaDOS chat tab first.'); return; }
+async function handleResetAgentSession(agentId) {
+  const tabId = tabIdForAgent(agentId);
+  const resetLabel = agentId === 'glados' ? 'Reset investigation' : 'Reset session';
   const resetMsg = agentId === 'glados'
     ? 'Clear the current GLaDOS transcript state and every assessment agent transcript, wipe the blackboard (engagements, findings, tasks, plans, recon state), AND clear short-term memory caches (memory/.dreams/) for every agent? Curated MEMORY.md, evidence files, and exported reports are kept. The next message starts a fresh investigation.'
     : `Clear the current transcript state for "${agentId}"? The next message starts fresh.`;
-  if (!confirm(resetMsg)) return;
+  if (!await confirmAction({ title: resetLabel, message: resetMsg, confirmLabel: resetLabel, danger: true })) return;
   try {
     const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/reset-session`, { method: 'POST' });
     const j = await r.json();
@@ -129,16 +325,12 @@ async function handleResetSession() {
       state.transcripts.delete(tabId);
     }
     renderPane();
-  } catch (e) { alert('reset-session failed: ' + e.message); }
+  } catch (e) { pushNotification('error', 'Reset failed: ' + e.message, { toast: true, label: agentId }); }
 }
 
 function wireOperationControls(root = document) {
   root.querySelector('#update-app')?.addEventListener('click', () => openUpdatePane({ autoStart: true }));
   root.querySelector('#refresh-runtime')?.addEventListener('click', handleRefreshRuntime);
-  root.querySelector('#reset-session')?.addEventListener('click', handleResetSession);
-  root.querySelector('#halt-one')?.addEventListener('click', handleHaltSelectedAgent);
-  root.querySelector('#resume-one')?.addEventListener('click', handleResumeSelectedAgent);
-  syncOperationControls();
 }
 
 async function loadAgents() {
@@ -153,27 +345,62 @@ async function loadAgents() {
   for (const a of state.agents) {
     if (!a.active || a.id === 'glados' ) continue;
     if (state.openTabs.find(t => t.id === a.id)) continue;
-    // If the lobby SSE missed session-started, polling still notices the live
-    // agent and opens/subscribes to its transcript. First load also subscribes
-    // to any already-running agents before GLaDOS becomes the active tab.
-    if (!state.agentsLoadedOnce || !previouslyActive.has(a.id)) openAgentTab(a.id);
+    // If the lobby SSE missed session-started, polling still creates the live
+    // agent's tab. Durable transcript backfill catches it up when opened.
+    if (!state.agentsLoadedOnce || !previouslyActive.has(a.id)) ensureAgentTab(a.id);
   }
   state.agentsLoadedOnce = true;
   renderAgentList();
+  syncAgentViewToolbars();
 }
 
 
 function renderAgentList() {
   agentListEl.innerHTML = '';
-  for (const a of state.agents) {
-    if (a.id === 'glados') continue;
+  const query = state.agentQuery.trim().toLowerCase();
+  const filtered = state.agents.filter(a => {
+    if (a.id === 'glados') return false;
+    if (query && !`${a.id} ${a.name || ''} ${a.model || ''}`.toLowerCase().includes(query)) return false;
+    if (state.agentFilter === 'active' && !state.active.has(a.id)) return false;
+    if (state.agentFilter === 'halted' && !a.halted) return false;
+    return true;
+  });
+  const groups = [
+    ['Needs attention', filtered.filter(a => a.halted)],
+    ['Running', filtered.filter(a => state.active.has(a.id) && !a.halted)],
+    ['Available', filtered.filter(a => !state.active.has(a.id) && !a.halted)],
+  ];
+  for (const [label, agents] of groups) {
+    if (!agents.length) continue;
+    const group = document.createElement('li');
+    group.className = 'agent-group-label';
+    group.innerHTML = `<span>${label}</span><span>${agents.length}</span>`;
+    agentListEl.appendChild(group);
+    for (const a of agents) {
     const li = document.createElement('li');
     li.dataset.id = a.id;
-    li.className = (state.active.has(a.id) ? 'live ' : '') + (state.currentTab === a.id ? 'active' : '');
-    li.innerHTML = `<span class="dot"></span><span class="name">${a.id}</span>`;
+    li.tabIndex = 0;
+    li.className = (state.active.has(a.id) ? 'live ' : '') + (a.halted ? 'halted ' : '') + (state.currentTab === a.id ? 'active' : '');
+    li.innerHTML = `<span class="dot"></span><span class="name">${escapeHtml(a.id)}</span>` +
+      `<span class="agent-row-state">${a.halted ? 'halted' : (state.active.has(a.id) ? 'live' : '')}</span>`;
     li.addEventListener('click', () => openAgentTab(a.id));
+    li.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') openAgentTab(a.id); });
     agentListEl.appendChild(li);
+    }
   }
+  if (!filtered.length) {
+    const empty = document.createElement('li');
+    empty.className = 'agent-list-empty';
+    empty.textContent = query ? 'No matching agents' : 'No agents in this view';
+    agentListEl.appendChild(empty);
+  }
+  syncAgentViewToolbars();
+}
+
+function openOverview() {
+  const id = 'overview';
+  if (!state.openTabs.find(t => t.id === id)) state.openTabs.unshift({ id, kind: 'overview', label: 'Overview' });
+  setCurrentTab(id);
 }
 
 function openGladosChat() {
@@ -189,11 +416,17 @@ function openAgentTab(agentId) {
     openGladosChat();
     return;
   }
-  const id = agentId;
-  if (!state.openTabs.find(t => t.id === id)) {
-    state.openTabs.push({ id, kind: 'agent', label: agentId });
-  }
-  setCurrentTab(id);
+  ensureAgentTab(agentId);
+  setCurrentTab(agentId);
+}
+
+// Runtime events may create a work tab, but must never steal focus from an
+// operator reading Overview, Reports, Proxy, or another agent transcript.
+function ensureAgentTab(agentId) {
+  if (!agentId || agentId === 'glados' || state.openTabs.find(t => t.id === agentId)) return;
+  state.openTabs.push({ id: agentId, kind: 'agent', label: agentId });
+  renderTabs();
+  persistWorkspaceState();
 }
 
 function closeTab(id) {
@@ -206,6 +439,7 @@ function closeTab(id) {
   }
   renderTabs();
   renderPane();
+  persistWorkspaceState();
 }
 
 function tabIdForAgent(agentId) {
@@ -242,8 +476,23 @@ function setCurrentTab(id) {
   state.currentTab = id;
   renderTabs();
   renderAgentList();
+  updateWorkspaceNav();
   renderPane();
-  syncOperationControls();
+  persistWorkspaceState();
+}
+
+function updateWorkspaceNav() {
+  const mapping = {
+    overview: 'open-overview',
+    'glados-chat': 'open-glados',
+    plans: 'open-plans',
+    reports: 'open-reports',
+    terminal: 'open-terminal',
+    proxy: 'open-proxy',
+    settings: 'open-settings',
+  };
+  document.querySelectorAll('.workspace-links a').forEach(link => link.classList.remove('nav-active'));
+  document.getElementById(mapping[state.currentTab])?.classList.add('nav-active');
 }
 
 function renderTabs() {
@@ -308,12 +557,13 @@ function renderPane() {
   paneEl.innerHTML = '';
   const id = state.currentTab;
   if (!id) {
-    paneEl.innerHTML = '<div class="pane-empty">Select an agent tab or start chatting with GLaDOS.</div>';
+    paneEl.innerHTML = '<div class="pane-empty">Open Overview or start chatting with GLaDOS.</div>';
     return;
   }
   const tab = state.openTabs.find(t => t.id === id);
   if (!tab) return;
-  if (tab.kind === 'chat') renderChatPane();
+  if (tab.kind === 'overview') renderOverviewPane();
+  else if (tab.kind === 'chat') renderChatPane();
   else if (tab.kind === 'plans') renderPlansPane();
   else if (tab.kind === 'reports') renderReportsPane();
   else if (tab.kind === 'settings') renderSettingsPane();
@@ -321,6 +571,350 @@ function renderPane() {
   else if (tab.kind === 'proxy') renderProxyPane();
   else if (tab.kind === 'update') renderUpdatePane();
   else renderAgentPane(id);
+}
+
+function overviewScopeText(scope) {
+  if (!scope) return 'No explicit scope is recorded yet.';
+  if (typeof scope === 'string') return scope;
+  const included = scope.include || scope.in_scope || scope.targets || scope.allowed || [];
+  const excluded = scope.exclude || scope.out_of_scope || scope.denied || [];
+  const parts = [];
+  if (included.length) parts.push(`In scope: ${included.join(', ')}`);
+  if (excluded.length) parts.push(`Excluded: ${excluded.join(', ')}`);
+  return parts.join('\n') || JSON.stringify(scope, null, 2);
+}
+
+function overviewStatusClass(value) {
+  const text = String(value || '').toLowerCase();
+  if (/halt|fail|critical|offline|unhealthy/.test(text)) return 'danger';
+  if (/pending|await|stale|approval/.test(text)) return 'warning';
+  if (/active|running|healthy|execution|complete/.test(text)) return 'success';
+  return 'neutral';
+}
+
+function overviewProgress(tasks = {}) {
+  const total = Number(tasks.total) || 0;
+  const terminal = (Number(tasks.complete) || 0) + (Number(tasks.failed) || 0) + (Number(tasks.cancelled) || 0);
+  return {
+    total,
+    terminal,
+    percent: total > 0 ? Math.min(100, Math.round((terminal / total) * 100)) : 0,
+  };
+}
+
+function renderOverviewFindings(findings = []) {
+  if (!findings.length) return '<div class="overview-empty">No findings have been recorded for this engagement.</div>';
+  return `<div class="overview-finding-list">${findings.map(finding => `
+    <button type="button" class="overview-finding-row" data-overview-reports title="Open reports">
+      <span class="finding-rank ${overviewStatusClass(finding.severity)}">${escapeHtml(finding.severity || 'info')}</span>
+      <span class="finding-copy"><strong>${escapeHtml(finding.title || `Finding #${finding.id}`)}</strong><small>${escapeHtml([finding.cwe, finding.component].filter(Boolean).join(' · '))}</small></span>
+      <span class="finding-score">${finding.cvss == null ? '—' : escapeHtml(Number(finding.cvss).toFixed(1))}<small>${escapeHtml(finding.validationStatus || 'pending')}</small></span>
+    </button>`).join('')}</div>`;
+}
+
+function renderOverviewPlan(plan) {
+  if (!plan) return '<div class="overview-empty">No plan has been synthesized yet.</div>';
+  const vectors = plan.vectors || [];
+  return `<div class="overview-plan-card">
+    <div class="overview-plan-meta"><span class="status-chip ${overviewStatusClass(plan.state)}">${escapeHtml(plan.state?.replaceAll('_', ' ') || 'unknown')}</span><strong>Plan v${escapeHtml(plan.version)}</strong></div>
+    <p>${escapeHtml(plan.objective || 'Review the approved vectors and current evidence.')}</p>
+    ${vectors.length ? `<div class="overview-plan-vectors">${vectors.map(vector => `<span>${escapeHtml(vector.cwe || 'Vector')} · ${escapeHtml(vector.risk || 'risk pending')}</span>`).join('')}</div>` : ''}
+    ${plan.agentChain?.length ? `<small>Agent chain: ${escapeHtml(plan.agentChain.join(' → '))}</small>` : ''}
+    <button type="button" data-overview-plans>Open plan</button>
+  </div>`;
+}
+
+function renderOverviewProgress(tasks = {}, phase = 'Standby') {
+  const progress = overviewProgress(tasks);
+  return `<div class="overview-progress-card">
+    <div class="overview-progress-value"><strong>${progress.percent}%</strong><span>${escapeHtml(phase)}</span></div>
+    <div class="overview-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress.percent}"><span style="width:${progress.percent}%"></span></div>
+    <p>${progress.terminal} of ${progress.total} tracked tasks are terminal.</p>
+    <div class="overview-progress-breakdown">
+      <span><strong>${Number(tasks.complete) || 0}</strong> complete</span>
+      <span><strong>${Number(tasks.running) || 0}</strong> running</span>
+      <span><strong>${Number(tasks.pending) || 0}</strong> pending</span>
+      <span><strong>${Number(tasks.failed) || 0}</strong> failed</span>
+      <span><strong>${Number(tasks.cancelled) || 0}</strong> cancelled</span>
+    </div>
+  </div>`;
+}
+
+function formatUsageCurrency(value) {
+  return new Intl.NumberFormat(undefined, {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Number(value) || 0);
+}
+
+function formatUsageNumber(value) {
+  return new Intl.NumberFormat(undefined, {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(Number(value) || 0);
+}
+
+function formatUsageInteger(value) {
+  return new Intl.NumberFormat().format(Number(value) || 0);
+}
+
+function usageMetricValue(model, metric) {
+  if (metric === 'tokens') return Number(model.totalTokens) || 0;
+  if (metric === 'requests') return Number(model.requests) || 0;
+  return Number(model.spend) || 0;
+}
+
+function formatUsageMetric(value, metric) {
+  if (metric === 'spend') return formatUsageCurrency(value);
+  if (metric === 'requests') return `${formatUsageInteger(value)} req`;
+  return `${formatUsageNumber(value)} tokens`;
+}
+
+function renderUsageModelRows(usage, metric = 'spend') {
+  const models = [...(usage?.models || [])].sort((a, b) => usageMetricValue(b, metric) - usageMetricValue(a, metric));
+  const total = metric === 'tokens'
+    ? Number(usage?.totals?.totalTokens) || 0
+    : metric === 'requests'
+      ? Number(usage?.totals?.requests) || 0
+      : Number(usage?.totals?.spend) || 0;
+  if (!models.length) return '<div class="overview-empty">No model activity was recorded in this window.</div>';
+  return models.map(model => {
+    const value = usageMetricValue(model, metric);
+    const share = total > 0 ? value / total : 0;
+    const width = value > 0 ? Math.max(1, Math.min(100, share * 100)) : 0;
+    return `<div class="usage-model-row">
+      <div class="usage-model-label"><strong>${escapeHtml(model.name)}</strong><small>${formatUsageMetric(value, metric)} · ${(share * 100).toFixed(1)}%</small></div>
+      <div class="usage-bar" aria-label="${escapeHtml(model.name)} ${(share * 100).toFixed(1)} percent"><span style="width:${width.toFixed(2)}%"></span></div>
+    </div>`;
+  }).join('');
+}
+
+function renderLiteLlmUsage(usage, metric = 'spend') {
+  if (!usage?.available) {
+    return `<section class="overview-section overview-usage">
+      <div class="overview-section-head"><div><h2>LLM usage</h2><p>Last seven days from LiteLLM</p></div><span class="status-chip warning">Unavailable</span></div>
+      <div class="usage-unavailable"><strong>Usage metrics unavailable</strong><span>${escapeHtml(usage?.message || 'No reporting data is available.')}</span></div>
+    </section>`;
+  }
+  const totals = usage.totals || {};
+  const daily = usage.daily || [];
+  const maxDailySpend = Math.max(0, ...daily.map(day => Number(day.spend) || 0));
+  const failureRate = totals.requests > 0 ? (totals.failedRequests / totals.requests) * 100 : 0;
+  const fetchedAt = usage.fetchedAt ? new Date(usage.fetchedAt).toLocaleTimeString() : 'just now';
+  return `<section class="overview-section overview-usage">
+    <div class="overview-section-head">
+      <div><h2>LLM usage</h2><p>${escapeHtml(usage.period?.startDate || '')} to ${escapeHtml(usage.period?.endDate || '')} · reporting key scope</p></div>
+      <span class="overview-updated">Synced ${escapeHtml(fetchedAt)}</span>
+    </div>
+    <div class="overview-usage-summary">
+      <div><span>Spend</span><strong>${formatUsageCurrency(totals.spend)}</strong><small>Seven-day gateway cost</small></div>
+      <div><span>Tokens</span><strong>${formatUsageNumber(totals.totalTokens)}</strong><small>${formatUsageNumber(totals.promptTokens)} input · ${formatUsageNumber(totals.completionTokens)} output</small></div>
+      <div><span>Requests</span><strong>${formatUsageInteger(totals.requests)}</strong><small>${formatUsageInteger(totals.successfulRequests)} successful</small></div>
+      <div><span>Failures</span><strong>${formatUsageInteger(totals.failedRequests)}</strong><small>${failureRate.toFixed(1)}% of requests</small></div>
+    </div>
+    <div class="overview-usage-body">
+      <div class="usage-daily">
+        <div class="usage-subhead"><strong>Daily spend</strong><span>Tokens shown at right</span></div>
+        ${daily.map(day => {
+          const width = maxDailySpend > 0 ? (Number(day.spend) / maxDailySpend) * 100 : 0;
+          const label = new Date(`${day.date}T12:00:00Z`).toLocaleDateString(undefined, { weekday: 'short' });
+          return `<div class="usage-daily-row">
+            <span>${escapeHtml(label)}</span>
+            <div class="usage-bar"><span style="width:${Math.max(0, width).toFixed(2)}%"></span></div>
+            <strong>${formatUsageCurrency(day.spend)}</strong>
+            <small>${formatUsageNumber(day.totalTokens)}</small>
+          </div>`;
+        }).join('')}
+      </div>
+      <div class="usage-models">
+        <div class="usage-subhead">
+          <strong>Model distribution</strong>
+          <div class="usage-segments" role="tablist" aria-label="Model distribution metric">
+            ${['spend', 'tokens', 'requests'].map(name => `<button type="button" role="tab" data-usage-share="${name}" aria-selected="${name === metric}" class="${name === metric ? 'active' : ''}">${name[0].toUpperCase()}${name.slice(1)}</button>`).join('')}
+          </div>
+        </div>
+        <div data-usage-model-list>${renderUsageModelRows(usage, metric)}</div>
+      </div>
+    </div>
+  </section>`;
+}
+
+async function renderOverviewPane() {
+  const wrap = document.createElement('div');
+  wrap.className = 'overview-pane';
+  wrap.innerHTML = '<div class="overview-loading">Loading operational state…</div>';
+  paneEl.appendChild(wrap);
+  let usageShareMetric = 'spend';
+
+  const load = async ({ forceUsage = false } = {}) => {
+    if (load.inFlight) {
+      const pending = load.inFlight;
+      await pending.catch(() => {});
+      if (load.inFlight === pending) load.inFlight = null;
+      if (forceUsage && wrap.isConnected) return load({ forceUsage: true });
+      return;
+    }
+    const run = (async () => {
+    const refreshButton = wrap.querySelector('[data-overview-refresh]');
+    if (forceUsage && refreshButton) {
+      refreshButton.disabled = true;
+      refreshButton.textContent = 'Refreshing…';
+    }
+    try {
+      const data = await fetchJson(`/api/overview${forceUsage ? '?usage=refresh' : ''}`, {
+        timeoutMs: 15000,
+        retries: 1,
+        cache: 'no-store',
+      });
+      state.overview = data;
+      if (!wrap.isConnected) return;
+      const engagement = data.engagement;
+      const active = data.activeAgents || [];
+      const halted = data.haltedAgents || [];
+      const agentRows = [...halted, ...active.filter(agent => !agent.halted)];
+      const targetState = data.targetHealth?.state || (engagement ? 'not probed' : 'standby');
+      const assessmentMetering = data.assessmentMetrics?.metering || {};
+      const assessmentTiming = data.assessmentMetrics?.timing || {};
+      const assessmentCost = assessmentMetering.costAvailable
+        ? formatUsageCurrency(assessmentMetering.costUsd)
+        : 'Unavailable';
+      const assessmentTokens = assessmentMetering.tokensAvailable
+        ? formatUsageNumber(assessmentMetering.tokens?.totalTokens)
+        : 'Unavailable';
+      const canEndInvestigation = engagement
+        && !['cancelled', 'complete', 'completed', 'closed'].includes(String(engagement.status || '').toLowerCase());
+      const nextAction = data.pendingApprovals
+        ? 'Review and approve the current attack plan before phase-gated tools can run.'
+        : halted.length
+          ? `Review ${halted.length} halted agent${halted.length === 1 ? '' : 's'} and resume only when the task is safe to continue.`
+          : active.length
+            ? 'Monitor active specialists and review their evidence as results arrive.'
+            : engagement
+              ? 'Send the next objective to GLaDOS or inspect the current plan.'
+              : 'Start with /investigate <target> in GLaDOS Chat when an authorized engagement is ready.';
+      wrap.innerHTML = `
+        <header class="overview-header">
+          <div>
+            <span class="overview-eyebrow">Operational overview</span>
+            <h1>${escapeHtml(engagement?.target || 'No active engagement')}</h1>
+            <div class="overview-status-line">
+              <span class="status-chip ${overviewStatusClass(data.phase)}">${escapeHtml(data.phase)}</span>
+              <span class="status-chip ${overviewStatusClass(targetState)}">Target ${escapeHtml(targetState)}</span>
+              <span class="overview-updated">Updated ${new Date(data.generatedAt).toLocaleTimeString()}</span>
+            </div>
+          </div>
+          <div class="overview-header-actions">
+            <button type="button" data-overview-chat>Open GLaDOS</button>
+            <button type="button" data-overview-refresh title="Refresh operational state">Refresh</button>
+            ${canEndInvestigation ? '<button type="button" class="danger" data-overview-end>End Investigation</button>' : ''}
+          </div>
+        </header>
+        <section class="overview-metrics" aria-label="Engagement metrics">
+          <div><span>Agents</span><strong>${active.filter(agent => agent.id !== 'glados').length}</strong><small>${halted.length ? `${halted.length} halted` : `${(data.agents || []).filter(agent => agent.id !== 'glados').length} available`}</small></div>
+          <div><span>Approvals</span><strong>${data.pendingApprovals || 0}</strong><small>${data.plan?.state ? data.plan.state.replaceAll('_', ' ') : 'no plan'}</small></div>
+          <div><span>Findings</span><strong>${data.findings?.total || 0}</strong><small>${data.findings?.critical || 0} critical · ${data.findings?.high || 0} high</small></div>
+          <div><span>Assessment cost</span><strong class="metric-word">${escapeHtml(assessmentCost)}</strong><small>${escapeHtml(assessmentTiming.elapsedHuman || 'no active meter')}</small></div>
+          <div><span>Assessment tokens</span><strong class="metric-word">${escapeHtml(assessmentTokens)}</strong><small>${assessmentMetering.tokensAvailable ? `${assessmentMetering.resultEvents || 0} completed agent turns` : 'updates as turns complete'}</small></div>
+          <div><span>Proxy</span><strong class="metric-word ${overviewStatusClass(data.proxy?.healthy ? 'healthy' : 'offline')}">${data.proxy?.healthy ? 'Live' : 'Offline'}</strong><small>${escapeHtml(data.proxy?.backend || 'not configured')}</small></div>
+        </section>
+        ${renderLiteLlmUsage(data.llmUsage, usageShareMetric)}
+        <div class="overview-columns">
+          <section class="overview-section">
+            <div class="overview-section-head"><div><h2>Agent activity</h2><p>Running work and operator interventions</p></div></div>
+            <div class="overview-agent-list">
+              ${agentRows.length ? agentRows.map(agent => `
+                <button type="button" class="overview-agent-row" data-overview-agent="${escapeHtml(agent.id)}">
+                  <span class="dot ${agent.halted ? 'halted' : 'live'}"></span>
+                  <span><strong>${escapeHtml(agent.id)}</strong><small>${escapeHtml(agent.model || 'model not set')}</small></span>
+                  <span class="status-chip ${agent.halted ? 'danger' : 'success'}">${agent.halted ? 'Halted' : 'Running'}</span>
+                </button>`).join('') : '<div class="overview-empty">No agents are running. The team is ready for the next objective.</div>'}
+            </div>
+          </section>
+          <section class="overview-section">
+            <div class="overview-section-head"><div><h2>Next action</h2><p>${escapeHtml(data.goal?.status || 'operator controlled')}</p></div></div>
+            <div class="overview-next-action">
+              <p>${escapeHtml(nextAction)}</p>
+              <div>
+                ${data.pendingApprovals ? '<button type="button" data-overview-plans class="safe">Review plan</button>' : ''}
+                <button type="button" data-overview-proxy>Inspect traffic</button>
+              </div>
+            </div>
+          </section>
+        </div>
+        <section class="overview-section overview-operations">
+          <div class="overview-section-head"><div><h2>Investigation status</h2><p>${escapeHtml(engagement?.id || 'No engagement ID')}</p></div></div>
+          <div class="overview-operations-grid">
+            <article class="overview-operation-card overview-top-findings">
+              <div class="overview-card-head"><div><span>Priority view</span><h3>Top findings</h3></div><button type="button" data-overview-reports>View reports</button></div>
+              ${renderOverviewFindings(data.topFindings)}
+            </article>
+            <article class="overview-operation-card">
+              <div class="overview-card-head"><div><span>Current direction</span><h3>Plan</h3></div></div>
+              ${renderOverviewPlan(data.plan)}
+            </article>
+            <article class="overview-operation-card">
+              <div class="overview-card-head"><div><span>Task lifecycle</span><h3>Progress</h3></div></div>
+              ${renderOverviewProgress(data.tasks, data.phase)}
+            </article>
+          </div>
+        </section>`;
+      wrap.querySelector('[data-overview-chat]')?.addEventListener('click', openGladosChat);
+      wrap.querySelector('[data-overview-refresh]')?.addEventListener('click', () => load({ forceUsage: true }));
+      wrap.querySelector('[data-overview-end]')?.addEventListener('click', async () => {
+        const confirmed = await confirmAction({
+          title: 'End investigation',
+          message: 'Stop active agents, cancel remaining tracked work, and end this engagement without starting report generation?',
+          confirmLabel: 'End investigation',
+          danger: true,
+        });
+        if (!confirmed) return;
+        try {
+          await fetchJson(`/api/engagements/${encodeURIComponent(engagement.id)}/end`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ reason: 'operator ended investigation from Overview tab' }),
+            timeoutMs: 15_000,
+          });
+          showToast('Investigation ended. Active work was stopped and reporting was not started.', { kind: 'success', label: 'Overview' });
+          await load();
+        } catch (error) {
+          pushNotification('error', `end investigation failed: ${error.message}`, { toast: true, label: 'Overview' });
+        }
+      });
+      wrap.querySelector('[data-overview-plans]')?.addEventListener('click', openPlans);
+      wrap.querySelector('[data-overview-proxy]')?.addEventListener('click', openProxy);
+      wrap.querySelectorAll('[data-overview-reports]').forEach(button => button.addEventListener('click', openReports));
+      wrap.querySelectorAll('[data-overview-agent]').forEach(button => button.addEventListener('click', () => openAgentTab(button.dataset.overviewAgent)));
+      wrap.querySelectorAll('[data-usage-share]').forEach(button => button.addEventListener('click', () => {
+        usageShareMetric = button.dataset.usageShare;
+        wrap.querySelectorAll('[data-usage-share]').forEach(candidate => {
+          const active = candidate.dataset.usageShare === usageShareMetric;
+          candidate.classList.toggle('active', active);
+          candidate.setAttribute('aria-selected', String(active));
+        });
+        const list = wrap.querySelector('[data-usage-model-list]');
+        if (list) list.innerHTML = renderUsageModelRows(data.llmUsage, usageShareMetric);
+      }));
+    } catch (error) {
+      if (!wrap.isConnected) return;
+      wrap.innerHTML = `<div class="overview-error"><strong>Overview unavailable</strong><p>${escapeHtml(error.message)}</p><button type="button">Retry</button></div>`;
+      wrap.querySelector('button')?.addEventListener('click', load);
+    }
+    })();
+    load.inFlight = run;
+    try {
+      return await run;
+    } finally {
+      if (load.inFlight === run) load.inFlight = null;
+    }
+  };
+  await load();
+  const timer = setInterval(() => {
+    if (!wrap.isConnected) return clearInterval(timer);
+    load();
+  }, 10_000);
 }
 
 function normalizeIncomingTranscriptEvent(ev) {
@@ -358,6 +952,47 @@ function sdkResultToPromptError(ev) {
     model: ev.model || '',
     api: ev.api || '/v1/messages',
   };
+}
+
+// Long investigations can emit thousands of durable events, including tool
+// results whose full payload is hundreds of KB. Keeping every full object in
+// every hidden tab eventually blocks the browser main thread long enough for
+// unrelated workspace reads (Overview, Plans, Reports, Proxy) to time out.
+// The server remains the durable source of truth; the client keeps a bounded
+// working set and a useful preview of oversized payloads.
+const TRANSCRIPT_EVENT_LIMIT = 600;
+const TRANSCRIPT_FIELD_CHAR_LIMIT = 64 * 1024;
+
+function truncateTranscriptField(value) {
+  if (typeof value !== 'string' || value.length <= TRANSCRIPT_FIELD_CHAR_LIMIT) return value;
+  const omitted = value.length - TRANSCRIPT_FIELD_CHAR_LIMIT;
+  return `${value.slice(0, TRANSCRIPT_FIELD_CHAR_LIMIT)}\n\n[client preview truncated; ${omitted.toLocaleString()} chars remain in the durable transcript]`;
+}
+
+function compactTranscriptEvent(ev) {
+  if (!ev || typeof ev !== 'object') return ev;
+  const next = { ...ev };
+  for (const key of ['text', 'error', 'content']) {
+    if (typeof next[key] === 'string') next[key] = truncateTranscriptField(next[key]);
+  }
+  for (const key of ['arguments', 'toolInput']) {
+    const value = next[key];
+    if (!value || typeof value !== 'object') continue;
+    let serialized = '';
+    try { serialized = JSON.stringify(value); } catch { continue; }
+    if (serialized.length <= TRANSCRIPT_FIELD_CHAR_LIMIT) continue;
+    next[key] = {
+      _clientPreviewTruncated: true,
+      originalChars: serialized.length,
+      preview: truncateTranscriptField(serialized),
+    };
+  }
+  return next;
+}
+
+function pruneTranscriptEvents(rec) {
+  if (!rec?.events || rec.events.length <= TRANSCRIPT_EVENT_LIMIT) return;
+  rec.events.splice(0, rec.events.length - TRANSCRIPT_EVENT_LIMIT);
 }
 
 // Ensure a transcript record exists for this tabId and is subscribed to the
@@ -455,6 +1090,7 @@ function ensureTranscript(tabId, agentId) {
       return;
     }
 
+    ev = compactTranscriptEvent(ev);
     const inserted = insertTranscriptEvent(rec, ev);
     if (!inserted.added) {
       if (rec.el && rec.el.isConnected && inserted.index >= 0) renderTranscriptEvents(rec);
@@ -467,6 +1103,12 @@ function ensureTranscript(tabId, agentId) {
     if (rec.el && rec.el.isConnected) {
       if (inserted.outOfOrder) renderTranscriptEvents(rec);
       else appendEntry(rec.el, ev, rec);
+    }
+    const recentOperationalEvent = !transcriptEventMs(ev) || Date.now() - transcriptEventMs(ev) < 30_000;
+    if (ev.kind === 'prompt-error' && recentOperationalEvent) {
+      pushNotification('error', `${rec.agentId}: ${ev.error || ev.text || 'LLM prompt failed'}`, { toast: true, label: 'Agent runtime' });
+    } else if (ev.kind === 'permission-denied' && recentOperationalEvent) {
+      pushNotification('denied', `${rec.agentId}: ${ev.decisionReason || ev.text || 'tool use denied'}`, { toast: true, label: 'Safety gate' });
     }
     if (rec.sending) {
       if (ev.kind === 'assistant-text' || ev.kind === 'prompt-error') {
@@ -585,6 +1227,7 @@ function insertTranscriptEvent(rec, ev) {
     }
   }
   rec.events.splice(index, 0, ev);
+  pruneTranscriptEvents(rec);
   return { added: true, duplicate: false, index, outOfOrder: index !== rec.events.length - 1 };
 }
 
@@ -967,13 +1610,14 @@ function handleStreamDelta(rec, ev) {
       } catch (_) { /* keep plain text on error */ }
     }
     if (entry.content && findEventIndexByText(rec, durableKind, entry.content) < 0) {
-      rec.events.push({
+      rec.events.push(compactTranscriptEvent({
         kind: durableKind,
         text: entry.content,
         ts: ev.ts || Date.now(),
         runId: ev.runId,
         _streamed: true,
-      });
+      }));
+      pruneTranscriptEvents(rec);
     }
     markRecentlyStreamed(rec, isThinking ? 'thinking' : 'text', entry.content);
     // Evict old stream-handles so the map can't grow unbounded over a long
@@ -1001,9 +1645,14 @@ function attachScrollTracker(container, rec) {
 }
 
 function renderAgentPane(agentId) {
+  const pane = document.createElement('div');
+  pane.className = 'agent-pane';
+  pane.appendChild(createAgentViewToolbar(agentId));
   const wrap = document.createElement('div');
   wrap.className = 'transcript';
-  paneEl.appendChild(wrap);
+  pane.appendChild(wrap);
+  paneEl.appendChild(pane);
+  syncAgentViewToolbars(agentId);
 
   const rec = ensureTranscript(agentId, agentId);
   rec.el = wrap;
@@ -1011,6 +1660,7 @@ function renderAgentPane(agentId) {
   attachScrollTracker(wrap, rec);
   for (const ev of rec.events) appendEntry(wrap, ev, rec);
   scrollToBottom(wrap, rec);
+  setTimeout(() => focusTranscriptProvenance(rec), 0);
 }
 
 // v4 — Chat input history + retry.
@@ -1132,6 +1782,7 @@ function installChatRetryContextMenu(entryEl, agentId, msg) {
 function renderChatPane() {
   const chat = document.createElement('div');
   chat.className = 'chat-pane';
+  chat.appendChild(createAgentViewToolbar('glados'));
   const transcript = document.createElement('div');
   transcript.className = 'transcript';
   const sendingEl = document.createElement('div');
@@ -1150,6 +1801,7 @@ function renderChatPane() {
   chat.appendChild(sendingEl);
   chat.appendChild(inputRow);
   paneEl.appendChild(chat);
+  syncAgentViewToolbars('glados');
 
   const tabId = 'glados-chat';
   const rec = ensureTranscript(tabId, 'glados');
@@ -1157,6 +1809,7 @@ function renderChatPane() {
   rec.autoScroll = true;
   attachScrollTracker(transcript, rec);
   for (const ev of rec.events) appendEntry(transcript, ev, rec);
+  setTimeout(() => focusTranscriptProvenance(rec), 0);
   scrollToBottom(transcript, rec);
   updateSendingIndicator(tabId);
   refreshChatTurnStatus(tabId, 'glados');
@@ -1204,12 +1857,13 @@ function renderChatPane() {
     rec.completedAt = null;
     updateSendingIndicator(tabId);
 
-    // Fire-and-forget. The assistant's response streams back via SSE as soon
-    // as the Agent SDK emits partial messages; we do not need to await the POST.
+    // The POST now durably admits the prompt and returns immediately. The
+    // potentially long Agent SDK turn continues in the server and streams via
+    // SSE, so quitting the UI cannot erase an accepted operator message.
     fetch('/api/chat/glados', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg }),
+      body: JSON.stringify({ message: msg, client_id: clientId }),
     }).then(r => r.json()).then(j => {
       if (!j.ok) {
         logEvent('ended', 'chat error: ' + (j.error || 'unknown'));
@@ -1367,14 +2021,95 @@ function enhanceMarkdownContent(container) {
   });
 }
 
+function extractEventUrl(ev) {
+  const source = ev?.arguments ?? ev?.toolInput ?? ev?.text ?? '';
+  const text = typeof source === 'string' ? source : JSON.stringify(source);
+  const matches = text.match(/https?:\/\/[^\s"'<>)}\]]+/ig) || [];
+  if (!matches.length) return null;
+  const external = matches.filter(value => {
+    try { return !['127.0.0.1', 'localhost', '::1'].includes(new URL(value).hostname); }
+    catch { return true; }
+  });
+  const candidates = external.length ? external : matches;
+  return candidates[candidates.length - 1];
+}
+
+function openRelatedTraffic(agentId, ev) {
+  const url = extractEventUrl(ev);
+  if (!url) return;
+  let host = '';
+  try { host = new URL(url).hostname; } catch { host = url; }
+  _proxyState.filterAgent = agentId || '';
+  _proxyState.filterText = host;
+  _proxyState.pendingFocus = {
+    agentId,
+    url,
+    ts: transcriptEventMs(ev) || Date.now(),
+  };
+  openProxy();
+}
+
+function focusTranscriptProvenance(rec) {
+  const focus = state.provenanceFocus;
+  if (!focus || !rec?.el || focus.agentId !== rec.agentId) return;
+  const host = (() => { try { return new URL(focus.url).hostname; } catch { return focus.url || ''; } })();
+  const candidates = [...rec.el.querySelectorAll('.entry.tool-call')];
+  if (!candidates.length) return;
+  let best = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+  let bestHasHost = false;
+  for (const node of candidates) {
+    const text = node.textContent || '';
+    const nodeTs = Number(node.dataset.eventTs || 0);
+    const hasHost = !!(host && text.includes(host));
+    const urlPenalty = hasHost ? 0 : 120_000;
+    const timePenalty = nodeTs && focus.ts ? Math.abs(nodeTs - focus.ts) : 60_000;
+    const score = urlPenalty + timePenalty;
+    if (score < bestScore) { best = node; bestScore = score; bestHasHost = hasHost; }
+  }
+  state.provenanceFocus = null;
+  if (!best || (!bestHasHost && bestScore > 240_000)) {
+    showToast(`Opened ${focus.agentId}; no matching transcript tool call was retained.`, { kind: 'warning', label: 'Related traffic' });
+    return;
+  }
+  rec.autoScroll = false;
+  best.classList.add('provenance-focus');
+  best.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  setTimeout(() => best.classList.remove('provenance-focus'), 4500);
+}
+
+function openAgentProvenance(row) {
+  const agentId = row?.agentTag;
+  if (!agentId || !state.agents.some(agent => agent.id === agentId)) {
+    showToast('This request does not have a recognized GLaDOS agent tag.', { kind: 'warning', label: 'Related transcript' });
+    return;
+  }
+  state.provenanceFocus = { agentId, url: row.url || '', ts: Number(row.ts) || Date.parse(row.ts || '') || Date.now(), proxyId: row.id };
+  if (agentId === 'glados') openGladosChat();
+  else openAgentTab(agentId);
+  for (const delay of [100, 500, 1500]) {
+    setTimeout(() => focusTranscriptProvenance(state.transcripts.get(tabIdForAgent(agentId))), delay);
+  }
+  setTimeout(() => {
+    if (!state.provenanceFocus || state.provenanceFocus.proxyId !== row.id) return;
+    state.provenanceFocus = null;
+    showToast(`Opened ${agentId}; no matching transcript tool call was retained.`, { kind: 'warning', label: 'Related traffic' });
+  }, 3000);
+}
+
 function appendEntry(container, ev, rec) {
   if (ev.kind === 'result' && !ev.isError) return;
   const el = document.createElement('div');
   const kind = ev.kind;
   const classes = ['entry', kind];
   if (kind === 'tool-result' && ev.isError) classes.push('error');
+  if (kind === 'operator-event' && ev.halted === true) classes.push('halt-event');
+  if (kind === 'operator-event' && ev.halted === false) classes.push('resume-event');
   if (ev._optimistic) classes.push('optimistic');
   el.className = classes.join(' ');
+  if (ev.id || ev.dashboardEventId) el.dataset.eventId = String(ev.id || ev.dashboardEventId);
+  el.dataset.eventTs = String(transcriptEventMs(ev) || Date.now());
+  if (ev.toolCallId || ev.toolUseId) el.dataset.toolCallId = String(ev.toolCallId || ev.toolUseId);
   // Stamp the owning agent so CSS can show "user/<agent>-input" and label the
   // assistant bubble with the agent's name ("glados", "webapp-recon", etc.).
   if (rec?.agentId) el.dataset.agent = rec.agentId;
@@ -1402,6 +2137,19 @@ function appendEntry(container, ev, rec) {
       ? JSON.stringify(ev.arguments, null, 2)
       : (ev.toolInput !== undefined ? JSON.stringify(ev.toolInput, null, 2) : '');
     el.innerHTML = `<span class="ts">${ts}</span><span class="tool-name">→ ${escapeHtml(ev.toolName || '?')}</span>${renderCollapsible(args, 'args')}`;
+    const targetUrl = extractEventUrl(ev);
+    if (targetUrl && rec?.agentId) {
+      const traffic = document.createElement('button');
+      traffic.type = 'button';
+      traffic.className = 'entry-related-action';
+      traffic.textContent = 'View related traffic';
+      traffic.title = `Open proxy traffic for ${targetUrl}`;
+      traffic.addEventListener('click', event => {
+        event.stopPropagation();
+        openRelatedTraffic(rec.agentId, ev);
+      });
+      el.appendChild(traffic);
+    }
   } else if (kind === 'tool-result') {
     const header = ev.isError ? '✗ error' : '← result';
     const extra = (ev.exitCode !== undefined ? ` exit=${ev.exitCode}` : '') +
@@ -1433,6 +2181,10 @@ function appendEntry(container, ev, rec) {
     }
   } else if (kind === 'meta') {
     el.innerHTML = `<span class="ts">${ts}</span>${escapeHtml(JSON.stringify(ev))}`;
+  } else if (kind === 'operator-event') {
+    const label = ev.halted === true ? 'Operator halt' : (ev.halted === false ? 'Operator resume' : 'Operator action');
+    el.innerHTML = `<span class="ts">${ts}</span><span class="operator-event-label">${label}</span>` +
+      `<span>${escapeHtml(ev.text || '')}</span>`;
   } else if (kind === 'harness-init') {
     const serverText = Array.isArray(ev.mcpServers)
       ? ev.mcpServers.map(s => `${s.name}:${s.status || 'unknown'}`).join(' ')
@@ -1472,6 +2224,9 @@ function appendEntry(container, ev, rec) {
   }
 
   container.appendChild(el);
+  if (kind === 'tool-call' && state.provenanceFocus?.agentId === rec?.agentId) {
+    setTimeout(() => focusTranscriptProvenance(rec), 0);
+  }
   if (rec?.autoScroll !== false) scheduleStickyScroll(container, rec);
 }
 
@@ -1504,11 +2259,12 @@ function logEvent(kind, text) {
   eventsEl.appendChild(el);
   while (eventsEl.children.length > 200) eventsEl.removeChild(eventsEl.firstChild);
   eventsEl.scrollTop = eventsEl.scrollHeight;
+  pushNotification(kind, text, { unread: true });
 }
 
 // Proxy health banner. Startup only warns when the selected proxy backend
 // reports a real problem.
-const healthBannerState = { dismissedSig: null, lastSig: null };
+const healthBannerState = { dismissedSig: null, lastSig: null, notifiedSig: null };
 async function refreshHealthBanner() {
   const banner = document.getElementById('health-banner');
   const msg = document.getElementById('health-banner-msg');
@@ -1520,12 +2276,17 @@ async function refreshHealthBanner() {
   } catch {
     banner.classList.remove('hidden');
     msg.textContent = 'Dashboard cannot reach its own health endpoint';
+    if (healthBannerState.notifiedSig !== 'dashboard-health-unreachable') {
+      healthBannerState.notifiedSig = 'dashboard-health-unreachable';
+      pushNotification('offline', msg.textContent, { toast: true, label: 'System health' });
+    }
     return;
   }
 
   if (data.healthy && !data.stale) {
     banner.classList.add('hidden');
     healthBannerState.lastSig = 'ok';
+    healthBannerState.notifiedSig = null;
     return;
   }
 
@@ -1539,6 +2300,10 @@ async function refreshHealthBanner() {
 
   msg.textContent = `Proxy health (${backend}): ${issues.join(' · ') || 'unknown failure'}`;
   banner.classList.remove('hidden');
+  if (sig && healthBannerState.notifiedSig !== sig) {
+    healthBannerState.notifiedSig = sig;
+    pushNotification('offline', msg.textContent, { toast: true, label: 'Proxy health' });
+  }
 }
 
 function setupHealthBanner() {
@@ -1549,8 +2314,8 @@ function setupHealthBanner() {
     try {
       const r = await fetch('/api/health/proxy');
       const data = await r.json();
-      alert(JSON.stringify(data, null, 2));
-    } catch (e) { alert('health fetch failed: ' + e.message); }
+      await showDialog({ title: 'Proxy health details', message: JSON.stringify(data, null, 2), confirmLabel: 'Close', detail: true });
+    } catch (e) { pushNotification('error', 'Health fetch failed: ' + e.message, { toast: true, label: 'Proxy health' }); }
   });
 
   dismissBtn?.addEventListener('click', () => {
@@ -1570,7 +2335,7 @@ function subscribeLobby() {
     for (const a of arr) {
       state.active.set(a.agentId, { sessionId: a.sessionId });
       if (a.agentId !== 'glados' && !state.openTabs.find(t => t.id === a.agentId)) {
-        openAgentTab(a.agentId);
+        ensureAgentTab(a.agentId);
       }
     }
     renderAgentList();
@@ -1581,7 +2346,7 @@ function subscribeLobby() {
     logEvent('started', `${info.agentId} session-started`);
     renderAgentList();
     if (info.agentId !== 'glados' && !state.openTabs.find(t => t.id === info.agentId)) {
-      openAgentTab(info.agentId);
+      ensureAgentTab(info.agentId);
     }
   });
   es.addEventListener('session-ended', e => {
@@ -1603,6 +2368,7 @@ function subscribeLobby() {
     let info = {};
     try { info = JSON.parse(e.data); } catch {}
     if (info.resetAll) clearRuntimeTranscriptState(info.agentIds || []);
+    applyRuntimeSurfaceRefresh(info);
     logEvent('ended', 'runtime refreshed');
   });
   es.addEventListener('agent-liveness', e => {
@@ -1611,7 +2377,7 @@ function subscribeLobby() {
     if (info.live) {
       state.active.set(info.agentId, { sessionId: info.sessionId || info.state || 'live' });
       if (info.agentId !== 'glados' && !state.openTabs.find(t => t.id === info.agentId)) {
-        openAgentTab(info.agentId);
+        ensureAgentTab(info.agentId);
       }
     } else {
       state.active.delete(info.agentId);
@@ -1620,16 +2386,20 @@ function subscribeLobby() {
   });
   es.addEventListener('halt', e => {
     const { agentId, reason } = JSON.parse(e.data);
+    setAgentHaltedState(agentId, true);
     logEvent('ended', `HALT ${agentId}${reason ? ' — ' + reason : ''}`);
   });
   es.addEventListener('resume', e => {
     const { agentId } = JSON.parse(e.data);
+    setAgentHaltedState(agentId, false);
     logEvent('started', `resume ${agentId}`);
   });
   es.addEventListener('chat-turn-started', e => {
     let data = {}; try { data = JSON.parse(e.data); } catch {}
     const tabId = data.agentId === 'glados' ? 'glados-chat' : null;
     if (!tabId) return;
+    state.active.set(data.agentId, { sessionId: data.turnId || 'chat-turn' });
+    syncAgentViewToolbars(data.agentId);
     const rec = state.transcripts.get(tabId);
     if (rec) {
       rec.sending = true;
@@ -1645,6 +2415,8 @@ function subscribeLobby() {
     let data = {}; try { data = JSON.parse(e.data); } catch {}
     const tabId = data.agentId === 'glados' ? 'glados-chat' : null;
     if (!tabId) return;
+    state.active.delete(data.agentId);
+    syncAgentViewToolbars(data.agentId);
     const rec = state.transcripts.get(tabId);
     if (rec?.sending) {
       rec.activity = 'finalizing';
@@ -1656,11 +2428,12 @@ function subscribeLobby() {
     logEvent('ended', `${data.agentId || 'agent'} turn ended`);
   });
   // v4 — Plan-approval workflow lifecycle events.
-  for (const type of ['plan-pending','plan-approved','plan-rejected','plan-modified','plan-complete']) {
+  for (const type of ['plan-pending','plan-approved','plan-rejected','plan-modified','plan-ended','plan-complete']) {
     es.addEventListener(type, e => {
       let data = {}; try { data = JSON.parse(e.data); } catch {}
-      logEvent(type === 'plan-pending' ? 'started' : (type === 'plan-rejected' ? 'ended' : 'ok'),
+      logEvent(type === 'plan-pending' ? 'started' : (type === 'plan-rejected' || type === 'plan-ended' ? 'ended' : 'ok'),
         `${type} ${data.id || data.new_id || data.old_id || ''}`);
+      if (type === 'plan-pending') showToast('A plan is waiting for operator approval.', { kind: 'pending', label: 'Plan approval' });
       refreshPlansBadge();
     });
   }
@@ -1722,7 +2495,7 @@ async function renderReportsPane() {
   refreshEl.addEventListener('click', () => renderPane());
 
   try {
-    const j = await fetchJson('/api/reports/tree', { timeoutMs: 15000 });
+    const j = await fetchJson('/api/reports/tree', { timeoutMs: 30000, retries: 1 });
     const treeEl = wrap.querySelector('#reports-tree');
     const summaryEl = wrap.querySelector('#reports-summary');
     const noticeEl = wrap.querySelector('#report-index-notice');
@@ -1895,7 +2668,10 @@ async function loadReport(relPath, clickedEl) {
     const rawUrl = '/api/reports/raw?path=' + encodeURIComponent(relPath);
     let body;
     if (j.kind === 'markdown') {
-      body = window.marked ? marked.parse(j.content) : `<pre>${escapeHtml(j.content)}</pre>`;
+      const displayMarkdown = formatReportMarkdownForDisplay(j.content);
+      const rendered = window.marked ? marked.parse(displayMarkdown) : `<pre>${escapeHtml(j.content)}</pre>`;
+      const safe = window.DOMPurify ? DOMPurify.sanitize(rendered) : rendered;
+      body = `<article class="report-document ${reportPresentationClass(relPath)}">${safe}</article>`;
     } else if (j.kind === 'text') {
       body = `<pre class="code-view" data-ext="${escapeHtml(j.ext || '')}">${escapeHtml(j.content)}</pre>`;
     } else if (j.kind === 'image') {
@@ -1913,17 +2689,44 @@ async function loadReport(relPath, clickedEl) {
   }
 }
 
+// Dradis imports require the compact #Section# markers to remain byte-for-byte
+// in the report files. Convert them only in the viewer so the operator gets a
+// polished hierarchy without breaking export compatibility.
+function formatReportMarkdownForDisplay(content) {
+  let fenced = false;
+  return String(content || '').split(/\r?\n/).map(line => {
+    if (/^\s*(?:```|~~~)/.test(line)) {
+      fenced = !fenced;
+      return line;
+    }
+    if (fenced) return line;
+    const title = line.match(/^#(CWE-\d+\s*:\s*.+)#\s*$/i);
+    if (title) return `# ${title[1]}`;
+    const evidence = line.match(/^#Evidence\s+(\d+)\s*:\s*(.+)#\s*$/i);
+    if (evidence) return `### Evidence ${evidence[1]}: ${evidence[2]}`;
+    const section = line.match(/^#(Summary|Remediation|CVSS\s+3\.1\s+Score|Action|Result)#\s*$/i);
+    if (section) return `## ${section[1]}`;
+    return line;
+  }).join('\n');
+}
+
+function reportPresentationClass(relPath) {
+  const match = String(relPath || '').match(/(?:^|\/)CWEs\/(Critical|High|Medium|Low)(?:\/|$)/i);
+  if (match) return `severity-${match[1].toLowerCase()}`;
+  return /(?:^|\/)RT(?:\/|$)/i.test(String(relPath || '')) ? 'report-red-team' : 'report-general';
+}
+
 function wireReportActions(relPath, fileMeta, viewer) {
   const delBtn = viewer.querySelector('#report-delete');
   if (delBtn) delBtn.addEventListener('click', async () => {
-    if (!confirm(`Delete ${relPath}? This cannot be undone.`)) return;
+    if (!await confirmAction({ title: 'Delete report', message: `Delete ${relPath}? This cannot be undone.`, confirmLabel: 'Delete', danger: true })) return;
     try {
       const r = await fetch('/api/reports/file?path=' + encodeURIComponent(relPath), { method: 'DELETE' });
       const j = await r.json();
       if (!j.ok) throw new Error(j.error || 'delete failed');
       state.reports.selectedPath = null;
       renderPane();
-    } catch (e) { alert('delete failed: ' + e.message); }
+    } catch (e) { pushNotification('error', 'Delete failed: ' + e.message, { toast: true, label: 'Reports' }); }
   });
   const editBtn = viewer.querySelector('#report-edit');
   if (editBtn && fileMeta.kind === 'markdown') editBtn.addEventListener('click', () => {
@@ -1947,7 +2750,7 @@ function wireReportActions(relPath, fileMeta, viewer) {
         const j = await r.json();
         if (!j.ok) throw new Error(j.error || 'save failed');
         loadReport(relPath);
-      } catch (e) { alert('save failed: ' + e.message); }
+      } catch (e) { pushNotification('error', 'Save failed: ' + e.message, { toast: true, label: 'Reports' }); }
     });
   });
 }
@@ -1972,6 +2775,18 @@ async function refreshUpdateStatus() {
   const el = document.getElementById('update-status');
   if (!el) return;
   try {
+    if (window.gladosDesktop?.isPackaged) {
+      const status = await window.gladosDesktop.getUpdateAccessStatus();
+      const feedInput = document.getElementById('update-feed-url');
+      if (feedInput && document.activeElement !== feedInput && status.feedUrl) feedInput.value = status.feedUrl;
+      const run = document.getElementById('update-run');
+      if (run) run.disabled = !status.configured;
+      el.textContent = status.configured
+        ? `private feed ready · ${status.source} · ${status.storageBackend}`
+        : `private feed not ready · ${status.reason || 'configure access below'}`;
+      el.className = status.configured ? 'update-status ok' : 'update-status warn';
+      return;
+    }
     const r = await fetch('/api/update/status');
     const status = await r.json();
     const dirty = status.dirty ? `dirty (${status.dirtySummary.length} file entries)` : 'clean';
@@ -1987,15 +2802,22 @@ async function refreshUpdateStatus() {
 async function startInAppUpdate(force = false) {
   if (state.update.running) return;
   if (window.gladosDesktop?.isPackaged) {
-    if (!confirm('Check the signed GLaDOS release feed for an update? Operator data under ~/.glados is never part of the update payload.')) return;
+    if (!await confirmAction({ title: 'Check for update', message: 'Check the signed GLaDOS release feed for an update? Operator data under ~/.glados is never part of the update payload.', confirmLabel: 'Check for update' })) return;
     state.update.running = true;
     appendUpdateLine('[desktop] checking signed release feed\n', 'cmd');
     try {
       const result = await window.gladosDesktop.checkForUpdate();
-      appendUpdateLine(`[desktop] update check complete${result.version ? `: ${result.version}` : ''}\n`, 'info');
+      appendUpdateLine(`[desktop] current ${result.currentVersion || 'unknown'} · feed ${result.version || 'unknown'}\n`, 'info');
+      if (!result.available) {
+        appendUpdateLine('[desktop] GLaDOS is already up to date\n', 'info');
+        return;
+      }
       await window.gladosDesktop.downloadUpdate();
       appendUpdateLine('[desktop] signed update downloaded and verified\n', 'info');
-      if (confirm('Update verified. Restart GLaDOS and install it now?')) await window.gladosDesktop.installUpdate();
+      if (await confirmAction({ title: 'Install verified update', message: 'The update is signed and verified. GLaDOS will refuse to install while agents are active, snapshot databases and model assignments, then restart. Reports and investigations remain in ~/.glados.', confirmLabel: 'Snapshot and install' })) {
+        const installed = await window.gladosDesktop.installUpdate();
+        appendUpdateLine(`[desktop] preservation snapshot created: ${installed.snapshotDir}\n`, 'info');
+      }
     } catch (e) {
       appendUpdateLine(`[desktop] update failed: ${e.message}\n`, 'stderr');
     } finally {
@@ -2003,7 +2825,7 @@ async function startInAppUpdate(force = false) {
     }
     return;
   }
-  if (!force && !confirm('Run scripts/update.sh now? Updates are pulled from the configured Git remote and will not modify local operator data.')) return;
+  if (!force && !await confirmAction({ title: 'Update GLaDOS', message: 'Run scripts/update.sh now? Updates are pulled from the configured Git remote and will not modify local operator data.', confirmLabel: 'Run update' })) return;
   try { state.update.es?.close(); } catch {}
   state.update.running = true;
   appendUpdateLine(`$ scripts/update.sh --no-restart${force ? ' --force' : ''}\n`, 'cmd');
@@ -2043,13 +2865,21 @@ async function startInAppUpdate(force = false) {
 function renderUpdatePane() {
   const wrap = document.createElement('div');
   wrap.className = 'update-pane';
+  const packaged = !!window.gladosDesktop?.isPackaged;
   wrap.innerHTML = `
     <div class="update-toolbar">
       <span id="update-status" class="update-status">checking...</span>
       <button id="update-run">Run Update</button>
-      <button id="update-force" title="Continue despite active agents or dirty working tree">Force</button>
+      ${packaged ? '' : '<button id="update-force" title="Continue despite active agents or dirty working tree">Force</button>'}
       <button id="update-clear">Clear Log</button>
     </div>
+    ${packaged ? `<div class="update-access">
+      <label><span>Authenticated HTTPS feed</span><input id="update-feed-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://updates.example.com/glados/macos"></label>
+      <label><span>Access token</span><input id="update-access-token" type="password" autocomplete="new-password" placeholder="Not displayed after saving"></label>
+      <button id="update-access-save">Save Access</button>
+      <button id="update-access-clear" class="danger">Clear Access</button>
+      <small>The token is encrypted by the OS credential store and never placed in the application bundle or dashboard API.</small>
+    </div>` : ''}
     <pre id="update-log" class="update-log"></pre>
   `;
   paneEl.appendChild(wrap);
@@ -2062,7 +2892,26 @@ function renderUpdatePane() {
   }
   pre.scrollTop = pre.scrollHeight;
   wrap.querySelector('#update-run').addEventListener('click', () => startInAppUpdate(false));
-  wrap.querySelector('#update-force').addEventListener('click', () => startInAppUpdate(true));
+  wrap.querySelector('#update-force')?.addEventListener('click', () => startInAppUpdate(true));
+  wrap.querySelector('#update-access-save')?.addEventListener('click', async () => {
+    const feedUrl = wrap.querySelector('#update-feed-url').value;
+    const tokenInput = wrap.querySelector('#update-access-token');
+    try {
+      const status = await window.gladosDesktop.saveUpdateAccess({ feedUrl, token: tokenInput.value });
+      tokenInput.value = '';
+      appendUpdateLine(`[desktop] private feed access saved using ${status.storageBackend}\n`, 'info');
+      await refreshUpdateStatus();
+    } catch (error) {
+      appendUpdateLine(`[desktop] could not save update access: ${error.message}\n`, 'stderr');
+    }
+  });
+  wrap.querySelector('#update-access-clear')?.addEventListener('click', async () => {
+    if (!await confirmAction({ title: 'Clear update access', message: 'Remove the locally encrypted private-feed token?', confirmLabel: 'Clear access' })) return;
+    await window.gladosDesktop.clearUpdateAccess();
+    wrap.querySelector('#update-access-token').value = '';
+    appendUpdateLine('[desktop] private feed access cleared\n', 'info');
+    await refreshUpdateStatus();
+  });
   wrap.querySelector('#update-clear').addEventListener('click', () => {
     state.update.lines = [];
     pre.innerHTML = '';
@@ -2135,9 +2984,30 @@ const _proxyState = {
   // set below covers Shift+click ranges and Cmd/Ctrl+click toggles.
   selectedIds: new Set(),
   lastClickedId: null, // anchor for Shift+click range selection
+  pendingFocus: null,
+  generation: 0,
 };
 
+function clearProxyClientState() {
+  if (_proxyState.es) {
+    try { _proxyState.es.close(); } catch {}
+    _proxyState.es = null;
+  }
+  _proxyState.generation += 1;
+  _proxyState.rows = [];
+  _proxyState.filterText = '';
+  _proxyState.filterStatus = '';
+  _proxyState.filterAgent = '';
+  _proxyState.paused = false;
+  _proxyState.selectedId = null;
+  _proxyState.selectedIds.clear();
+  _proxyState.lastClickedId = null;
+  _proxyState.pendingFocus = null;
+  _proxyState.detailCache.clear();
+}
+
 function renderProxyPane() {
+  const proxyGeneration = _proxyState.generation;
   const wrap = document.createElement('div');
   wrap.className = 'proxy-pane';
   wrap.innerHTML = `
@@ -2192,6 +3062,7 @@ function renderProxyPane() {
           <span class="proxy-detail-meta" id="proxy-req-meta"></span>
           <input type="search" class="proxy-detail-search" id="proxy-req-search" placeholder="find in request (Ctrl-F)" />
           <span class="proxy-detail-search-count" id="proxy-req-search-count"></span>
+          <button class="proxy-detail-copy" id="proxy-open-agent" title="Open the related agent transcript" disabled>Agent</button>
           <button class="proxy-detail-copy" id="proxy-copy-req" title="Copy raw request">Copy</button>
           <button class="proxy-detail-copy" id="proxy-replay-btn" title="Replay this request through the configured proxy">Replay...</button>
         </div>
@@ -2225,6 +3096,7 @@ function renderProxyPane() {
   const respBodyEl = wrap.querySelector('#proxy-resp-body');
   const copyReqBtn = wrap.querySelector('#proxy-copy-req');
   const copyCurlBtn = wrap.querySelector('#proxy-copy-curl');
+  const openAgentBtn = wrap.querySelector('#proxy-open-agent');
   const splitter = wrap.querySelector('#proxy-splitter');
   const tableHost = wrap.querySelector('.proxy-table-host');
   const detailRow = wrap.querySelector('.proxy-detail-row');
@@ -2337,6 +3209,9 @@ function renderProxyPane() {
     }
     reqMetaEl.textContent = `${r.method} ${r.url}`;
     respMetaEl.textContent = `${r.status || '—'} · ${r.mime || ''} · ${r.respLen}B · ${r.agentTag ? 'agent=' + r.agentTag : 'no tag'}`;
+    openAgentBtn.disabled = !r.agentTag;
+    openAgentBtn.textContent = r.agentTag ? `Open ${r.agentTag}` : 'Agent';
+    openAgentBtn.onclick = () => openAgentProvenance(r);
     reqBodyEl.textContent = 'loading…';
     respBodyEl.textContent = 'loading…';
 
@@ -2389,6 +3264,31 @@ function renderProxyPane() {
     paintSortIndicators();
   }
 
+  function focusPendingTraffic() {
+    const focus = _proxyState.pendingFocus;
+    if (!focus || !_proxyState.rows.length) return;
+    const host = (() => { try { return new URL(focus.url).hostname; } catch { return focus.url || ''; } })();
+    let best = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+    let bestHasHost = false;
+    for (const row of _proxyState.rows) {
+      if (focus.agentId && row.agentTag !== focus.agentId) continue;
+      const hasHost = !!(host && String(row.url || '').includes(host));
+      const urlPenalty = hasHost ? 0 : 120_000;
+      const rowTs = Number(row.ts) || Date.parse(row.ts || '') || 0;
+      const timePenalty = rowTs && focus.ts ? Math.abs(rowTs - focus.ts) : 60_000;
+      const score = urlPenalty + timePenalty;
+      if (score < bestScore) { best = row; bestScore = score; bestHasHost = hasHost; }
+    }
+    if (!best || (!bestHasHost && bestScore > 300_000)) return;
+    _proxyState.pendingFocus = null;
+    selectRow(best);
+    const rowEl = tbody.querySelector(`tr[data-id="${best.id}"]`);
+    rowEl?.classList.add('provenance-focus');
+    rowEl?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    setTimeout(() => rowEl?.classList.remove('provenance-focus'), 4500);
+  }
+
   function paintSortIndicators() {
     wrap.querySelectorAll('thead th[data-sort]').forEach(th => {
       const k = th.dataset.sort;
@@ -2436,6 +3336,7 @@ function renderProxyPane() {
       _refreshAllQueued = true;
       setTimeout(() => { _refreshAllQueued = false; refreshAll(); }, 120);
     }
+    if (_proxyState.pendingFocus) focusPendingTraffic();
   }
 
   // Filter wiring
@@ -2658,7 +3559,7 @@ function renderProxyPane() {
   function openReplayModal() {
     const id = _proxyState.selectedId;
     const row = _proxyState.rows.find(x => x.id === id);
-    if (!row) { alert('Select a row first.'); return; }
+    if (!row) { showToast('Select a proxy row first.', { kind: 'warning', label: 'Replay' }); return; }
     const d = _proxyState.detailCache.get(id) || {};
     const headersText = d.requestHeaders
       ? Object.entries(d.requestHeaders).map(([k, v]) => `${k}: ${v}`).join('\n')
@@ -2760,12 +3661,13 @@ function renderProxyPane() {
   connEl.textContent = 'connecting…';
   connEl.className = 'proxy-status connecting';
 
-  fetch('/api/proxy/history?limit=500')
-    .then(r => r.ok ? r.json() : Promise.reject(new Error('history fetch failed')))
+  fetchJson('/api/proxy/history?limit=500', { timeoutMs: 20000, retries: 1 })
     .then(rows => {
+      if (proxyGeneration !== _proxyState.generation) return;
       if (!Array.isArray(rows)) return;
       _proxyState.rows = rows;
       refreshAll();
+      focusPendingTraffic();
     })
     .catch(() => {
       tbody.innerHTML = `<tr><td colspan="7" class="proxy-empty">No proxy traffic yet. Traffic will appear when the configured proxy backend is running.</td></tr>`;
@@ -2775,7 +3677,7 @@ function renderProxyPane() {
   const es = new EventSource('/api/proxy/stream');
   es.onopen = async () => {
     try {
-      const health = await fetch('/api/health/proxy').then(r => r.json());
+      const health = await fetchJson('/api/health/proxy', { timeoutMs: 10000, retries: 1 });
       if (!health.healthy) {
         connEl.textContent = `offline — ${health.processStatus || 'proxy unavailable'}`;
         connEl.title = health.error || '';
@@ -2791,6 +3693,7 @@ function renderProxyPane() {
     }
   };
   es.onmessage = ev => {
+    if (proxyGeneration !== _proxyState.generation) return;
     try {
       const r = JSON.parse(ev.data);
       appendLive(r);
@@ -2864,15 +3767,20 @@ async function renderSettingsPane() {
       <div class="settings-actions">
         <button id="update-app" title="Run scripts/update.sh with streamed progress">Update</button>
         <button id="refresh-runtime" title="Refresh local Agent SDK runtime state">Refresh runtime</button>
-        <button id="reset-session" title="Archive the selected agent session">Reset session</button>
-        <button id="halt-one" title="Halt the selected agent" disabled>Halt agent</button>
-        <button id="resume-one" class="safe" title="Resume the selected halted agent" disabled>Resume agent</button>
       </div>
     </section>
     <section class="settings-section">
       <h2>Agents</h2>
       <div id="settings-version" class="settings-version">Version loading…</div>
       <p style="color:var(--fg-dim);">Click an agent to expand. Enable/disable and model changes update the local agent workspace and v4 model override store. New turns pick up the change automatically.</p>
+      <div class="settings-agent-controls">
+        <input id="settings-agent-search" type="search" placeholder="Search agents or models…" aria-label="Search agent settings" />
+        <div class="segmented" role="group" aria-label="Filter agent settings">
+          <button type="button" data-settings-filter="all" class="active">All</button>
+          <button type="button" data-settings-filter="enabled">Enabled</button>
+          <button type="button" data-settings-filter="disabled">Disabled</button>
+        </div>
+      </div>
       <div id="settings-list">loading…</div>
     </section>`;
   paneEl.appendChild(wrap);
@@ -2888,6 +3796,27 @@ async function renderSettingsPane() {
     const models = modelsResp.models || [];
     const settingsAgents = settingsResp.agents || [];
     const listEl = document.getElementById('settings-list');
+    const settingsSearch = document.getElementById('settings-agent-search');
+    let settingsFilter = 'all';
+    const applySettingsFilter = () => {
+      const query = settingsSearch.value.trim().toLowerCase();
+      let visible = 0;
+      listEl.querySelectorAll('.agent-card').forEach(card => {
+        const enabled = card.dataset.enabled === 'true';
+        const matchesState = settingsFilter === 'all' || (settingsFilter === 'enabled' ? enabled : !enabled);
+        const matchesQuery = !query || `${card.dataset.agentId} ${card.dataset.model || ''}`.toLowerCase().includes(query);
+        card.hidden = !(matchesState && matchesQuery);
+        if (!card.hidden) visible++;
+      });
+      listEl.querySelector('.settings-filter-empty')?.remove();
+      if (!visible) listEl.insertAdjacentHTML('beforeend', '<div class="settings-filter-empty">No agents match this view.</div>');
+    };
+    settingsSearch.addEventListener('input', applySettingsFilter);
+    wrap.querySelectorAll('[data-settings-filter]').forEach(button => button.addEventListener('click', () => {
+      settingsFilter = button.dataset.settingsFilter;
+      wrap.querySelectorAll('[data-settings-filter]').forEach(item => item.classList.toggle('active', item === button));
+      applySettingsFilter();
+    }));
     listEl.innerHTML = '';
     if (!settingsAgents.length) {
       listEl.innerHTML = '<div style="color:var(--fg-dim);">no agents found</div>';
@@ -2897,6 +3826,8 @@ async function renderSettingsPane() {
       const card = document.createElement('div');
       card.className = `agent-card ${agent.enabled ? '' : 'disabled-agent'}`;
       card.dataset.agentId = agent.id;
+      card.dataset.enabled = String(!!agent.enabled);
+      card.dataset.model = agent.model || '';
       const badges = [
         agent.enabled ? '<span class="agent-badge enabled">enabled</span>' : '<span class="agent-badge disabled">disabled</span>',
         agent.registered
@@ -2924,6 +3855,7 @@ async function renderSettingsPane() {
       });
       listEl.appendChild(card);
     }
+    applySettingsFilter();
   } catch (e) {
     document.getElementById('settings-list').textContent = 'error: ' + e.message;
   }
@@ -2994,7 +3926,12 @@ async function hydrateAgentCard(agentId, body, models) {
     body.querySelector('[data-toggle-enabled]')?.addEventListener('click', async () => {
       const nextEnabled = !d.enabled;
       const action = nextEnabled ? 'enable' : 'disable';
-      if (!confirm(`${action[0].toUpperCase()}${action.slice(1)} ${agentId}?\n\nThis updates its local agent.json. New Agent SDK turns pick it up automatically.`)) return;
+      if (!await confirmAction({
+        title: `${action[0].toUpperCase()}${action.slice(1)} agent`,
+        message: `${action[0].toUpperCase()}${action.slice(1)} ${agentId}?\n\nThis updates its local agent.json. New Agent SDK turns pick it up automatically.`,
+        confirmLabel: `${action[0].toUpperCase()}${action.slice(1)} ${agentId}`,
+        danger: !nextEnabled,
+      })) return;
       const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/enabled`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3005,13 +3942,17 @@ async function hydrateAgentCard(agentId, body, models) {
         await loadAgents();
         renderPane();
       } else {
-        alert('Update failed: ' + (r.error || 'unknown'));
+        pushNotification('error', 'Update failed: ' + (r.error || 'unknown'), { toast: true, label: agentId });
       }
     });
     body.querySelector('[data-save]')?.addEventListener('click', async () => {
       const sel = body.querySelector('[data-model-select]');
       const newModel = sel.value;
-      if (!confirm(`Change ${agentId}'s model to ${newModel}?\n\nThis writes the v4 model override store. The next Agent SDK turn will use the new model.`)) return;
+      if (!await confirmAction({
+        title: 'Change agent model',
+        message: `Change ${agentId}'s model to ${newModel}?\n\nThis writes the v4 model override store. The next Agent SDK turn will use the new model.`,
+        confirmLabel: 'Change model',
+      })) return;
       const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/model`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3025,7 +3966,7 @@ async function hydrateAgentCard(agentId, body, models) {
         await hydrateAgentCard(agentId, body, models);
         body.dataset.loaded = 'true';
       } else {
-        alert('Save failed: ' + (r.error || 'unknown'));
+        pushNotification('error', 'Save failed: ' + (r.error || 'unknown'), { toast: true, label: agentId });
       }
     });
   } catch (e) {
@@ -3148,6 +4089,17 @@ setInterval(refreshVisibleChatTurnStatuses, 2500);
 // v4 — Plan-approval workflow. Pending-plan badge + Plans pane.
 const plansState = { list: [], selected: null, proposals: [] };
 
+function clearPlanClientState() {
+  plansState.list = [];
+  plansState.selected = null;
+  plansState.proposals = [];
+  const badge = document.getElementById('plans-badge');
+  if (badge) {
+    badge.textContent = '0';
+    badge.classList.add('hidden');
+  }
+}
+
 async function refreshPlansBadge() {
   const badge = document.getElementById('plans-badge');
   if (!badge) return;
@@ -3217,9 +4169,7 @@ async function loadReplanProposals() {
   const box = document.getElementById('replan-proposals');
   if (!box) return;
   try {
-    const r = await fetch('/api/replan-proposals');
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const { proposals } = await r.json();
+    const { proposals } = await fetchJson('/api/replan-proposals', { timeoutMs: 20000, retries: 1 });
     plansState.proposals = proposals || [];
     renderReplanProposals(box, plansState.proposals);
   } catch (e) {
@@ -3262,7 +4212,7 @@ function renderReplanProposals(box, proposals) {
 async function resolveReplanProposal(id, state) {
   if (!id) return;
   const verb = state === 'accepted' ? 'approve' : 'dismiss';
-  if (!confirm(`${verb[0].toUpperCase() + verb.slice(1)} replan proposal #${id}?`)) return;
+  if (!await confirmAction({ title: `${verb[0].toUpperCase() + verb.slice(1)} replan`, message: `${verb[0].toUpperCase() + verb.slice(1)} replan proposal #${id}?`, confirmLabel: verb[0].toUpperCase() + verb.slice(1), danger: state !== 'accepted' })) return;
   const r = await fetch(`/api/replan-proposals/${encodeURIComponent(id)}/resolve`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -3270,7 +4220,7 @@ async function resolveReplanProposal(id, state) {
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));
-    alert(`replan ${verb} failed: ${err.error || r.status}`);
+    pushNotification('error', `Replan ${verb} failed: ${err.error || r.status}`, { toast: true, label: 'Plans' });
     return;
   }
   logEvent(state === 'accepted' ? 'ok' : 'ended', `replan proposal #${id} -> ${state}`);
@@ -3282,8 +4232,7 @@ async function loadPlansList() {
   const filter = document.getElementById('plans-filter');
   const state_ = filter ? filter.value : 'pending_approval';
   const q = state_ ? `?state=${encodeURIComponent(state_)}` : '';
-  const r = await fetch('/api/plans' + q);
-  const { plans } = await r.json();
+  const { plans } = await fetchJson('/api/plans' + q, { timeoutMs: 20000, retries: 1 });
   plansState.list = plans;
   const ul = document.getElementById('plans-list-items');
   if (!ul) return;
@@ -3358,11 +4307,12 @@ async function selectPlan(id) {
       <div class="plan-actions">
         <button id="plan-approve-all" class="primary">Approve all</button>
         <button id="plan-approve-selected">Approve selected</button>
-        <button id="plan-reject" class="danger">Reject</button>
+        <button id="plan-modify">Request changes</button>
+        <button id="plan-end" class="danger">End investigation</button>
       </div>
-      <div class="plan-reject-row hidden" id="plan-reject-row">
-        <input id="plan-reject-reason" placeholder="Reason for rejection" />
-        <button id="plan-reject-confirm" class="danger">Confirm reject</button>
+      <div class="plan-modify-row hidden" id="plan-modify-row">
+        <textarea id="plan-modify-request" placeholder="Describe the exact changes. GLaDOS will send them to plan-synthesizer and return a new plan for approval."></textarea>
+        <button id="plan-modify-confirm">Send changes to GLaDOS</button>
       </div>
     ` : ''}
     <div class="plan-section">
@@ -3380,17 +4330,70 @@ async function selectPlan(id) {
     document.getElementById('plan-approve-all').addEventListener('click', () => decidePlan(id, 'approve', {}));
     document.getElementById('plan-approve-selected').addEventListener('click', () => {
       const checked = [...detail.querySelectorAll('.vector-check:checked')].map(c => c.dataset.cwe);
-      if (!checked.length) { alert('Select at least one vector.'); return; }
+      if (!checked.length) { showToast('Select at least one vector.', { kind: 'warning', label: 'Plan approval' }); return; }
       decidePlan(id, 'approve', { vectors: checked });
     });
-    document.getElementById('plan-reject').addEventListener('click', () => {
-      document.getElementById('plan-reject-row').classList.remove('hidden');
+    document.getElementById('plan-modify').addEventListener('click', () => {
+      document.getElementById('plan-modify-row').classList.remove('hidden');
+      document.getElementById('plan-modify-request').focus();
     });
-    document.getElementById('plan-reject-confirm').addEventListener('click', () => {
-      const reason = document.getElementById('plan-reject-reason').value.trim() || 'no reason given';
-      decidePlan(id, 'reject', { reason });
+    document.getElementById('plan-modify-confirm').addEventListener('click', () => {
+      const changes = document.getElementById('plan-modify-request').value.trim();
+      if (!changes) {
+        showToast('Describe the requested plan changes first.', { kind: 'warning', label: 'Plan review' });
+        return;
+      }
+      requestPlanChanges(id, changes);
     });
+    document.getElementById('plan-end').addEventListener('click', () => endPlanInvestigation(id));
   }
+}
+
+async function requestPlanChanges(id, changes) {
+  const message = [
+    `Operator plan decision for ${id}: REQUEST CHANGES.`,
+    'Do not execute or directly mutate the current plan.',
+    `Dispatch plan-synthesizer with parent_plan_id=${id} and preserve these operator_modifications verbatim:`,
+    changes,
+    'Create a replacement plan in pending_approval and return it for operator review.',
+  ].join('\n');
+  const r = await fetch('/api/chat/glados', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ message }),
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok || body.ok === false) {
+    pushNotification('error', `plan change request failed: ${body.error || r.status}`, { toast: true, label: 'Plans' });
+    return;
+  }
+  showToast('Changes sent to GLaDOS. The replacement plan will require approval.', { kind: 'success', label: 'Plans' });
+  await loadPlansList();
+  refreshPlansBadge();
+}
+
+async function endPlanInvestigation(id) {
+  const confirmed = await confirmAction({
+    title: 'End investigation',
+    message: 'End this investigation, cancel remaining tracked work, and do not start report generation?',
+    confirmLabel: 'End investigation',
+    danger: true,
+  });
+  if (!confirmed) return;
+  const r = await fetch(`/api/plans/${encodeURIComponent(id)}/end`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ reason: 'operator ended investigation from Plans tab' }),
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok || body.ok === false) {
+    pushNotification('error', `end investigation failed: ${body.error || r.status}`, { toast: true, label: 'Plans' });
+    return;
+  }
+  showToast('Investigation ended. Report generation was not started.', { kind: 'success', label: 'Plans' });
+  await loadPlansList();
+  await selectPlan(id);
+  refreshPlansBadge();
 }
 
 async function decidePlan(id, action, body) {
@@ -3401,8 +4404,16 @@ async function decidePlan(id, action, body) {
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));
-    alert(`${action} failed: ${err.error || r.status}`);
+    pushNotification('error', `${action} failed: ${err.error || r.status}`, { toast: true, label: 'Plans' });
     return;
+  }
+  const result = await r.json().catch(() => ({}));
+  if (action === 'approve') {
+    if (result.execution_queued) {
+      showToast('Plan approved. GLaDOS automatically queued the next phase.', { kind: 'success', label: 'Plans' });
+    } else {
+      pushNotification('error', `Plan was approved but automatic execution was not queued${result.execution_error ? `: ${result.execution_error}` : '.'}`, { toast: true, label: 'Plans' });
+    }
   }
   await loadPlansList();
   await selectPlan(id);
@@ -3411,6 +4422,7 @@ async function decidePlan(id, action, body) {
 
 // (escapeHtml defined earlier in this file)
 
+document.getElementById('open-overview').addEventListener('click', ev => { ev.preventDefault(); openOverview(); });
 document.getElementById('open-glados').addEventListener('click', ev => { ev.preventDefault(); openGladosChat(); });
 document.getElementById('open-plans').addEventListener('click', ev => { ev.preventDefault(); openPlans(); });
 document.getElementById('open-reports').addEventListener('click', ev => { ev.preventDefault(); openReports(); });
@@ -3423,13 +4435,94 @@ document.getElementById('events-clear').addEventListener('click', () => {
   eventsEl.innerHTML = '';
 });
 
+document.getElementById('agent-search')?.addEventListener('input', event => {
+  state.agentQuery = event.target.value;
+  try { localStorage.setItem('glados-dash.agent-query', state.agentQuery); } catch {}
+  renderAgentList();
+});
+document.getElementById('agent-search').value = state.agentQuery;
+document.querySelectorAll('[data-agent-filter]').forEach(button => {
+  button.classList.toggle('active', button.dataset.agentFilter === state.agentFilter);
+  button.addEventListener('click', () => {
+    state.agentFilter = button.dataset.agentFilter;
+    try { localStorage.setItem('glados-dash.agent-filter', state.agentFilter); } catch {}
+    document.querySelectorAll('[data-agent-filter]').forEach(item => item.classList.toggle('active', item === button));
+    renderAgentList();
+  });
+});
+
+document.getElementById('notifications-toggle')?.addEventListener('click', () => {
+  openNotificationDrawer(notificationDrawerEl?.getAttribute('aria-hidden') !== 'false');
+});
+document.getElementById('notifications-close')?.addEventListener('click', () => openNotificationDrawer(false));
+document.getElementById('notifications-clear')?.addEventListener('click', () => {
+  state.notifications = [];
+  state.unreadNotifications = 0;
+  persistNotifications();
+  renderNotifications();
+});
+
+function applyPersistentLayout() {
+  const root = document.documentElement;
+  const sidebarWidth = Math.max(190, Math.min(420, Number(localStorage.getItem('glados-dash.sidebar-width')) || 248));
+  const eventsHeight = Math.max(34, Math.min(260, Number(localStorage.getItem('glados-dash.events-height')) || 96));
+  const sidebarCollapsed = localStorage.getItem('glados-dash.sidebar-collapsed') === '1';
+  const eventsCollapsed = localStorage.getItem('glados-dash.events-collapsed') === '1';
+  root.style.setProperty('--sidebar-width', `${sidebarWidth}px`);
+  root.style.setProperty('--events-height', `${eventsHeight}px`);
+  document.body.classList.toggle('sidebar-collapsed', sidebarCollapsed);
+  document.body.classList.toggle('events-collapsed', eventsCollapsed);
+  document.getElementById('events-collapse').textContent = eventsCollapsed ? 'Expand' : 'Collapse';
+}
+
+function wirePersistentLayout() {
+  applyPersistentLayout();
+  document.getElementById('sidebar-toggle')?.addEventListener('click', () => {
+    const collapsed = !document.body.classList.contains('sidebar-collapsed');
+    document.body.classList.toggle('sidebar-collapsed', collapsed);
+    localStorage.setItem('glados-dash.sidebar-collapsed', collapsed ? '1' : '0');
+  });
+  document.getElementById('events-collapse')?.addEventListener('click', () => {
+    const collapsed = !document.body.classList.contains('events-collapsed');
+    document.body.classList.toggle('events-collapsed', collapsed);
+    document.getElementById('events-collapse').textContent = collapsed ? 'Expand' : 'Collapse';
+    localStorage.setItem('glados-dash.events-collapsed', collapsed ? '1' : '0');
+  });
+
+  const bindDrag = (splitter, onMove) => {
+    let dragging = false;
+    splitter?.addEventListener('pointerdown', event => {
+      dragging = true;
+      splitter.setPointerCapture?.(event.pointerId);
+      document.body.classList.add('layout-resizing');
+    });
+    splitter?.addEventListener('pointermove', event => { if (dragging) onMove(event); });
+    splitter?.addEventListener('pointerup', event => {
+      dragging = false;
+      splitter.releasePointerCapture?.(event.pointerId);
+      document.body.classList.remove('layout-resizing');
+    });
+  };
+  bindDrag(document.getElementById('sidebar-splitter'), event => {
+    if (document.body.classList.contains('sidebar-collapsed')) return;
+    const width = Math.max(190, Math.min(420, event.clientX));
+    document.documentElement.style.setProperty('--sidebar-width', `${width}px`);
+    localStorage.setItem('glados-dash.sidebar-width', String(width));
+  });
+  bindDrag(document.getElementById('events-splitter'), event => {
+    if (document.body.classList.contains('events-collapsed')) return;
+    const height = Math.max(50, Math.min(260, window.innerHeight - event.clientY));
+    document.documentElement.style.setProperty('--events-height', `${height}px`);
+    localStorage.setItem('glados-dash.events-height', String(height));
+  });
+}
+
 // Sidebar sections: each heading is an independent collapse/expand toggle.
 // State per section persists in localStorage so choices survive reload.
 (() => {
   const sections = [
-    { headingId: 'agents-heading',     bodyId: 'agent-list' },
+    { headingId: 'agents-heading',     bodyId: 'agents-section' },
     { headingId: 'workspace-heading',  bodyId: 'workspace-links' },
-    { headingId: 'help-heading',       bodyId: 'help-links' },
   ];
   for (const { headingId, bodyId } of sections) {
     const heading = document.getElementById(headingId);
@@ -3452,7 +4545,23 @@ document.getElementById('events-clear').addEventListener('click', () => {
 })();
 
 loadAgents().then(() => {
-  openGladosChat();
+  const allowedStatic = new Set(['overview', 'glados-chat', 'plans', 'reports', 'settings', 'terminal', 'proxy', 'update']);
+  const agentIds = new Set(state.agents.map(agent => agent.id).filter(id => id !== 'glados'));
+  const savedTabs = storageGetJson('glados-dash.open-tabs', []);
+  state.openTabs = Array.isArray(savedTabs)
+    ? savedTabs.filter(tab => tab && (allowedStatic.has(tab.id) || agentIds.has(tab.id)))
+    : [];
+  if (!state.openTabs.some(tab => tab.id === 'glados-chat')) state.openTabs.push({ id: 'glados-chat', kind: 'chat', label: 'GLaDOS Chat' });
+  if (!state.openTabs.some(tab => tab.id === 'overview')) state.openTabs.unshift({ id: 'overview', kind: 'overview', label: 'Overview' });
+  const savedCurrent = localStorage.getItem('glados-dash.current-tab');
+  state.currentTab = state.openTabs.some(tab => tab.id === savedCurrent) ? savedCurrent : 'overview';
+  renderTabs();
+  renderAgentList();
+  updateWorkspaceNav();
+  renderPane();
   subscribeLobby();
   setupHealthBanner();
 });
+
+wirePersistentLayout();
+renderNotifications();

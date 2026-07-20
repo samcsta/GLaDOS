@@ -52,21 +52,35 @@ status() {
 
 trust() {
   generate
-  if [[ "$(uname -s)" != "Darwin" ]]; then
-    echo "Automatic trust is implemented for macOS only." >&2
-    exit 1
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    security add-trusted-cert -d -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$CERT_FILE"
+    echo "Trusted $CERT_FILE in the login keychain."
+    return
   fi
-  security add-trusted-cert -d -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$CERT_FILE"
-  echo "Trusted $CERT_FILE in the login keychain."
+  if [[ "$(uname -s)" == "Linux" ]] && command -v update-ca-certificates >/dev/null 2>&1; then
+    sudo install -m 0644 "$CERT_FILE" /usr/local/share/ca-certificates/glados-operator-mitm-ca.crt
+    sudo update-ca-certificates
+    echo "Trusted $CERT_FILE in the Ubuntu system certificate store."
+    return
+  fi
+  echo "Automatic trust is unsupported on this operating system." >&2
+  exit 1
 }
 
 untrust() {
-  if [[ "$(uname -s)" != "Darwin" ]]; then
-    echo "Automatic untrust is implemented for macOS only." >&2
-    exit 1
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    security delete-certificate -c "GLaDOS Operator MITM CA" "$HOME/Library/Keychains/login.keychain-db" || true
+    echo "Removed matching GLaDOS MITM CA certificates from the login keychain, if present."
+    return
   fi
-  security delete-certificate -c "GLaDOS Operator MITM CA" "$HOME/Library/Keychains/login.keychain-db" || true
-  echo "Removed matching GLaDOS MITM CA certificates from the login keychain, if present."
+  if [[ "$(uname -s)" == "Linux" ]] && command -v update-ca-certificates >/dev/null 2>&1; then
+    sudo rm -f /usr/local/share/ca-certificates/glados-operator-mitm-ca.crt
+    sudo update-ca-certificates
+    echo "Removed the GLaDOS Operator MITM CA from the Ubuntu system certificate store."
+    return
+  fi
+  echo "Automatic untrust is unsupported on this operating system." >&2
+  exit 1
 }
 
 rotate() {

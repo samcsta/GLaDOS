@@ -22,6 +22,24 @@ Application code is replaceable. Operator data is not.
 
 Updates never include or delete `~/.glados`. The LiteLLM key is stored in macOS Keychain, with a `0600` file fallback; it does not belong in `.env`.
 
+## Repository Layout
+
+| Path | Purpose |
+| --- | --- |
+| `dashboard/` | Local API server and renderer application |
+| `desktop/` | Electron main/preload source and packaging configuration |
+| `templates/agents/default/` | Versioned seeds for fresh agent workspaces |
+| `blackboard/`, `watchdog/`, `tools/` | Runtime services and MCP implementations |
+| `config/` | Versioned policy and tool manifests |
+| `scripts/` | Bootstrap, update, diagnostics, and operator utilities |
+| `artifacts/desktop/` | Disposable generated Electron packages; never committed |
+| `~/.glados/` | The only operator runtime root; never part of the repository |
+
+There is intentionally no repo-local `workspaces/`, `Reports/`,
+`investigations/`, or `.glados/` runtime. Fresh installs seed editable agents
+from `templates/agents/default/` into `~/.glados/workspaces/agents/` without
+overwriting operator edits.
+
 ## Install
 
 Prerequisites are macOS, Apple Command Line Tools, Homebrew, and Node 20 or 22.
@@ -37,6 +55,8 @@ scripts/bootstrap-macos.sh
 scripts/setup-llm-secret.sh
 scripts/glados-ca.sh trust
 scripts/glados-doctor.sh
+scripts/install-desktop-app.sh
+open /Applications/GLaDOS.app
 ```
 
 Bootstrap installs the app/MCP dependencies, the required core CLI set, seeds missing agent workspaces without overwriting operator edits, creates the runtime databases, and generates a unique local MITM CA. `scripts/setup-redteam-tools.sh --all --install` installs the wider specialist tool set.
@@ -44,10 +64,10 @@ Bootstrap installs the app/MCP dependencies, the required core CLI set, seeds mi
 ## Launch
 
 ```bash
-npm start --prefix desktop
+open /Applications/GLaDOS.app
 ```
 
-The app is named `GLaDOS.app`; the in-window title is `GLaDOS Ops`. Electron allocates a dynamic loopback port for the dashboard. For server-only development, run `npm start --prefix dashboard` and use the URL printed by the server.
+The app is named `GLaDOS.app`; the in-window title is `GLaDOS Ops`. Electron allocates a dynamic loopback port for the dashboard. For source-only development, run `npm start --prefix desktop`. For server-only development, run `npm start --prefix dashboard` and use the URL printed by the server.
 
 ## Runtime
 
@@ -75,11 +95,11 @@ scripts/glados-ca.sh rotate
 
 Source checkouts use the operator-initiated Settings update button or `scripts/update.sh`. The app blocks normal updates while agents are active or the tree is dirty, streams progress over SSE, then asks the Electron supervisor to restart the dashboard child.
 
-Packaged instances use signed GitHub release artifacts through `electron-updater`. Each operator chooses when to check, download, and install. Developer ID signing, hardened runtime, and notarization are release-time requirements; no Apple service is contacted at app runtime except when the operator requests an update.
+Packaged instances use an authenticated generic HTTPS feed through `electron-updater`. Each operator stores a per-user feed token with the OS credential store and chooses when to check, download, and install. Developer ID signing, hardened runtime, and notarization are release-time requirements. Updates replace the app bundle only; runtime state under `~/.glados` remains outside the payload and is snapshotted before installation.
 
 ## Models And Agents
 
-Edit agent behavior under `~/.glados/workspaces/agents/<agent-id>/`. Prompt assembly order is `IDENTITY.md`, `SOUL.md`, `USER.md`, `AGENTS.md`, `RUNBOOK.md`, `TOOLS.md`, followed by discovered `skills/` metadata.
+Edit agent behavior under `~/.glados/workspaces/agents/<agent-id>/`. Prompt assembly order is `IDENTITY.md`, `SOUL.md`, `RUNBOOK.md`, `TOOLS.md`, `USER.md`, `AGENTS.md`, followed by discovered `skills/` metadata.
 
 Use the Settings model picker or edit `~/.glados/model-overrides.json`. Overrides must contain bare gateway aliases. High-risk `c2-*`, `phish-*`/`phisherman`, and `postex*` agents remain disabled until the operator explicitly enables them.
 
@@ -89,6 +109,9 @@ Use the Settings model picker or edit `~/.glados/model-overrides.json`. Override
 npm test --prefix dashboard
 scripts/glados-doctor.sh
 npm run pack --prefix desktop
+npm run verify:pack --prefix desktop
 ```
 
-The release marker is `v4.0.0`. Build artifacts use the product name `GLaDOS`, so the bundle remains `GLaDOS.app`.
+The release marker is `v4.0.0`. Build artifacts are written under
+`artifacts/desktop/` and use the product name `GLaDOS`, so the bundle remains
+`GLaDOS.app`.

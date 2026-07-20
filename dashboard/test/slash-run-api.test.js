@@ -72,6 +72,7 @@ async function startServer() {
     BLACKBOARD_DB: path.join(runtime, 'blackboard', 'blackboard.db'),
     WATCHDOG_DB: path.join(runtime, 'watchdog', 'watchdog.db'),
     GLADOS_CONTROLLER_WORKER: '0',
+    GLADOS_LITELLM_USAGE_DISABLED: '1',
   };
   const child = cp.spawn(process.execPath, ['dashboard/server.js'], {
     cwd: path.resolve(__dirname, '..', '..'),
@@ -105,14 +106,93 @@ async function slashRun(port, command) {
 test('POST /api/slash/run executes workflow and safety commands through server wiring', async () => {
   const srv = await startServer();
   try {
+    const staleAtlas = path.join(srv.runtime, 'workspaces', 'agents', 'atlas');
+    fs.mkdirSync(staleAtlas, { recursive: true });
+    fs.writeFileSync(path.join(staleAtlas, 'agent.json'), JSON.stringify({ id: 'atlas', enabled: true }));
+    const settingsAgents = await request(srv.port, 'GET', '/api/settings/agents');
+    assert.equal(settingsAgents.status, 200);
+    assert.equal(settingsAgents.json.agents.some(agent => agent.id === 'atlas'), false, 'stale removed workspaces must not reappear in Settings');
+    const atlasDetails = await request(srv.port, 'GET', '/api/agents/atlas/details');
+    assert.equal(atlasDetails.status, 404);
+
     const help = await slashRun(srv.port, '/help');
     assert.equal(help.ok, true);
     assert.match(help.events.at(-1).text, /\/goal <target>/);
+
+    const unknownDirectChat = await request(srv.port, 'POST', '/api/chat/not-an-agent', { message: 'hello' });
+    assert.equal(unknownDirectChat.status, 404);
+    assert.equal(unknownDirectChat.json.error, 'agent not found');
+
+    const emptyDirectChat = await request(srv.port, 'POST', '/api/chat/webapp-recon', { message: '' });
+    assert.equal(emptyDirectChat.status, 400);
+    assert.equal(emptyDirectChat.json.error, 'message required');
 
     const goal = await slashRun(srv.port, '/goal example.com');
     assert.equal(goal.ok, true);
     assert.match(goal.events.at(-1).text, /DradisTab/);
     assert.match(goal.events.at(-1).text, /DomainsAI/);
+
+    const overviewDb = new Database(path.join(srv.runtime, 'blackboard', 'blackboard.db'));
+    try {
+      overviewDb.prepare(`INSERT INTO engagements (id, target_name, scope, status) VALUES (?, ?, ?, 'active')`)
+        .run('overview-test', 'example.com', JSON.stringify({ include: ['example.com'], exclude: ['admin.example.com'] }));
+      overviewDb.prepare(`INSERT INTO plans (id, engagement_id, version, state, plan_json) VALUES (?, ?, 1, 'pending_approval', ?)`)
+        .run('overview-plan', 'overview-test', JSON.stringify({ vectors: [] }));
+      overviewDb.prepare(`INSERT INTO tasks (engagement_id, assigned_to, task_type, target, status) VALUES (?, ?, ?, ?, ?)`)
+        .run('overview-test', 'webapp-recon', 'recon', 'example.com', 'running');
+      overviewDb.prepare(`
+        INSERT INTO findings (engagement_id, target_url, finding_type, affected_component, severity, title, discovered_by, validation_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('overview-test', 'https://example.com', 'header', '/', 'high', 'Test finding', 'webapp-recon', 'pending');
+      overviewDb.prepare(`
+        INSERT INTO dashboard_transcript_events (agent_id, kind, event_json, ts)
+        VALUES (?, 'result', ?, datetime('now'))
+      `).run('webapp-recon', JSON.stringify({ costUsd: 0.25, usage: { input_tokens: 100, output_tokens: 25 } }));
+    } finally {
+      overviewDb.close();
+    }
+    const overview = await request(srv.port, 'GET', '/api/overview');
+    assert.equal(overview.status, 200, overview.raw);
+    assert.equal(overview.json.version, 'v4.0.0');
+    assert.equal(overview.json.engagement.target, 'example.com');
+    assert.equal(overview.json.phase, 'Awaiting approval');
+    assert.equal(overview.json.pendingApprovals, 1);
+    assert.equal(overview.json.findings.high, 1);
+    assert.equal(overview.json.tasks.running, 1);
+    assert.equal(overview.json.assessmentMetrics.metering.costUsd, 0.25);
+    assert.equal(overview.json.assessmentMetrics.metering.tokens.totalTokens, 125);
+    assert.equal(Array.isArray(overview.json.agents), true);
+    assert.equal(overview.json.agents.some(agent => agent.id === 'atlas'), false);
+    assert.equal(overview.json.llmUsage.available, false);
+    assert.equal(overview.json.llmUsage.reason, 'disabled');
+
+    const trafficDir = path.join(srv.runtime, 'traffic');
+    const trafficFile = path.join(trafficDir, 'proxy-events.jsonl');
+    fs.mkdirSync(trafficDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(trafficFile, `${JSON.stringify({ id: 1, ts: Date.now(), method: 'GET', url: 'https://example.com', status: 200 })}\n`, { mode: 0o600 });
+    const runtimeRefresh = await request(srv.port, 'POST', '/api/gateway/restart');
+    assert.equal(runtimeRefresh.status, 200, runtimeRefresh.raw);
+    assert.equal(runtimeRefresh.json.ok, true);
+    assert.equal(runtimeRefresh.json.plansReset, true);
+    assert.equal(runtimeRefresh.json.blackboardReset, true);
+    assert.equal(runtimeRefresh.json.proxyReset, true);
+    assert.equal(runtimeRefresh.json.blackboard.rowsDeleted.plans, 1);
+    assert.equal(runtimeRefresh.json.blackboard.rowsDeleted.engagements >= 1, true);
+    assert.equal(fs.readFileSync(trafficFile, 'utf8'), '');
+    const refreshedPlans = await request(srv.port, 'GET', '/api/plans');
+    assert.deepEqual(refreshedPlans.json.plans, []);
+    const refreshedProxy = await request(srv.port, 'GET', '/api/proxy/history');
+    assert.deepEqual(refreshedProxy.json, []);
+
+    const preservedDb = new Database(path.join(srv.runtime, 'blackboard', 'blackboard.db'), { readonly: true });
+    try {
+      assert.equal(preservedDb.prepare("SELECT COUNT(*) AS n FROM engagements").get().n, 0);
+      assert.equal(preservedDb.prepare("SELECT COUNT(*) AS n FROM findings").get().n, 0);
+      assert.equal(preservedDb.prepare("SELECT COUNT(*) AS n FROM tasks").get().n, 0);
+      assert.equal(preservedDb.prepare("SELECT COUNT(*) AS n FROM dashboard_transcript_events").get().n, 0);
+    } finally {
+      preservedDb.close();
+    }
 
     const usage = await slashRun(srv.port, '/investigate');
     assert.equal(usage.ok, true);
@@ -153,6 +233,20 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     assert.equal(resume.ok, true);
     assert.match(resume.events.at(-1).text, /"agentId": "webapp-vuln"/);
 
+    const resumeDb = new Database(path.join(srv.runtime, 'blackboard', 'blackboard.db'), { readonly: true });
+    try {
+      const notices = resumeDb.prepare(`
+        SELECT agent_id, kind, text
+        FROM dashboard_transcript_events
+        WHERE kind = 'operator-event' AND text LIKE '%Operator resumed webapp-vuln%'
+        ORDER BY id ASC
+      `).all();
+      assert.deepEqual(notices.map(row => row.agent_id), ['webapp-vuln', 'glados']);
+      assert.equal(notices.every(row => /halt gate/i.test(row.text)), true);
+    } finally {
+      resumeDb.close();
+    }
+
     const removedHaltAll = await slashRun(srv.port, '/halt-all');
     assert.equal(removedHaltAll.ok, false);
     assert.match(removedHaltAll.events.at(-1).text, /unknown command: \/halt-all/);
@@ -160,7 +254,7 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     const db = new Database(path.join(srv.runtime, 'blackboard', 'blackboard.db'), { readonly: true });
     try {
       const goals = db.prepare('SELECT type, target, status FROM controller_goals ORDER BY created_at ASC').all();
-      assert.equal(goals.some(g => g.type === 'webapp_goal' && g.target === 'example.com'), true);
+      assert.equal(goals.some(g => g.type === 'webapp_goal' && g.target === 'example.com'), false, 'runtime refresh clears prior engagement/controller rows');
       assert.equal(goals.some(g => g.type === 'security_review' && g.target === localRepo), true);
       const jobs = db.prepare('SELECT agent_id, job_type, target, status FROM controller_jobs').all();
       assert.deepEqual(jobs.map(j => [j.agent_id, j.job_type, j.target, j.status]), [

@@ -1,0 +1,72 @@
+FROM ubuntu:24.04 AS package
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH=/opt/mitmproxy/bin:$PATH
+ENV CC=clang
+ENV CXX=clang++
+ARG NODE_VERSION=22.23.1
+ARG NODE_SHA256=9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578
+RUN dpkg --print-architecture | grep -qx amd64 \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates clang curl file fakeroot g++ git make python3 python3-venv xz-utils \
+    xvfb libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libcups2t64 libdrm2 \
+    libgbm1 libgtk-3-0t64 libnotify4 libnss3 libsecret-1-0 libx11-xcb1 \
+    libxkbcommon0 libxss1 libxtst6 \
+  && curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+  && echo "${NODE_SHA256}  node-v${NODE_VERSION}-linux-x64.tar.xz" | sha256sum -c - \
+  && tar -xJf "node-v${NODE_VERSION}-linux-x64.tar.xz" -C /usr/local --strip-components=1 \
+  && rm "node-v${NODE_VERSION}-linux-x64.tar.xz" \
+  && python3 -m venv /opt/mitmproxy \
+  && /opt/mitmproxy/bin/pip install --no-cache-dir mitmproxy \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+COPY . .
+
+RUN npm ci --prefix desktop \
+  && npm ci --prefix dashboard \
+  && npm ci --prefix blackboard/blackboard-mcp \
+  && npm ci --prefix watchdog \
+  && npm ci --prefix watchdog/watchdog-mcp \
+  && npm ci --prefix tools/glados-ops-mcp
+
+RUN npm test --prefix desktop \
+  && npm test --prefix services/private-update-feed \
+  && npm run dist:ubuntu --prefix desktop \
+  && node desktop/scripts/verify-native-linux.cjs
+
+FROM package AS backend-smoke
+
+RUN set -eu; \
+  executable="artifacts/desktop/linux-unpacked/glados"; \
+  server="artifacts/desktop/linux-unpacked/resources/dashboard/server.js"; \
+  log="/tmp/glados-packaged-smoke.log"; \
+  test -x "$executable"; \
+  test -f "$server"; \
+  env ELECTRON_RUN_AS_NODE=1 GLADOS_PACKAGED_SMOKE=1 \
+    GLADOS_RUNTIME_DIR=/tmp/glados-packaged-smoke GLADOS_BROWSER_MCP=0 PORT=59849 \
+    "$executable" "$server" >"$log" 2>&1 & \
+  pid=$!; \
+  ready=0; \
+  for attempt in $(seq 1 30); do \
+    if curl -fsS http://127.0.0.1:59849/api/healthz >/tmp/glados-packaged-health.json; then ready=1; break; fi; \
+    if ! kill -0 "$pid" 2>/dev/null; then break; fi; \
+    sleep 1; \
+  done; \
+  kill -TERM "$pid" 2>/dev/null || true; \
+  wait "$pid" || true; \
+  cat "$log"; \
+  test "$ready" -eq 1; \
+  grep -q '"ok":true' /tmp/glados-packaged-health.json; \
+  echo GLADOS_LINUX_BACKEND_SMOKE_OK
+
+FROM package AS gui-smoke
+
+RUN executable="artifacts/desktop/linux-unpacked/glados" \
+  && test -x "$executable" \
+  && GLADOS_PACKAGED_SMOKE=1 GLADOS_RUNTIME_DIR=/tmp/glados-packaged-gui-smoke \
+    xvfb-run -a "$executable" --no-sandbox
+
+FROM scratch AS artifacts
+COPY --from=package /workspace/artifacts/desktop/ /

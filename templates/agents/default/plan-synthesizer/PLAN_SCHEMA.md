@@ -9,15 +9,19 @@ rejection in the blackboard.
   "engagement_id": "string (required, FK to engagements.id)",
   "parent_plan_id": "string | null (set on replan)",
   "replan_reason": "string | null (required when parent_plan_id is set)",
+  "operator_modifications": "string | null (verbatim operator edits)",
+  "terminal_objective": "string (operator-stated assessment objective)",
 
   "recon_summary": {
     "target": "hostname",
+    "context_intake": {"context_mode": "informed|blind", "sources": {}},
     "dns": {"a": ["..."], "cname_chain": ["..."]},
     "tls": {"issuer": "...", "san": ["..."], "expires": "iso8601"},
     "osint": {"asn": "...", "cdn": "...", "waf": "..."},
     "framework": {"name": "...", "version": "...", "confidence": 0.0},
     "endpoints": [{"path": "/", "method": "GET", "status": 200}],
-    "js_recon": {"api_routes": ["/api/..."], "graphql_hints": [], "feature_flags": []},
+    "js_recon": {"manifest_total": 0, "manifest_processed": 0, "api_routes": ["/api/..."], "graphql_hints": [], "feature_flags": [], "secrets": [], "code_risk_leads": []},
+    "coverage_ledger": {"meaningful_leads": [], "tested": [], "unresolved": [], "deferred": []},
     "mobile_api": {"hosts": [], "deep_links": [], "auth_notes": []},
     "auth_flow": {"mechanism": "session|oauth|adfs|saml|basic", "mfa": false},
     "quick_wins": ["/actuator exposed", "stack-trace on 500", "..."]
@@ -31,7 +35,11 @@ rejection in the blackboard.
       "confidence_pre": 0.7,
       "agents": ["webapp-vuln"],
       "est_duration_min": 15,
-      "risk_to_target": "low"
+      "risk_to_target": "low",
+      "evidence_refs": ["proxy:123"],
+      "validation_criteria": "paired control and observable state delta",
+      "expected_pivot": "new role/page/session or null",
+      "chain_contribution": "how this enables or rules out a path toward RCE"
     }
   ],
 
@@ -43,6 +51,10 @@ rejection in the blackboard.
 ## Field rules
 
 - `proposed_vectors` — 1..12 entries. Each `cwe` must match `^CWE-\d+$`.
+- Do not use the 12-vector limit to drop a meaningful lead. Merge duplicate
+  instances of the same CWE into one vector with multiple evidence references;
+  if more than 12 distinct meaningful CWEs remain, record the overflow in
+  `coverage_ledger.unresolved` and require a follow-on plan.
 - `confidence_pre` — float in [0.0, 1.0].
   - Evidence weighting: operator scope / Dradis history > direct webapp recon
     > DNS/TLS facts > OSINT.
@@ -51,6 +63,8 @@ rejection in the blackboard.
     validation.
 - `risk_to_target` — enum `low|medium|high`.
 - `est_duration_min` — positive integer.
+- `evidence_refs`, `validation_criteria`, `expected_pivot`, and
+  `chain_contribution` are required per vector.
 - `agent_chain` — ordered list; must be a superset of the `agents` in
   `proposed_vectors`. Non-exploitation agents (`source-code`) allowed if
   framework detection warrants parallel static analysis.
@@ -59,5 +73,5 @@ rejection in the blackboard.
 ## On replan
 
 Set `parent_plan_id` and `replan_reason` (e.g., `"finding:CWE-287 conf=0.95
-enables postex"`). The cascade in `workspaces/glados/cwe-cascade.json`
+enables postex"`). The cascade in `~/.glados/workspaces/agents/glados/cwe-cascade.json`
 supplies `enables_vectors` / `skips`; use them to bias the plan.

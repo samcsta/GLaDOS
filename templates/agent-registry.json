@@ -74,10 +74,11 @@
   },
   {
     "id": "js-reverser",
-    "name": "js-reverser",
+    "name": "js-analyzer",
+    "description": "Analyzes every webapp-recon JavaScript/client-artifact handoff for routes, secrets, identity/auth clues, dangerous code patterns, and meaningful CWE leads.",
     "model": "claude-sonnet-5",
     "enabled": true,
-    "dispatch": "conditional"
+    "dispatch": "required_when_js_present"
   },
   {
     "id": "mobile-api-recon",

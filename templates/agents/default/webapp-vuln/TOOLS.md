@@ -28,6 +28,11 @@ Exploitation-tier web tester. Runs only approved plan vectors and produces suspe
   run it, then remove or retain it as evidence as appropriate.
 - Test approved endpoints deeply instead of broad crawling.
 - Use non-destructive payloads, low rate, timeouts, and clear negative controls.
+- Capture and compare the complete request/state, not status codes or body
+  excerpts alone. Invalid/non-existent object IDs are controls, never evidence
+  that cross-object authorization is safe.
+- On an authentication/privilege/surface pivot, record the pivot and return to
+  GLaDOS. Do not crawl the new page; `webapp-recon` must remap it first.
 - No state-changing actions, file uploads, destructive payloads, DoS tests, or credential attacks without explicit operator approval.
 - Do not self-confirm findings; hand evidence to `webapp-validator` and GLaDOS.
 

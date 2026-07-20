@@ -7,6 +7,7 @@ const path = require('node:path');
 const { ensureBlackboardDb } = require('../../scripts/lib/glados-local');
 const {
   DashboardTranscriptStore,
+  compactTranscriptEventForTransport,
   eventSseId,
   dashboardTranscriptEvent,
   mergeTranscriptEvents,
@@ -48,6 +49,33 @@ test('clearAll removes durable transcripts for every agent', () => {
   assert.equal(store.list('glados').length, 0);
   assert.equal(store.list('webapp-recon').length, 0);
   store.close();
+});
+
+test('recent transcript replay is newest-first bounded and does not parse oversized event JSON', () => {
+  const { dbPath } = tempDb();
+  const store = new DashboardTranscriptStore(dbPath);
+  store.record('plan-synthesizer', { kind: 'tool-result', text: 'x'.repeat(20_000), marker: 'oversized' });
+  store.record('plan-synthesizer', { kind: 'assistant-text', text: 'done' });
+  store.record('plan-synthesizer', { kind: 'assistant-text', text: 'latest' });
+  const rows = store.listRecent('plan-synthesizer', { limit: 2, maxFieldChars: 1024 });
+  assert.deepEqual(rows.map(row => row.text), ['done', 'latest']);
+  assert.equal(rows.some(row => row.marker === 'oversized'), false);
+
+  const [oversized] = store.listRecent('plan-synthesizer', { limit: 3, maxFieldChars: 1024 });
+  assert.equal(oversized.transportTruncated, true);
+  assert.equal(oversized.text.length, 1024);
+  assert.equal(oversized.originalTextChars, 20_000);
+  store.close();
+});
+
+test('live transcript transport compacts large tool fields while leaving the source event intact', () => {
+  const event = { kind: 'tool-result', text: 'z'.repeat(5000), toolInput: { body: 'q'.repeat(5000) } };
+  const compact = compactTranscriptEventForTransport(event, { maxFieldChars: 1024 });
+  assert.equal(compact.transportTruncated, true);
+  assert.match(compact.text, /transport preview truncated/);
+  assert.equal(compact.toolInput.dashboardTransportPreviewTruncated, true);
+  assert.equal(event.text.length, 5000);
+  assert.equal(event.toolInput.body.length, 5000);
 });
 
 test('merged transcript replay dedupes by native id and trims after Last-Event-ID', () => {
