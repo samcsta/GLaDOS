@@ -1871,14 +1871,22 @@ app.get('/api/agents/:id/details', (req, res) => {
 });
 app.get('/api/models', async (req, res) => {
   try {
-    res.json({ models: await agentDetails.listKnownModels() });
+    res.json(await agentDetails.listKnownModels());
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
-app.post('/api/agents/:id/model', (req, res) => {
+app.post('/api/agents/:id/model', async (req, res) => {
   try {
-    const result = agentDetails.updateAgentModel(req.params.id, String(req.body?.model || ''));
+    const requestedModel = String(req.body?.model || '').trim();
+    const catalog = await agentDetails.listKnownModels();
+    if (!catalog.available) {
+      return res.status(503).json({ ok: false, error: catalog.message || 'LiteLLM model discovery is unavailable.' });
+    }
+    if (!catalog.models.includes(requestedModel)) {
+      return res.status(400).json({ ok: false, error: `model is not currently available on LiteLLM: ${requestedModel}` });
+    }
+    const result = agentDetails.updateAgentModel(req.params.id, requestedModel);
     broadcastLobby('agent-model-changed', result);
     res.json({ ok: true, ...result });
   } catch (e) { res.status(400).json({ ok: false, error: e.message }); }

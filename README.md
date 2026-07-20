@@ -101,7 +101,7 @@ Packaged instances use an authenticated generic HTTPS feed through `electron-upd
 
 Edit agent behavior under `~/.glados/workspaces/agents/<agent-id>/`. Prompt assembly order is `IDENTITY.md`, `SOUL.md`, `RUNBOOK.md`, `TOOLS.md`, `USER.md`, `AGENTS.md`, followed by discovered `skills/` metadata.
 
-Use the Settings model picker or edit `~/.glados/model-overrides.json`. Overrides must contain bare gateway aliases. High-risk `c2-*`, `phish-*`/`phisherman`, and `postex*` agents remain disabled until the operator explicitly enables them.
+Use the Settings model picker or edit `~/.glados/model-overrides.json`. Settings queries LiteLLM's authenticated `/v1/models` catalog each time it opens, excludes embedding-only entries, and validates new selections against a fresh catalog response. Existing assignments that were removed upstream remain visible as unavailable until the operator selects a live replacement. Overrides must contain bare gateway aliases. High-risk `c2-*`, `phish-*`/`phisherman`, and `postex*` agents remain disabled until the operator explicitly enables them.
 
 ## Verification
 

@@ -4,12 +4,6 @@
     "anthropicBaseUrl": "https://llmapi.redteamstuff.com",
     "authTokenEnv": "ANTHROPIC_AUTH_TOKEN",
     "defaultModel": "claude-sonnet-5",
-    "modelAliases": [
-      "claude-sonnet-5",
-      "claude-opus-4-8",
-      "claude-fable-5",
-      "claude-sonnet-4-6"
-    ],
     "mcpServers": [
       "blackboard",
       "watchdog",

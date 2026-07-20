@@ -2,7 +2,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { MODEL_OVERRIDES_JSON, GLADOS_AGENT_WORKSPACES } = require('./config');
 const { loadRegistry: loadAgentRegistry, loadPolicy, buildMcpServers } = require('./harness/agent-sdk');
-const { LLMAPI_BARE_MODELS, bareModelAlias } = require('../../scripts/lib/model-aliases');
+const { fetchLiteLlmModels } = require('./litellm-models');
+const { bareModelAlias } = require('../../scripts/lib/model-aliases');
 
 function safeRead(p) {
   try { return fs.readFileSync(p, 'utf8'); } catch { return null; }
@@ -173,31 +174,13 @@ function updateAgentEnabled(agentId, enabled) {
   };
 }
 
-async function fetchOllamaModels() {
-  // Query local Ollama daemon for installed models. Short timeout so a missing
-  // Ollama install does not stall the /api/models route.
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 600);
-  try {
-    const res = await fetch('http://127.0.0.1:11434/api/tags', { signal: controller.signal });
-    if (!res.ok) return [];
-    const body = await res.json();
-    return Array.isArray(body?.models)
-      ? body.models.map(m => `ollama-local/${m.name}`).filter(Boolean)
-      : [];
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function listKnownModels() {
-  const registry = loadAgentRegistry();
-  const models = new Set(registry.map(a => bareModelAlias(a.model, { fallback: null })).filter(Boolean));
-  for (const m of LLMAPI_BARE_MODELS) models.add(m);
-  for (const m of await fetchOllamaModels()) models.add(m);
-  return [...models].sort();
+async function listKnownModels(options = {}) {
+  const policy = options.policy || loadPolicy();
+  return fetchLiteLlmModels({
+    env: options.env || process.env,
+    baseUrl: policy.harness?.anthropicBaseUrl,
+    ...options,
+  });
 }
 
 module.exports = { agentDetails, updateAgentModel, updateAgentEnabled, listKnownModels, listSettingsAgents };

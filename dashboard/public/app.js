@@ -3772,6 +3772,7 @@ async function renderSettingsPane() {
     <section class="settings-section">
       <h2>Agents</h2>
       <div id="settings-version" class="settings-version">Version loading…</div>
+      <div id="settings-model-catalog" class="settings-version">LiteLLM model catalog loading…</div>
       <p style="color:var(--fg-dim);">Click an agent to expand. Enable/disable and model changes update the local agent workspace and v4 model override store. New turns pick up the change automatically.</p>
       <div class="settings-agent-controls">
         <input id="settings-agent-search" type="search" placeholder="Search agents or models…" aria-label="Search agent settings" />
@@ -3794,6 +3795,12 @@ async function renderSettingsPane() {
     ]);
     renderSettingsVersion(versionInfo);
     const models = modelsResp.models || [];
+    const modelCatalogEl = document.getElementById('settings-model-catalog');
+    if (modelsResp.available) {
+      modelCatalogEl.innerHTML = `<span class="settings-version-label">LiteLLM Models</span><code>${models.length}</code><span class="settings-version-hint">live catalog</span>`;
+    } else {
+      modelCatalogEl.innerHTML = `<span class="settings-version-label">LiteLLM Models</span><code>unavailable</code><span class="settings-version-hint">${escapeHtml(modelsResp.message || 'model discovery failed')}</span>`;
+    }
     const settingsAgents = settingsResp.agents || [];
     const listEl = document.getElementById('settings-list');
     const settingsSearch = document.getElementById('settings-agent-search');
@@ -3877,8 +3884,12 @@ async function hydrateAgentCard(agentId, body, models) {
   try {
     const d = await fetchJson(`/api/agents/${encodeURIComponent(agentId)}/details`, { timeoutMs: 8000 });
     if (d.error) { body.textContent = 'error: ' + d.error; return; }
-    const modelChoices = [...new Set([d.model, ...(models || [])].filter(Boolean))];
-    const modelOpts = modelChoices.map(m => `<option${m === d.model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('');
+    const liveModels = new Set(models || []);
+    const modelChoices = [...new Set([d.model, ...liveModels].filter(Boolean))];
+    const modelOpts = modelChoices.map(m => {
+      const unavailable = m === d.model && !liveModels.has(m);
+      return `<option value="${escapeHtml(m)}"${m === d.model ? ' selected' : ''}>${escapeHtml(m)}${unavailable ? ' (unavailable on LiteLLM)' : ''}</option>`;
+    }).join('');
     const skills = (d.skills || []).map(s =>
       `<div class="skill"><strong>${escapeHtml(s.name)}</strong>${s.description ? `<span class="desc">${escapeHtml(s.description.slice(0, 300))}${s.description.length > 300 ? '…' : ''}</span>` : ''}</div>`
     ).join('') || '<div style="color:var(--fg-dim);">no skills</div>';
