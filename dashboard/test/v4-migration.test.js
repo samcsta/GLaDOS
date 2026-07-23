@@ -430,10 +430,14 @@ test('v4 source tree and desktop resources contain no compatibility runtime arti
 
 test('desktop installer targets one canonical app and never removes operator runtime data', () => {
   const installer = fs.readFileSync(path.join(ROOT, 'scripts/install-desktop-app.sh'), 'utf8');
+  const localBootstrap = fs.readFileSync(path.join(ROOT, 'scripts/lib/glados-local.js'), 'utf8');
   assert.match(installer, /DEST="\$INSTALL_ROOT\/GLaDOS\.app"/);
+  assert.match(installer, /desktop\/node_modules\/\.bin\/electron-builder/);
+  assert.match(installer, /npm install --prefix "\$ROOT\/desktop"/);
   assert.match(installer, /npm run verify:pack/);
   assert.match(installer, /rm -rf "\$ROOT\/artifacts"/);
   assert.doesNotMatch(installer, /rm\s+-rf\s+[^\n]*(?:\.glados|GLADOS_RUNTIME_DIR)/);
+  assert.match(localBootstrap, /const dirs = \[[\s\S]*?'dashboard',[\s\S]*?'desktop',/);
 });
 
 test('v4 plan ACL writes under the GLaDOS runtime directory', () => {

@@ -188,6 +188,10 @@ scripts/install-desktop-app.sh
 open /Applications/GLaDOS.app
 ```
 
+If the desktop packaging dependencies were not installed during an earlier or
+partial bootstrap, the installer repairs them before invoking
+`electron-builder`.
+
 The app bundle is `/Applications/GLaDOS.app`; operator data remains under
 `~/.glados`. On first launch, open Settings and confirm that the expected
 LiteLLM models are available before running an assessment.

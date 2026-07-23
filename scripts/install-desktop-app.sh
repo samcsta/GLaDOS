@@ -6,6 +6,11 @@ ARTIFACT_ROOT="$ROOT/artifacts/desktop"
 INSTALL_ROOT="${GLADOS_INSTALL_ROOT:-/Applications}"
 DEST="$INSTALL_ROOT/GLaDOS.app"
 
+if [[ ! -x "$ROOT/desktop/node_modules/.bin/electron-builder" ]]; then
+  echo "Desktop build dependencies are missing; installing them now."
+  npm install --prefix "$ROOT/desktop"
+fi
+
 npm run pack --prefix "$ROOT/desktop"
 npm run verify:pack --prefix "$ROOT/desktop"
 

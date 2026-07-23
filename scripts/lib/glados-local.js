@@ -586,6 +586,7 @@ function installDeps() {
   assertSupportedNodeForInstall();
   const dirs = [
     'dashboard',
+    'desktop',
     'blackboard/blackboard-mcp',
     'watchdog',
     'watchdog/watchdog-mcp',
