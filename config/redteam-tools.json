@@ -19,7 +19,7 @@
     { "id": "feroxbuster", "commands": ["feroxbuster"], "tier": "specialist", "required": false, "agents": ["webapp-recon", "webapp-vuln"], "mac": { "manager": "brew", "package": "feroxbuster" } },
     { "id": "nikto", "commands": ["nikto"], "tier": "specialist", "required": false, "agents": ["webapp-vuln", "webapp-validator"], "mac": { "manager": "brew", "package": "nikto" } },
     { "id": "gobuster", "commands": ["gobuster"], "tier": "specialist", "required": false, "agents": ["webapp-recon", "webapp-vuln"], "mac": { "manager": "brew", "package": "gobuster" } },
-    { "id": "netexec", "commands": ["nxc", "netexec"], "tier": "specialist", "required": false, "agents": ["ad-expert", "ad-validator"], "mac": { "manager": "pipx", "package": "netexec" } },
+    { "id": "netexec", "commands": ["nxc", "netexec"], "tier": "specialist", "required": false, "agents": ["ad-expert", "ad-validator"], "mac": { "manager": "pipx", "package": "git+https://github.com/Pennyw0rth/NetExec", "brew_dependencies": ["rust"] } },
     { "id": "bloodhound-python", "commands": ["bloodhound-python"], "tier": "specialist", "required": false, "agents": ["ad-expert", "ad-validator"], "mac": { "manager": "pipx", "package": "bloodhound" } },
     { "id": "certipy", "commands": ["certipy"], "tier": "specialist", "required": false, "agents": ["ad-expert", "ad-validator"], "mac": { "manager": "pipx", "package": "certipy-ad" } },
     { "id": "impacket", "commands": ["impacket-smbclient", "impacket-secretsdump"], "tier": "specialist", "required": false, "agents": ["ad-expert", "ad-validator"], "mac": { "manager": "pipx", "package": "impacket" } },

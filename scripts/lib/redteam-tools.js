@@ -60,7 +60,10 @@ function run(command, args, { dryRun = false } = {}) {
 function install({ tier = 'core', dryRun = false } = {}) {
   if (process.platform !== 'darwin') throw new Error('automatic tool provisioning currently supports macOS only');
   const missing = toolStatus({ tier }).tools.filter(tool => !tool.path && tool.mac?.manager && tool.mac.manager !== 'system');
-  const brew = [...new Set(missing.filter(tool => tool.mac.manager === 'brew').map(tool => tool.mac.package))];
+  const brew = [...new Set(missing.flatMap(tool => [
+    ...(tool.mac.manager === 'brew' ? [tool.mac.package] : []),
+    ...(tool.mac.brew_dependencies || []),
+  ]).filter(Boolean))];
   const pipx = [...new Set(missing.filter(tool => tool.mac.manager === 'pipx').map(tool => tool.mac.package))];
   if (brew.length) run('brew', ['install', ...brew], { dryRun });
   if (pipx.length) {

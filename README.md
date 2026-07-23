@@ -42,14 +42,17 @@ overwriting operator edits.
 
 ## Install
 
-Prerequisites are macOS, Apple Command Line Tools, Homebrew, and Node 20 or 22.
+Internal operators should follow the full
+[Gitea macOS installation guide](docs/install-macos-from-gitea.md). The
+supported production target is an Apple Silicon Mac. Prerequisites are Apple
+Command Line Tools, Homebrew, and Node 20 or 22.
 
 ```bash
 xcode-select --install
 brew install node@22 git
 brew link --overwrite --force node@22
 
-git clone https://github.com/samcsta/GLaDOS.git
+git clone git@git.r3dt34m.net:scosta44/glados.git GLaDOS
 cd GLaDOS
 scripts/bootstrap-macos.sh
 scripts/setup-llm-secret.sh
