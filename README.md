@@ -1,6 +1,6 @@
 # GLaDOS
 
-GLaDOS v4.0.0 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
+GLaDOS v4.0.1 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
 
 The application has no OpenClaw or Burp Suite runtime dependency. HTTP capture, replay, history, metrics, and per-agent attribution are provided by a supervised local mitmproxy process behind `/api/proxy/*`.
 
@@ -52,7 +52,8 @@ xcode-select --install
 brew install node@22 git
 brew link --overwrite --force node@22
 
-git clone git@git.r3dt34m.net:scosta44/glados.git GLaDOS
+GITEA_OWNER='your-gitea-repository-owner'
+git clone "git@git.r3dt34m.net:${GITEA_OWNER}/glados.git" GLaDOS
 cd GLaDOS
 scripts/bootstrap-macos.sh
 scripts/setup-llm-secret.sh
@@ -115,6 +116,6 @@ npm run pack --prefix desktop
 npm run verify:pack --prefix desktop
 ```
 
-The release marker is `v4.0.0`. Build artifacts are written under
+The release marker is `v4.0.1`. Build artifacts are written under
 `artifacts/desktop/` and use the product name `GLaDOS`, so the bundle remains
 `GLaDOS.app`.

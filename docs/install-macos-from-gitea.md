@@ -11,7 +11,7 @@ reports, investigations, and assessment evidence.
 ## Requirements
 
 - An Apple Silicon Mac. `uname -m` must print `arm64`.
-- A Gitea account with read access to `scosta44/glados`.
+- A Gitea account with read access to the release owner's `glados` repository.
 - Administrator access for Apple Command Line Tools, Homebrew packages, the
   application install, and local CA trust.
 - A LiteLLM key issued for this operator.
@@ -50,8 +50,13 @@ or share the private key (the file without `.pub`).
 Test both SSH authentication and repository access:
 
 ```bash
-git ls-remote git@git.r3dt34m.net:scosta44/glados.git HEAD
+GITEA_OWNER='your-gitea-repository-owner'
+git ls-remote "git@git.r3dt34m.net:${GITEA_OWNER}/glados.git" HEAD
 ```
+
+Obtain the repository-owner value from the release owner; it is not a secret,
+but keeping it machine-local avoids embedding account-specific identifiers in
+the distributable source tree.
 
 On the first connection, compare the displayed SSH host fingerprint with the
 fingerprint published by the repository administrator before accepting it. A
@@ -100,7 +105,8 @@ the operator's home directory:
 
 ```bash
 cd "$HOME"
-git clone git@git.r3dt34m.net:scosta44/glados.git GLaDOS
+GITEA_OWNER='your-gitea-repository-owner'
+git clone "git@git.r3dt34m.net:${GITEA_OWNER}/glados.git" GLaDOS
 cd GLaDOS
 git switch main
 git status --short --branch

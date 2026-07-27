@@ -242,7 +242,7 @@ test('GLaDOS process mounts fleet tools but enforces caller-specific permissions
   const dispatchDecision = await hook({
     hook_event_name: 'PreToolUse',
     tool_name: 'Agent',
-    tool_input: { subagent_type: 'webapp-recon' },
+    tool_input: { subagent_type: 'webapp-recon', isolation: 'worktree' },
     tool_use_id: 'root-agent-1',
   });
   assert.equal(dispatchDecision.hookSpecificOutput.permissionDecision, 'allow');
@@ -264,6 +264,7 @@ test('GLaDOS process mounts fleet tools but enforces caller-specific permissions
   assert.deepEqual(await opts.canUseTool('Agent', {
     subagent_type: 'webapp-recon',
     run_in_background: false,
+    isolation: 'remote',
     prompt: 'Perform the assigned recon and return the result.',
   }, { toolUseID: 'root-agent-foreground' }), {
     behavior: 'allow',
@@ -525,6 +526,19 @@ test('browser form input normalization repairs missing names and ref-prefixed ta
       { name: 'Password', type: 'textbox', target: 'f3e29', value: 'secret' },
     ],
   });
+});
+
+test('task input normalization strips unsupported local-runtime isolation', () => {
+  for (const [toolName, isolation] of [['Task', 'worktree'], ['Agent', 'remote']]) {
+    assert.deepEqual(normalizeToolInput(toolName, {
+      subagent_type: 'webapp-recon',
+      isolation,
+      prompt: 'Perform the assigned work.',
+    }, { agentId: 'glados' }), {
+      subagent_type: 'webapp-recon',
+      prompt: 'Perform the assigned work.',
+    });
+  }
 });
 
 test('reporting tool normalization paginates reads and requests compact baseline data', () => {

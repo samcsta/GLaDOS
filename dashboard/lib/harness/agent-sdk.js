@@ -362,6 +362,13 @@ function normalizeToolInput(toolName, input = {}, { agentId = null } = {}) {
   const name = String(toolName || '');
   const reportingAgent = agentId === 'report-writer' || agentId === 'report-validator';
   let normalized = input;
+  if (isTaskDispatchTool(name) && Object.prototype.hasOwnProperty.call(normalized, 'isolation')) {
+    // GLaDOS runs the Agent SDK from its durable runtime workspace, which is
+    // intentionally outside the source repository. Worktree/remote isolation
+    // is therefore not a valid dispatch mode for its local named specialists.
+    normalized = { ...normalized };
+    delete normalized.isolation;
+  }
   if (/__browser_fill_form$/i.test(name) && Array.isArray(input.fields)) {
     normalized = {
       ...normalized,
@@ -473,11 +480,11 @@ function buildPreToolUseHook(agentId, policy = loadPolicy(), options = {}) {
       hookSpecificOutput.updatedInput = normalizedInput;
     }
     if (decision.allowed && callerAgentId === 'glados' && isTaskDispatchTool(input.tool_name)) {
-      const target = targetAgentFromTaskInput(input.tool_input);
+      const target = targetAgentFromTaskInput(normalizedInput);
       hookSpecificOutput.updatedInput = {
-        ...input.tool_input,
+        ...normalizedInput,
         subagent_type: target,
-        name: input.tool_input?.name || target,
+        name: normalizedInput?.name || target,
         run_in_background: false,
       };
     }
@@ -507,11 +514,11 @@ function buildCanUseTool(agentId, policy = loadPolicy(), hookOptions = {}) {
       const result = { behavior: 'allow', toolUseID: requestOptions.toolUseID };
       if (normalizedInput !== input) result.updatedInput = normalizedInput;
       if (callerAgentId === 'glados' && isTaskDispatchTool(toolName)) {
-        const target = targetAgentFromTaskInput(input);
+        const target = targetAgentFromTaskInput(normalizedInput);
         result.updatedInput = {
-          ...input,
+          ...normalizedInput,
           subagent_type: target,
-          name: input?.name || target,
+          name: normalizedInput?.name || target,
           run_in_background: false,
         };
       }
@@ -751,7 +758,7 @@ function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, work
     const halted = listHaltedAgents().map(marker => marker.agentId).filter(Boolean);
     lines.push(`- Operator halt state: ${halted.length ? `halted agents are ${halted.join(', ')}` : 'no agents are halted'}. Treat this as authoritative and do not dispatch a halted agent.`);
     lines.push('- For normal investigations, perform target reachability preflight only with mcp__watchdog__target_probe. Never use Bash/curl or browser tools from GLaDOS for target interaction; delegate that work to a named specialist.');
-    lines.push('- Subagent dispatch rule: use the SDK subagent dispatch tool only with subagent_type set to an exact enabled GLaDOS agent id, name set to that same id, and run_in_background=false. Background dispatch is hard-denied. Never launch a generic unnamed Agent.');
+    lines.push('- Subagent dispatch rule: use the SDK subagent dispatch tool only with subagent_type set to an exact enabled GLaDOS agent id, name set to that same id, and run_in_background=false. Omit the isolation field; GLaDOS specialists run in the managed local runtime workspace, not a git worktree or remote environment. Background dispatch is hard-denied. Never launch a generic unnamed Agent.');
     lines.push('- A specialist dispatch is synchronous and must return its result to this turn. If the SDK nevertheless reports it as running, use SendMessage to the same named agent; never launch another Agent with a prompt beginning "to:" and never substitute a different specialist.');
     lines.push('- After a subagent returns, relay its final result to the operator. Never expose internal agentId values, output_file paths, SendMessage instructions, or raw SDK task metadata.');
     lines.push('- Audit-task lifecycle is mandatory: when blackboard_task_create returns a task ID, include that exact task ID in the specialist dispatch prompt and require the specialist to call blackboard_task_update with completed, failed, or cancelled before returning. If it forgets, reconcile the task yourself from the returned result.');
