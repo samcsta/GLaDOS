@@ -301,6 +301,8 @@ test('v4 long-run workspace bounds transcript memory and retries tab reads', () 
   assert.match(app, /data-overview-end/);
   assert.match(app, /load\.inFlight/);
   assert.match(server, /admitUserTranscript\('glados', message, req\.body\?\.client_id\)/);
+  assert.match(server, /fastPath: 'model'/);
+  assert.match(server, /fastPath: 'version'/);
   assert.match(server, /res\.status\(202\)\.json\(\{ ok: true, accepted: true/);
   assert.doesNotMatch(server, /ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END/);
 });

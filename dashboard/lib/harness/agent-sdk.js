@@ -1476,9 +1476,16 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
       const mappedEvents = mapSdkMessageToEvents(agentId, message, context);
       if (!firstActivitySeen && isMeaningfulTurnActivity(mappedEvents)) firstActivitySeen = true;
       for (const ev of mappedEvents) {
-        const recorded = transcriptStore ? transcriptStore.record(ev.agentId || agentId, ev) : ev;
+        // Streaming deltas are transient UI transport. Persisting every token
+        // synchronously to SQLite delays the next SDK chunk and makes the
+        // dashboard look stalled. The completed assistant event remains the
+        // durable transcript record.
+        const isStreamDelta = ev.kind === 'text-stream' || ev.kind === 'thinking-stream';
+        const recorded = transcriptStore && !isStreamDelta
+          ? transcriptStore.record(ev.agentId || agentId, ev)
+          : ev;
         events.push(recorded);
-        if (onEvent) await onEvent(recorded, message);
+        if (onEvent) onEvent(recorded, message);
       }
     }
   } finally {

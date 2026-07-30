@@ -1121,6 +1121,21 @@ app.post('/api/chat/glados', async (req, res) => {
     return res.status(503).json({ ok: false, error: `message was not admitted: ${error.message}` });
   }
 
+  // These are dashboard-owned facts, not assessment work. Answer them without
+  // starting the large coordinator prompt or booting MCP servers.
+  const normalizedMessage = message.trim().toLowerCase();
+  if (/\bwhat\s+(?:model|llm)\b|\bwhich\s+model\b|\bmodel\s+(?:are|r)\b/.test(normalizedMessage)) {
+    const glados = loadAgentRegistry().find(agent => agent.id === 'glados');
+    const text = `I'm running ${glados?.model || 'the configured GLaDOS model'} for this session.`;
+    const ev = transcriptEvent('glados', 'assistant-text', text, { fastPath: 'model' });
+    return res.json({ ok: true, fastPath: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
+  }
+  if (/\b(?:what\s+)?version\b.*\bglados\b|\bglados\b.*\bversion\b/.test(normalizedMessage)) {
+    const text = `This is GLaDOS ${getVersionInfo().version}.`;
+    const ev = transcriptEvent('glados', 'assistant-text', text, { fastPath: 'version' });
+    return res.json({ ok: true, fastPath: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
+  }
+
   if (pendingGladosKickoff) {
     if (isKickoffCancel(message)) {
       const cancelled = pendingGladosKickoff;
