@@ -345,8 +345,20 @@ function sqliteTableColumns(dbPath, table) {
 function ensureBlackboardDb(paths) {
   runSql(paths.blackboardDb, `
 PRAGMA foreign_keys=ON;
+CREATE TABLE IF NOT EXISTS investigation_sessions (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'archived')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  archived_at TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_investigation_sessions_one_active
+  ON investigation_sessions((1)) WHERE state = 'active';
 CREATE TABLE IF NOT EXISTS engagements (
   id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL DEFAULT 'legacy' REFERENCES investigation_sessions(id),
   target_name TEXT NOT NULL,
   scope TEXT,
   status TEXT DEFAULT 'active',
@@ -406,6 +418,7 @@ CREATE INDEX IF NOT EXISTS idx_controller_events_goal ON controller_events(goal_
 CREATE INDEX IF NOT EXISTS idx_controller_events_job ON controller_events(job_id, id);
 CREATE TABLE IF NOT EXISTS dashboard_transcript_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL DEFAULT 'legacy' REFERENCES investigation_sessions(id),
   agent_id TEXT NOT NULL,
   client_event_id TEXT,
   kind TEXT NOT NULL,
@@ -414,8 +427,6 @@ CREATE TABLE IF NOT EXISTS dashboard_transcript_events (
   ts TEXT NOT NULL DEFAULT (datetime('now')),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_transcript_client_id ON dashboard_transcript_events(client_event_id) WHERE client_event_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_dashboard_transcript_agent_id ON dashboard_transcript_events(agent_id, id);
 CREATE TABLE IF NOT EXISTS findings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   engagement_id TEXT NOT NULL,
@@ -487,6 +498,7 @@ CREATE TABLE IF NOT EXISTS plan_approvals (
 CREATE INDEX IF NOT EXISTS idx_plan_approvals_plan ON plan_approvals(plan_id);
 CREATE TABLE IF NOT EXISTS operator_action_approvals (
   id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL DEFAULT 'legacy' REFERENCES investigation_sessions(id),
   agent_id TEXT NOT NULL,
   target_url TEXT NOT NULL,
   method TEXT NOT NULL DEFAULT '*',
@@ -539,6 +551,35 @@ CREATE TABLE IF NOT EXISTS replan_proposals (
 );
 CREATE INDEX IF NOT EXISTS idx_replan_state ON replan_proposals(state);
 `);
+  const sessionCount = runSql(paths.blackboardDb, `SELECT COUNT(*) FROM investigation_sessions;`).stdout.trim();
+  if (sessionCount === '0') {
+    runSql(paths.blackboardDb, `
+      INSERT INTO investigation_sessions (id, name, state, metadata_json)
+      VALUES ('legacy', 'Unassigned session', 'active', '{"unassigned":true,"legacy":true}');
+    `);
+  }
+  const engagementCols = sqliteTableColumns(paths.blackboardDb, 'engagements');
+  if (!engagementCols.has('session_id')) {
+    runSql(paths.blackboardDb, `ALTER TABLE engagements ADD COLUMN session_id TEXT NOT NULL DEFAULT 'legacy' REFERENCES investigation_sessions(id);`);
+  }
+  const transcriptCols = sqliteTableColumns(paths.blackboardDb, 'dashboard_transcript_events');
+  if (!transcriptCols.has('session_id')) {
+    runSql(paths.blackboardDb, `ALTER TABLE dashboard_transcript_events ADD COLUMN session_id TEXT NOT NULL DEFAULT 'legacy' REFERENCES investigation_sessions(id);`);
+  }
+  const approvalCols = sqliteTableColumns(paths.blackboardDb, 'operator_action_approvals');
+  if (!approvalCols.has('session_id')) {
+    runSql(paths.blackboardDb, `ALTER TABLE operator_action_approvals ADD COLUMN session_id TEXT NOT NULL DEFAULT 'legacy' REFERENCES investigation_sessions(id);`);
+  }
+  runSql(paths.blackboardDb, `
+    DROP INDEX IF EXISTS idx_dashboard_transcript_client_id;
+    DROP INDEX IF EXISTS idx_dashboard_transcript_agent_id;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_transcript_session_client_id
+      ON dashboard_transcript_events(session_id, client_event_id) WHERE client_event_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_dashboard_transcript_session_agent_id
+      ON dashboard_transcript_events(session_id, agent_id, id);
+    CREATE INDEX IF NOT EXISTS idx_engagements_session_started
+      ON engagements(session_id, started_at DESC);
+  `);
   const cols = sqliteTableColumns(paths.blackboardDb, 'findings');
   if (!cols.has('enables_vectors')) runSql(paths.blackboardDb, 'ALTER TABLE findings ADD COLUMN enables_vectors TEXT;', { ignoreError: true });
   if (!cols.has('confidence_score')) runSql(paths.blackboardDb, 'ALTER TABLE findings ADD COLUMN confidence_score REAL;', { ignoreError: true });

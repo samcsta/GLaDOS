@@ -9,6 +9,9 @@ const state = {
   agentsLoadedOnce: false,
   update: { lines: [], running: false, es: null, autoStart: false },
   reports: { query: '', scope: 'all', selectedPath: null },
+  investigationSessions: [],
+  currentSessionId: null,
+  sessionGeneration: 0,
   overview: null,
   agentFilter: (() => { try { return localStorage.getItem('glados-dash.agent-filter') || 'all'; } catch { return 'all'; } })(),
   agentQuery: (() => { try { return localStorage.getItem('glados-dash.agent-query') || ''; } catch { return ''; } })(),
@@ -43,7 +46,113 @@ function persistWorkspaceState() {
   try {
     localStorage.setItem('glados-dash.open-tabs', JSON.stringify(state.openTabs));
     localStorage.setItem('glados-dash.current-tab', state.currentTab || '');
+    localStorage.setItem('glados-dash.current-session', state.currentSessionId || '');
   } catch {}
+}
+
+function sessionQuery() {
+  return `session_id=${encodeURIComponent(state.currentSessionId || 'legacy')}`;
+}
+
+function withSession(url) {
+  return `${url}${url.includes('?') ? '&' : '?'}${sessionQuery()}`;
+}
+
+function closeSessionStreams() {
+  state.sessionGeneration++;
+  try { state._lobbySource?.close(); } catch {}
+  state._lobbySource = null;
+  for (const rec of state.transcripts.values()) {
+    try { rec.es?.close(); } catch {}
+  }
+  state.transcripts.clear();
+  state.active.clear();
+}
+
+async function loadInvestigationSessions() {
+  const response = await fetch('/api/investigation-sessions');
+  const body = await response.json();
+  if (!response.ok || !body.ok) throw new Error(body.error || 'could not load investigation sessions');
+  state.investigationSessions = body.sessions || [];
+  state.currentSessionId = body.activeId;
+}
+
+async function activateInvestigationSession(sessionId) {
+  if (!sessionId || sessionId === state.currentSessionId) return;
+  const response = await fetch(`/api/investigation-sessions/${encodeURIComponent(sessionId)}/activate`, { method: 'POST' });
+  const body = await response.json();
+  if (!response.ok || !body.ok) throw new Error(body.error || 'could not activate investigation');
+  closeSessionStreams();
+  state.currentSessionId = body.session.id;
+  state.investigationSessions = body.sessions || [];
+  clearPlanClientState();
+  persistWorkspaceState();
+  await loadAgents();
+  renderPane();
+  if (!state._lobbySource) subscribeLobby();
+}
+
+async function createInvestigationSession() {
+  const name = `Investigation ${new Date().toLocaleString()}`;
+  const response = await fetch('/api/investigation-sessions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+  });
+  const body = await response.json();
+  if (!response.ok || !body.ok) throw new Error(body.error || 'could not create investigation');
+  closeSessionStreams();
+  state.currentSessionId = body.session.id;
+  state.investigationSessions = body.sessions || [];
+  clearPlanClientState();
+  persistWorkspaceState();
+  await loadAgents();
+  renderPane();
+  if (!state._lobbySource) subscribeLobby();
+}
+
+async function renameInvestigationSession(sessionId, name) {
+  const response = await fetch(`/api/investigation-sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+  });
+  const body = await response.json();
+  if (!response.ok || !body.ok) throw new Error(body.error || 'could not rename investigation');
+  state.investigationSessions = body.sessions || [];
+  return body.session;
+}
+
+async function deleteInvestigationSession(sessionId) {
+  const response = await fetch(`/api/investigation-sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+  const body = await response.json();
+  if (!response.ok || !body.ok) throw new Error(body.error || 'could not delete investigation');
+  closeSessionStreams();
+  state.currentSessionId = body.activeId;
+  state.investigationSessions = body.sessions || [];
+  clearPlanClientState();
+  persistWorkspaceState();
+  await loadAgents();
+  renderPane();
+  subscribeLobby();
+}
+
+function showNameInput({ title, value = '', confirmLabel = 'Save' }) {
+  return new Promise(resolve => {
+    const root = document.getElementById('modal-root');
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.innerHTML = `<section class="app-modal session-name-modal" role="dialog" aria-modal="true" aria-labelledby="session-name-title">
+      <header><h2 id="session-name-title">${escapeHtml(title)}</h2><button type="button" data-modal-close aria-label="Close">×</button></header>
+      <div class="app-modal-copy"><label for="session-name-input">Investigation name</label><input id="session-name-input" maxlength="120" value="${escapeHtml(value)}" /></div>
+      <footer><button type="button" data-modal-cancel>Cancel</button><button type="button" data-modal-confirm class="safe">${escapeHtml(confirmLabel)}</button></footer>
+    </section>`;
+    const input = backdrop.querySelector('input');
+    const finish = result => { backdrop.remove(); resolve(result); };
+    const submit = () => { const next = input.value.trim(); if (next) finish(next); };
+    backdrop.querySelector('[data-modal-close]').addEventListener('click', () => finish(null));
+    backdrop.querySelector('[data-modal-cancel]').addEventListener('click', () => finish(null));
+    backdrop.querySelector('[data-modal-confirm]').addEventListener('click', submit);
+    input.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); submit(); } });
+    root.replaceChildren(backdrop);
+    input.focus(); input.select();
+  });
 }
 
 function persistNotifications() {
@@ -295,7 +404,7 @@ function applyRuntimeSurfaceRefresh(info = {}) {
 async function handleRefreshRuntime() {
   if (!await confirmAction({
     title: 'Refresh runtime',
-    message: 'Refresh the local runtime? This stops in-flight turns and clears every agent transcript plus all blackboard engagement, finding, task, recon, plan, and Proxy capture/history rows. Evidence files and exported reports are kept.',
+    message: 'Refresh local Agent SDK and proxy processes? Investigation sessions, blackboard data, transcripts, plans, evidence, reports, and proxy history are preserved.',
     confirmLabel: 'Refresh runtime',
     danger: true,
   })) return;
@@ -319,13 +428,13 @@ async function handleRefreshRuntime() {
 
 async function handleResetAgentSession(agentId) {
   const tabId = tabIdForAgent(agentId);
-  const resetLabel = agentId === 'glados' ? 'Reset investigation' : 'Reset session';
+  const resetLabel = agentId === 'glados' ? 'Reset conversations' : 'Reset session';
   const resetMsg = agentId === 'glados'
-    ? 'Clear the current GLaDOS transcript state and every assessment agent transcript, wipe the blackboard (engagements, findings, tasks, plans, recon state), AND clear short-term memory caches (memory/.dreams/) for every agent? Curated MEMORY.md, evidence files, and exported reports are kept. The next message starts a fresh investigation.'
+    ? 'Start fresh Agent SDK conversations for this investigation session? Existing transcript history, blackboard findings, plans, evidence, reports, and all other investigation sessions are preserved.'
     : `Clear the current transcript state for "${agentId}"? The next message starts fresh.`;
   if (!await confirmAction({ title: resetLabel, message: resetMsg, confirmLabel: resetLabel, danger: true })) return;
   try {
-    const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/reset-session`, { method: 'POST' });
+    const r = await fetch(withSession(`/api/agents/${encodeURIComponent(agentId)}/reset-session`), { method: 'POST' });
     const j = await r.json();
     if (!j.ok) throw new Error(j.error || 'reset failed');
     const rec = state.transcripts.get(tabId);
@@ -343,7 +452,7 @@ function wireOperationControls(root = document) {
 }
 
 async function loadAgents() {
-  const res = await fetch('/api/agents');
+  const res = await fetch(withSession('/api/agents'));
   const j = await res.json();
   const previouslyActive = new Set(state.active.keys());
   state.agents = j.agents || [];
@@ -753,9 +862,59 @@ function renderLiteLlmUsage(usage, metric = 'spend') {
 async function renderOverviewPane() {
   const wrap = document.createElement('div');
   wrap.className = 'overview-pane';
-  wrap.innerHTML = '<div class="overview-loading">Loading operational state…</div>';
+  wrap.innerHTML = '<div class="overview-session-host"></div><div class="overview-content"><div class="overview-loading">Loading operational state…</div></div>';
   paneEl.appendChild(wrap);
+  const sessionHost = wrap.querySelector('.overview-session-host');
+  const content = wrap.querySelector('.overview-content');
   let usageShareMetric = 'spend';
+
+  const renderSessionManager = () => {
+    const current = state.investigationSessions.find(session => session.id === state.currentSessionId) || state.investigationSessions[0];
+    const sorted = [...state.investigationSessions].sort((a, b) => (a.state === 'active' ? -1 : b.state === 'active' ? 1 : Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
+    sessionHost.innerHTML = `<div class="overview-session-bar">
+      <div class="overview-session-label"><span>Investigation workspace</span><small>Transcripts, findings, plans, and agent context</small></div>
+      <details class="overview-session-menu">
+        <summary aria-label="Select investigation"><span class="session-state-dot ${current?.state || 'active'}"></span><span><strong>${escapeHtml(current?.name || 'Unassigned session')}</strong><small>${current?.metadata?.unassigned ? 'Waiting for the first GLaDOS prompt' : `${current?.engagementCount || 0} engagement${current?.engagementCount === 1 ? '' : 's'}`}</small></span></summary>
+        <div class="overview-session-popover">
+          <div class="overview-session-popover-head"><span>Investigations</span><button type="button" data-session-new>New session</button></div>
+          <div class="overview-session-list">
+            ${sorted.map(session => `<button type="button" class="overview-session-option${session.id === state.currentSessionId ? ' selected' : ''}" data-session-select="${escapeHtml(session.id)}">
+              <span class="session-state-dot ${session.state}"></span><span><strong>${escapeHtml(session.name)}</strong><small>${session.state === 'active' ? 'Active' : 'Archived'} · ${new Date(session.updatedAt).toLocaleDateString()} · ${session.engagementCount || 0} engagement${session.engagementCount === 1 ? '' : 's'}</small></span>${session.id === state.currentSessionId ? '<span class="session-current-mark">Current</span>' : ''}
+            </button>`).join('')}
+          </div>
+          <div class="overview-session-popover-actions">
+            <button type="button" data-session-rename>Rename</button><button type="button" class="danger" data-session-delete>Delete</button>
+          </div>
+        </div>
+      </details>
+    </div>`;
+    const details = sessionHost.querySelector('details');
+    sessionHost.querySelectorAll('[data-session-select]').forEach(button => button.addEventListener('click', async () => {
+      details.open = false;
+      try { await activateInvestigationSession(button.dataset.sessionSelect); }
+      catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
+    }));
+    sessionHost.querySelector('[data-session-new]')?.addEventListener('click', async () => {
+      details.open = false;
+      try { await createInvestigationSession(); }
+      catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
+    });
+    sessionHost.querySelector('[data-session-rename]')?.addEventListener('click', async () => {
+      details.open = false;
+      const name = await showNameInput({ title: 'Rename investigation', value: current?.name || '', confirmLabel: 'Rename' });
+      if (!name) return;
+      try { await renameInvestigationSession(current.id, name); renderSessionManager(); }
+      catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
+    });
+    sessionHost.querySelector('[data-session-delete]')?.addEventListener('click', async () => {
+      details.open = false;
+      if (!await confirmAction({ title: 'Delete investigation session', message: `Permanently delete "${current?.name}" and its blackboard records, plans, tasks, findings, and transcripts? Evidence and report files are preserved.`, confirmLabel: 'Delete session', danger: true })) return;
+      try { await deleteInvestigationSession(current.id); }
+      catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
+    });
+  };
+  sessionHost.addEventListener('session-list-updated', renderSessionManager);
+  renderSessionManager();
 
   const load = async ({ forceUsage = false } = {}) => {
     if (load.inFlight) {
@@ -766,13 +925,13 @@ async function renderOverviewPane() {
       return;
     }
     const run = (async () => {
-    const refreshButton = wrap.querySelector('[data-overview-refresh]');
+    const refreshButton = content.querySelector('[data-overview-refresh]');
     if (forceUsage && refreshButton) {
       refreshButton.disabled = true;
       refreshButton.textContent = 'Refreshing…';
     }
     try {
-      const data = await fetchJson(`/api/overview${forceUsage ? '?usage=refresh' : ''}`, {
+      const data = await fetchJson(withSession(`/api/overview${forceUsage ? '?usage=refresh' : ''}`), {
         timeoutMs: 15000,
         retries: 1,
         cache: 'no-store',
@@ -803,7 +962,7 @@ async function renderOverviewPane() {
             : engagement
               ? 'Send the next objective to GLaDOS or inspect the current plan.'
               : 'Start with /investigate <target> in GLaDOS Chat when an authorized engagement is ready.';
-      wrap.innerHTML = `
+      content.innerHTML = `
         <header class="overview-header">
           <div>
             <span class="overview-eyebrow">Operational overview</span>
@@ -869,9 +1028,10 @@ async function renderOverviewPane() {
             </article>
           </div>
         </section>`;
-      wrap.querySelector('[data-overview-chat]')?.addEventListener('click', openGladosChat);
-      wrap.querySelector('[data-overview-refresh]')?.addEventListener('click', () => load({ forceUsage: true }));
-      wrap.querySelector('[data-overview-end]')?.addEventListener('click', async () => {
+      renderSessionManager();
+      content.querySelector('[data-overview-chat]')?.addEventListener('click', openGladosChat);
+      content.querySelector('[data-overview-refresh]')?.addEventListener('click', () => load({ forceUsage: true }));
+      content.querySelector('[data-overview-end]')?.addEventListener('click', async () => {
         const confirmed = await confirmAction({
           title: 'End investigation',
           message: 'Stop active agents, cancel remaining tracked work, and end this engagement without starting report generation?',
@@ -880,7 +1040,7 @@ async function renderOverviewPane() {
         });
         if (!confirmed) return;
         try {
-          await fetchJson(`/api/engagements/${encodeURIComponent(engagement.id)}/end`, {
+          await fetchJson(withSession(`/api/engagements/${encodeURIComponent(engagement.id)}/end`), {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ reason: 'operator ended investigation from Overview tab' }),
@@ -892,24 +1052,24 @@ async function renderOverviewPane() {
           pushNotification('error', `end investigation failed: ${error.message}`, { toast: true, label: 'Overview' });
         }
       });
-      wrap.querySelector('[data-overview-plans]')?.addEventListener('click', openPlans);
-      wrap.querySelector('[data-overview-proxy]')?.addEventListener('click', openProxy);
-      wrap.querySelectorAll('[data-overview-reports]').forEach(button => button.addEventListener('click', openReports));
-      wrap.querySelectorAll('[data-overview-agent]').forEach(button => button.addEventListener('click', () => openAgentTab(button.dataset.overviewAgent)));
-      wrap.querySelectorAll('[data-usage-share]').forEach(button => button.addEventListener('click', () => {
+      content.querySelector('[data-overview-plans]')?.addEventListener('click', openPlans);
+      content.querySelector('[data-overview-proxy]')?.addEventListener('click', openProxy);
+      content.querySelectorAll('[data-overview-reports]').forEach(button => button.addEventListener('click', openReports));
+      content.querySelectorAll('[data-overview-agent]').forEach(button => button.addEventListener('click', () => openAgentTab(button.dataset.overviewAgent)));
+      content.querySelectorAll('[data-usage-share]').forEach(button => button.addEventListener('click', () => {
         usageShareMetric = button.dataset.usageShare;
-        wrap.querySelectorAll('[data-usage-share]').forEach(candidate => {
+        content.querySelectorAll('[data-usage-share]').forEach(candidate => {
           const active = candidate.dataset.usageShare === usageShareMetric;
           candidate.classList.toggle('active', active);
           candidate.setAttribute('aria-selected', String(active));
         });
-        const list = wrap.querySelector('[data-usage-model-list]');
+        const list = content.querySelector('[data-usage-model-list]');
         if (list) list.innerHTML = renderUsageModelRows(data.llmUsage, usageShareMetric);
       }));
     } catch (error) {
       if (!wrap.isConnected) return;
-      wrap.innerHTML = `<div class="overview-error"><strong>Overview unavailable</strong><p>${escapeHtml(error.message)}</p><button type="button">Retry</button></div>`;
-      wrap.querySelector('button')?.addEventListener('click', load);
+      content.innerHTML = `<div class="overview-error"><strong>Overview unavailable</strong><p>${escapeHtml(error.message)}</p><button type="button">Retry</button></div>`;
+      content.querySelector('button')?.addEventListener('click', load);
     }
     })();
     load.inFlight = run;
@@ -1032,8 +1192,11 @@ function ensureTranscript(tabId, agentId) {
 	    completedAt: null,
 	  };
   state.transcripts.set(tabId, rec);
-  const es = new EventSource(`/api/agents/${encodeURIComponent(agentId)}/transcript?stream=v4`);
+  const generation = state.sessionGeneration;
+  const sessionId = state.currentSessionId;
+  const es = new EventSource(withSession(`/api/agents/${encodeURIComponent(agentId)}/transcript?stream=v4`));
   es.onmessage = e => {
+    if (generation !== state.sessionGeneration || sessionId !== state.currentSessionId) return;
     let ev;
     try { ev = JSON.parse(e.data); } catch { return; }
     ev = normalizeIncomingTranscriptEvent(ev);
@@ -1475,7 +1638,7 @@ async function refreshChatTurnStatus(tabId, agentId) {
   const rec = state.transcripts.get(tabId);
   if (!rec) return;
   try {
-    const r = await fetch(`/api/chat/status/${encodeURIComponent(agentId)}`);
+    const r = await fetch(withSession(`/api/chat/status/${encodeURIComponent(agentId)}`));
     if (!r.ok) return;
     const status = await r.json();
     if (status.active) {
@@ -1876,7 +2039,7 @@ function renderChatPane() {
     fetch('/api/chat/glados', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, client_id: clientId }),
+      body: JSON.stringify({ message: msg, client_id: clientId, session_id: state.currentSessionId }),
     }).then(r => r.json()).then(j => {
       if (!j.ok) {
         logEvent('error', 'chat error: ' + (j.error || 'unknown'));
@@ -1919,10 +2082,10 @@ async function stopChatTurnFromUi(tabId, agentId) {
     btn.textContent = 'Stopping...';
   }
   try {
-    const r = await fetch(`/api/chat/${encodeURIComponent(agentId)}/stop`, {
+    const r = await fetch(withSession(`/api/chat/${encodeURIComponent(agentId)}/stop`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason: 'dashboard stop button' }),
+      body: JSON.stringify({ reason: 'dashboard stop button', session_id: state.currentSessionId }),
     });
     const j = await r.json().catch(() => ({}));
     logEvent(j.stopped ? 'ended' : 'meta', j.stopped ? `stopped ${agentId}` : `${agentId} was not running`);
@@ -2365,7 +2528,18 @@ function setupHealthBanner() {
 
 // Lobby event stream — session-started / session-ended -> auto-open tab.
 function subscribeLobby() {
-  const es = new EventSource('/api/agents/stream');
+  try { state._lobbySource?.close(); } catch {}
+  const es = new EventSource(withSession('/api/agents/stream'));
+  state._lobbySource = es;
+  es.addEventListener('investigation-session-updated', async () => {
+    try {
+      await loadInvestigationSessions();
+      document.querySelector('.overview-session-host')?.dispatchEvent(new CustomEvent('session-list-updated'));
+    } catch {}
+  });
+  es.addEventListener('investigation-session-deleted', async () => {
+    try { await loadInvestigationSessions(); if (state.currentTab === 'overview') renderPane(); } catch {}
+  });
   es.addEventListener('snapshot', e => {
     const arr = JSON.parse(e.data);
     for (const a of arr) {
@@ -2378,6 +2552,7 @@ function subscribeLobby() {
   });
   es.addEventListener('session-started', e => {
     const info = JSON.parse(e.data);
+    if (info.investigationSessionId && info.investigationSessionId !== state.currentSessionId) return;
     state.active.set(info.agentId, { sessionId: info.sessionId });
     logEvent('started', `${info.agentId} session-started`);
     renderAgentList();
@@ -2387,12 +2562,14 @@ function subscribeLobby() {
   });
   es.addEventListener('session-ended', e => {
     const info = JSON.parse(e.data);
+    if (info.investigationSessionId && info.investigationSessionId !== state.currentSessionId) return;
     state.active.delete(info.agentId);
     logEvent('ended', `${info.agentId} session-ended`);
     renderAgentList();
   });
   es.addEventListener('session-reset', e => {
     const info = JSON.parse(e.data);
+    if (info.investigationSessionId && info.investigationSessionId !== state.currentSessionId) return;
     if (!info.agentId) return;
     clearTranscriptTab(tabIdForAgent(info.agentId));
     state.active.delete(info.agentId);
@@ -2432,6 +2609,7 @@ function subscribeLobby() {
   });
   es.addEventListener('chat-turn-started', e => {
     let data = {}; try { data = JSON.parse(e.data); } catch {}
+    if (data.investigationSessionId && data.investigationSessionId !== state.currentSessionId) return;
     const tabId = data.agentId === 'glados' ? 'glados-chat' : null;
     if (!tabId) return;
     state.active.set(data.agentId, { sessionId: data.turnId || 'chat-turn' });
@@ -2449,6 +2627,7 @@ function subscribeLobby() {
   });
   es.addEventListener('chat-turn-ended', e => {
     let data = {}; try { data = JSON.parse(e.data); } catch {}
+    if (data.investigationSessionId && data.investigationSessionId !== state.currentSessionId) return;
     const tabId = data.agentId === 'glados' ? 'glados-chat' : null;
     if (!tabId) return;
     state.active.delete(data.agentId);
@@ -4180,7 +4359,7 @@ async function runSlashCommand(raw, rec) {
     const r = await fetch('/api/slash/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: raw }),
+        body: JSON.stringify({ command: raw, session_id: state.currentSessionId }),
     });
     const j = await r.json();
     if (j.action?.type === 'clear-local-transcript') {
@@ -4219,8 +4398,8 @@ async function refreshPlansBadge() {
   if (!badge) return;
   try {
     const [plansRes, replanRes] = await Promise.all([
-      fetch('/api/plans?state=pending_approval'),
-      fetch('/api/replan-proposals').catch(() => null),
+      fetch(withSession('/api/plans?state=pending_approval')),
+      fetch(withSession('/api/replan-proposals')).catch(() => null),
     ]);
     if (!plansRes.ok) return;
     const { plans } = await plansRes.json();
@@ -4283,7 +4462,7 @@ async function loadReplanProposals() {
   const box = document.getElementById('replan-proposals');
   if (!box) return;
   try {
-    const { proposals } = await fetchJson('/api/replan-proposals', { timeoutMs: 20000, retries: 1 });
+    const { proposals } = await fetchJson(withSession('/api/replan-proposals'), { timeoutMs: 20000, retries: 1 });
     plansState.proposals = proposals || [];
     renderReplanProposals(box, plansState.proposals);
   } catch (e) {
@@ -4327,7 +4506,7 @@ async function resolveReplanProposal(id, state) {
   if (!id) return;
   const verb = state === 'accepted' ? 'approve' : 'dismiss';
   if (!await confirmAction({ title: `${verb[0].toUpperCase() + verb.slice(1)} replan`, message: `${verb[0].toUpperCase() + verb.slice(1)} replan proposal #${id}?`, confirmLabel: verb[0].toUpperCase() + verb.slice(1), danger: state !== 'accepted' })) return;
-  const r = await fetch(`/api/replan-proposals/${encodeURIComponent(id)}/resolve`, {
+  const r = await fetch(withSession(`/api/replan-proposals/${encodeURIComponent(id)}/resolve`), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ state, resolved_by: 'operator' }),
@@ -4346,7 +4525,7 @@ async function loadPlansList() {
   const filter = document.getElementById('plans-filter');
   const state_ = filter ? filter.value : 'pending_approval';
   const q = state_ ? `?state=${encodeURIComponent(state_)}` : '';
-  const { plans } = await fetchJson('/api/plans' + q, { timeoutMs: 20000, retries: 1 });
+  const { plans } = await fetchJson(withSession('/api/plans' + q), { timeoutMs: 20000, retries: 1 });
   plansState.list = plans;
   const ul = document.getElementById('plans-list-items');
   if (!ul) return;
@@ -4374,7 +4553,7 @@ async function selectPlan(id) {
   plansState.selected = id;
   const detail = document.getElementById('plans-detail');
   detail.innerHTML = '<div class="pane-empty">Loading…</div>';
-  const r = await fetch('/api/plans/' + encodeURIComponent(id));
+  const r = await fetch(withSession('/api/plans/' + encodeURIComponent(id)));
   if (!r.ok) { detail.innerHTML = '<div class="pane-empty">Not found.</div>'; return; }
   const { plan, approvals } = await r.json();
   let planJson;
@@ -4474,7 +4653,7 @@ async function requestPlanChanges(id, changes) {
   const r = await fetch('/api/chat/glados', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, session_id: state.currentSessionId }),
   });
   const body = await r.json().catch(() => ({}));
   if (!r.ok || body.ok === false) {
@@ -4494,7 +4673,7 @@ async function endPlanInvestigation(id) {
     danger: true,
   });
   if (!confirmed) return;
-  const r = await fetch(`/api/plans/${encodeURIComponent(id)}/end`, {
+  const r = await fetch(withSession(`/api/plans/${encodeURIComponent(id)}/end`), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ reason: 'operator ended investigation from Plans tab' }),
@@ -4511,7 +4690,7 @@ async function endPlanInvestigation(id) {
 }
 
 async function decidePlan(id, action, body) {
-  const r = await fetch(`/api/plans/${encodeURIComponent(id)}/${action}`, {
+  const r = await fetch(withSession(`/api/plans/${encodeURIComponent(id)}/${action}`), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -4543,7 +4722,6 @@ document.getElementById('open-reports').addEventListener('click', ev => { ev.pre
 document.getElementById('open-settings').addEventListener('click', ev => { ev.preventDefault(); openSettings(); });
 document.getElementById('open-terminal').addEventListener('click', ev => { ev.preventDefault(); openTerminal(); });
 document.getElementById('open-proxy').addEventListener('click', ev => { ev.preventDefault(); openProxy(); });
-
 // Live-events footer: Clear wipes the on-screen feed (server keeps its own log).
 document.getElementById('events-clear').addEventListener('click', () => {
   eventsEl.innerHTML = '';
@@ -4658,7 +4836,7 @@ function wirePersistentLayout() {
   }
 })();
 
-loadAgents().then(() => {
+loadInvestigationSessions().then(loadAgents).then(() => {
   const allowedStatic = new Set(['overview', 'glados-chat', 'plans', 'reports', 'settings', 'terminal', 'proxy', 'update']);
   const agentIds = new Set(state.agents.map(agent => agent.id).filter(id => id !== 'glados'));
   const savedTabs = storageGetJson('glados-dash.open-tabs', []);

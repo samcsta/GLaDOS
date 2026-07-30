@@ -153,7 +153,7 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     }
     const overview = await request(srv.port, 'GET', '/api/overview');
     assert.equal(overview.status, 200, overview.raw);
-    assert.equal(overview.json.version, 'v4.1.0');
+    assert.equal(overview.json.version, 'v4.4.0');
     assert.equal(overview.json.engagement.target, 'example.com');
     assert.equal(overview.json.phase, 'Awaiting approval');
     assert.equal(overview.json.pendingApprovals, 1);
@@ -173,23 +173,22 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     const runtimeRefresh = await request(srv.port, 'POST', '/api/gateway/restart');
     assert.equal(runtimeRefresh.status, 200, runtimeRefresh.raw);
     assert.equal(runtimeRefresh.json.ok, true);
-    assert.equal(runtimeRefresh.json.plansReset, true);
-    assert.equal(runtimeRefresh.json.blackboardReset, true);
-    assert.equal(runtimeRefresh.json.proxyReset, true);
-    assert.equal(runtimeRefresh.json.blackboard.rowsDeleted.plans, 1);
-    assert.equal(runtimeRefresh.json.blackboard.rowsDeleted.engagements >= 1, true);
-    assert.equal(fs.readFileSync(trafficFile, 'utf8'), '');
+    assert.equal(runtimeRefresh.json.plansReset, false);
+    assert.equal(runtimeRefresh.json.blackboardReset, false);
+    assert.equal(runtimeRefresh.json.proxyReset, false);
+    assert.equal(runtimeRefresh.json.blackboard.preserved, true);
+    assert.match(fs.readFileSync(trafficFile, 'utf8'), /example\.com/);
     const refreshedPlans = await request(srv.port, 'GET', '/api/plans');
-    assert.deepEqual(refreshedPlans.json.plans, []);
+    assert.equal(refreshedPlans.json.plans.length, 1);
     const refreshedProxy = await request(srv.port, 'GET', '/api/proxy/history');
-    assert.deepEqual(refreshedProxy.json, []);
+    assert.equal(refreshedProxy.json.length, 1);
 
     const preservedDb = new Database(path.join(srv.runtime, 'blackboard', 'blackboard.db'), { readonly: true });
     try {
-      assert.equal(preservedDb.prepare("SELECT COUNT(*) AS n FROM engagements").get().n, 0);
-      assert.equal(preservedDb.prepare("SELECT COUNT(*) AS n FROM findings").get().n, 0);
-      assert.equal(preservedDb.prepare("SELECT COUNT(*) AS n FROM tasks").get().n, 0);
-      assert.equal(preservedDb.prepare("SELECT COUNT(*) AS n FROM dashboard_transcript_events").get().n, 0);
+      assert.equal(preservedDb.prepare("SELECT COUNT(*) AS n FROM engagements").get().n >= 1, true);
+      assert.equal(preservedDb.prepare("SELECT COUNT(*) AS n FROM findings").get().n, 1);
+      assert.equal(preservedDb.prepare("SELECT COUNT(*) AS n FROM tasks").get().n, 1);
+      assert.equal(preservedDb.prepare("SELECT COUNT(*) AS n FROM dashboard_transcript_events").get().n > 0, true);
     } finally {
       preservedDb.close();
     }
@@ -254,7 +253,7 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     const db = new Database(path.join(srv.runtime, 'blackboard', 'blackboard.db'), { readonly: true });
     try {
       const goals = db.prepare('SELECT type, target, status FROM controller_goals ORDER BY created_at ASC').all();
-      assert.equal(goals.some(g => g.type === 'webapp_goal' && g.target === 'example.com'), false, 'runtime refresh clears prior engagement/controller rows');
+      assert.equal(goals.some(g => g.type === 'webapp_goal' && g.target === 'example.com'), true, 'runtime refresh preserves prior engagement/controller rows');
       assert.equal(goals.some(g => g.type === 'security_review' && g.target === localRepo), true);
       const jobs = db.prepare('SELECT agent_id, job_type, target, status FROM controller_jobs').all();
       assert.deepEqual(jobs.map(j => [j.agent_id, j.job_type, j.target, j.status]), [

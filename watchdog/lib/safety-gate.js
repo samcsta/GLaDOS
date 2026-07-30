@@ -150,7 +150,8 @@ function activeScopes() {
   let db;
   try {
     db = new Database(BLACKBOARD_DB, { readonly: true, fileMustExist: true });
-    return db.prepare("SELECT id, scope FROM engagements WHERE status = 'active' ORDER BY started_at DESC").all()
+    const sessionId = process.env.GLADOS_SESSION_ID || 'legacy';
+    return db.prepare("SELECT id, scope FROM engagements WHERE status = 'active' AND session_id=? ORDER BY started_at DESC").all(sessionId)
       .flatMap(row => {
         let scope = row.scope;
         try { scope = JSON.parse(scope); } catch {}

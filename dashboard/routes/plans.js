@@ -100,6 +100,7 @@ const DB_PATH = path.resolve(
 function openDb(dbPath = DB_PATH) {
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
   return db;
 }
 
@@ -222,15 +223,20 @@ function endInvestigationForPlan(db, { planId, operator = 'operator', reason = '
   });
 }
 
-function makeRouter(broadcastLobby, { onApproved = null, onEnded = null, dbPath = DB_PATH } = {}) {
+function makeRouter(broadcastLobby, { onApproved = null, onEnded = null, dbPath = DB_PATH, getSessionId = () => 'legacy' } = {}) {
   const router = express.Router();
   const openRouterDb = () => openDb(dbPath);
+  const hasSessionSchema = db => db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='investigation_sessions'").get();
+  const planForSession = (db, fields, id, sessionId) => hasSessionSchema(db)
+    ? db.prepare(`SELECT ${fields} FROM plans p JOIN engagements e ON e.id=p.engagement_id WHERE p.id=? AND e.session_id=?`).get(id, sessionId)
+    : db.prepare(`SELECT ${fields.replaceAll('p.', '')} FROM plans WHERE id=?`).get(id);
 
   router.get('/', (req, res) => {
     const db = openRouterDb();
     try {
       const where = [];
       const args = [];
+      if (hasSessionSchema(db)) { where.push('engagement_id IN (SELECT id FROM engagements WHERE session_id=?)'); args.push(getSessionId(req)); }
       if (req.query.engagement_id) { where.push('engagement_id = ?'); args.push(req.query.engagement_id); }
       if (req.query.state) { where.push('state = ?'); args.push(req.query.state); }
       const sql = `SELECT id, engagement_id, version, state, parent_plan_id, replan_reason,
@@ -244,7 +250,7 @@ function makeRouter(broadcastLobby, { onApproved = null, onEnded = null, dbPath 
   router.get('/:id', (req, res) => {
     const db = openRouterDb();
     try {
-      const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(req.params.id);
+      const plan = planForSession(db, 'p.*', req.params.id, getSessionId(req));
       if (!plan) return res.status(404).json({ error: 'plan not found' });
       const approvals = db.prepare('SELECT * FROM plan_approvals WHERE plan_id = ? ORDER BY created_at ASC')
         .all(req.params.id);
@@ -256,9 +262,11 @@ function makeRouter(broadcastLobby, { onApproved = null, onEnded = null, dbPath 
     const check = validatePlanJson(req.body.plan_json || req.body);
     if (!check.ok) return res.status(400).json({ error: check.error });
     const plan = check.plan;
+    const sessionId = getSessionId(req);
     const id = req.body.id || 'plan_' + crypto.randomBytes(6).toString('hex');
     const db = openRouterDb();
     try {
+      if (hasSessionSchema(db) && !db.prepare('SELECT 1 FROM engagements WHERE id=? AND session_id=?').get(plan.engagement_id, sessionId)) return res.status(409).json({ error: 'engagement belongs to another investigation session' });
       const parent = plan.parent_plan_id || null;
       // If replanning, mark the parent as superseded.
       if (parent) {
@@ -305,7 +313,7 @@ function makeRouter(broadcastLobby, { onApproved = null, onEnded = null, dbPath 
     const decision = Array.isArray(vectors) && vectors.length ? 'approve_selected' : 'approve_all';
     const db = openRouterDb();
     try {
-      const row = db.prepare("SELECT id, state, plan_json, engagement_id FROM plans WHERE id = ?").get(req.params.id);
+      const row = planForSession(db, 'p.id, p.state, p.plan_json, p.engagement_id', req.params.id, getSessionId(req));
       if (!row) return res.status(404).json({ error: 'plan not found' });
       if (row.state !== 'pending_approval')
         return res.status(409).json({ error: `cannot approve plan in state=${row.state}` });
@@ -416,7 +424,7 @@ function makeRouter(broadcastLobby, { onApproved = null, onEnded = null, dbPath 
   router.get('/:id/acl-preview', (req, res) => {
     const db = openRouterDb();
     try {
-      const row = db.prepare("SELECT id, plan_json, engagement_id FROM plans WHERE id = ?").get(req.params.id);
+      const row = planForSession(db, 'p.id, p.plan_json, p.engagement_id', req.params.id, getSessionId(req));
       if (!row) return res.status(404).json({ error: 'plan not found' });
       const plan = JSON.parse(row.plan_json);
       plan.id = row.id;
@@ -430,7 +438,7 @@ function makeRouter(broadcastLobby, { onApproved = null, onEnded = null, dbPath 
     if (!check.ok) return res.status(400).json({ error: check.error });
     const db = openRouterDb();
     try {
-      const parent = db.prepare('SELECT id, engagement_id, version FROM plans WHERE id = ?').get(req.params.id);
+      const parent = planForSession(db, 'p.id, p.engagement_id, p.version', req.params.id, getSessionId(req));
       if (!parent) return res.status(404).json({ error: 'plan not found' });
       const newId = 'plan_' + crypto.randomBytes(6).toString('hex');
       db.prepare("UPDATE plans SET state='superseded' WHERE id = ?").run(req.params.id);
@@ -456,7 +464,7 @@ function makeRouter(broadcastLobby, { onApproved = null, onEnded = null, dbPath 
     const { reason = '', operator = 'operator' } = req.body || {};
     const db = openRouterDb();
     try {
-      const plan = db.prepare("SELECT id, state FROM plans WHERE id = ?").get(req.params.id);
+      const plan = planForSession(db, 'p.id, p.state', req.params.id, getSessionId(req));
       if (!plan) return res.status(404).json({ error: 'plan not found' });
       if (plan.state !== 'pending_approval')
         return res.status(409).json({ error: `cannot reject plan in state=${plan.state}` });

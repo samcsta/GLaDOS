@@ -589,6 +589,19 @@ test('legacy unscoped SDK resume ids are rejected when a cwd scope is required',
   assert.equal(registry.get('glados', path.join(runtime, 'workspaces')), null);
 });
 
+test('SDK resume ids are isolated by investigation session', () => {
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-sdk-investigations-'));
+  const registry = new SdkSessionRegistry({ runtimeDir: runtime });
+  const cwd = resolveSdkWorkingDirectory({ env: { GLADOS_RUNTIME_DIR: runtime } });
+  registry.set('session-a', 'glados', 'sdk-a', cwd);
+  registry.set('session-b', 'glados', 'sdk-b', cwd);
+  assert.equal(registry.get('session-a', 'glados', cwd), 'sdk-a');
+  assert.equal(registry.get('session-b', 'glados', cwd), 'sdk-b');
+  registry.clearSession('session-a');
+  assert.equal(registry.get('session-a', 'glados', cwd), null);
+  assert.equal(registry.get('session-b', 'glados', cwd), 'sdk-b');
+});
+
 test('every enabled subagent mounts the local-work tool and MCP baseline', () => {
   const policy = loadPolicy();
   const env = baseTestEnv({ GLADOS_BROWSER_MCP: '1' });

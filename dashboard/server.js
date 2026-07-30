@@ -34,6 +34,7 @@ const {
   resolveSdkWorkingDirectory,
 } = require('./lib/harness/agent-sdk');
 const { SdkSessionRegistry } = require('./lib/harness/session-registry');
+const { InvestigationSessionStore } = require('./lib/investigation-session-store');
 const { proxyBackendConfig, startMitmproxy } = require('./lib/proxy/mitmproxy-runner');
 const { ResumeCoordinator } = require('./lib/harness/resume-coordinator');
 const {
@@ -63,6 +64,7 @@ try {
 }
 
 const transcriptStore = new DashboardTranscriptStore(BLACKBOARD_DB);
+const investigationSessions = new InvestigationSessionStore(BLACKBOARD_DB);
 const sdkSessionRegistry = new SdkSessionRegistry();
 let proxyRuntime = {
   status: 'stopped',
@@ -168,6 +170,83 @@ app.get('/api/version', (req, res) => {
   res.json(getVersionInfo());
 });
 
+app.get('/api/investigation-sessions', (req, res) => {
+  res.json({ ok: true, activeId: activeInvestigationSession().id, sessions: investigationSessions.list() });
+});
+
+app.post('/api/investigation-sessions', (req, res) => {
+  if (activeChatTurns.size || activeSubagentTurns.size) return res.status(409).json({ ok: false, error: 'stop active agent turns before creating a new investigation' });
+  const session = investigationSessions.create({ name: req.body?.name, metadata: req.body?.metadata, activate: req.body?.activate !== false });
+  pendingGladosKickoff = null;
+  resumeContinuationQueue.length = 0;
+  approvedPlanQueue.length = 0;
+  approvedPlanQueueIds.clear();
+  broadcastLobby('investigation-session-changed', { activeId: session.id, session });
+  res.status(201).json({ ok: true, session, sessions: investigationSessions.list() });
+});
+
+app.post('/api/investigation-sessions/:id/archive', (req, res) => {
+  try {
+    const session = investigationSessions.archive(req.params.id);
+    res.json({ ok: true, session, sessions: investigationSessions.list() });
+  } catch (error) {
+    res.status(409).json({ ok: false, error: error.message });
+  }
+});
+
+app.patch('/api/investigation-sessions/:id', (req, res) => {
+  try {
+    const session = investigationSessions.rename(req.params.id, req.body?.name);
+    broadcastLobby('investigation-session-updated', { session });
+    res.json({ ok: true, session, activeId: activeInvestigationSession().id, sessions: investigationSessions.list() });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message });
+  }
+});
+
+app.delete('/api/investigation-sessions/:id', (req, res) => {
+  const sessionId = req.params.id;
+  const prefix = `${sessionId}\0`;
+  if ([...activeChatTurns.keys(), ...activeSubagentTurns.keys()].some(key => key.startsWith(prefix))) {
+    return res.status(409).json({ ok: false, error: 'stop active agent turns before deleting this session' });
+  }
+  try {
+    const result = investigationSessions.delete(sessionId);
+    sdkSessionRegistry.clearSession(sessionId);
+    for (const key of [...buffers.keys()]) if (key.startsWith(prefix)) buffers.delete(key);
+    for (const [key, clients] of [...sseClients.entries()]) {
+      if (!key.startsWith(prefix)) continue;
+      for (const client of clients) {
+        try { client.res.write(`event: session-deleted\ndata: ${JSON.stringify({ sessionId })}\n\n`); client.res.end(); } catch {}
+      }
+      sseClients.delete(key);
+    }
+    if (pendingGladosKickoff?.sessionId === sessionId) pendingGladosKickoff = null;
+    for (let index = approvedPlanQueue.length - 1; index >= 0; index--) {
+      if (approvedPlanQueue[index].sessionId !== sessionId) continue;
+      approvedPlanQueueIds.delete(approvedPlanQueue[index].id);
+      approvedPlanQueue.splice(index, 1);
+    }
+    const activeId = result.replacement?.id || activeInvestigationSession().id;
+    broadcastLobby('investigation-session-deleted', { sessionId, activeId });
+    res.json({ ok: true, ...result, activeId, sessions: investigationSessions.list() });
+  } catch (error) {
+    res.status(409).json({ ok: false, error: error.message });
+  }
+});
+
+app.post('/api/investigation-sessions/:id/activate', (req, res) => {
+  if (activeChatTurns.size || activeSubagentTurns.size) return res.status(409).json({ ok: false, error: 'stop active agent turns before switching investigations' });
+  try {
+    const session = investigationSessions.activate(req.params.id);
+    pendingGladosKickoff = null;
+    broadcastLobby('investigation-session-changed', { activeId: session.id, session });
+    res.json({ ok: true, session, sessions: investigationSessions.list() });
+  } catch (error) {
+    res.status(404).json({ ok: false, error: error.message });
+  }
+});
+
 // Per-agent ring buffer of recent events (for new SSE subscribers to backfill).
 const BUFFER_LIMIT = 500;
 const buffers = new Map(); // agentId -> array of events (newest last)
@@ -201,6 +280,31 @@ const BLACKBOARD_STATE_TABLES = [
   'engagements',
 ];
 
+function activeInvestigationSession() {
+  return investigationSessions.getActive() || investigationSessions.ensureInitialSession();
+}
+
+function requestSessionId(req) {
+  return String(req.body?.session_id || req.query?.session_id || activeInvestigationSession().id);
+}
+
+function requireSession(req, res, { writable = false } = {}) {
+  const session = investigationSessions.get(requestSessionId(req));
+  if (!session) {
+    res.status(404).json({ ok: false, error: 'investigation session not found' });
+    return null;
+  }
+  if (writable && session.state !== 'active') {
+    res.status(409).json({ ok: false, error: 'investigation session is archived; activate it before making changes' });
+    return null;
+  }
+  return session;
+}
+
+function runtimeKey(sessionId, agentId) {
+  return `${sessionId}\0${agentId}`;
+}
+
 function loadAgentRegistry() {
   const policy = loadPolicy();
   return loadHarnessRegistry()
@@ -217,16 +321,17 @@ function listAgentIds() {
   return loadAgentRegistry().map(agent => agent.id);
 }
 
-function currentSessionForAgent(agentId) {
-  const turn = activeChatTurns.get(agentId);
-  const subagent = activeSubagentTurns.get(agentId);
+function currentSessionForAgent(agentId, sessionId = activeInvestigationSession().id) {
+  const turn = activeChatTurns.get(runtimeKey(sessionId, agentId));
+  const subagent = activeSubagentTurns.get(runtimeKey(sessionId, agentId));
   if (!turn && !subagent) return null;
   if (subagent && !turn) {
     return {
       live: true,
       runtime: 'agent-sdk',
       sessionId: subagent.sessionId,
-      sessionKey: `sdk:${agentId}:${subagent.sessionId}`,
+      sessionKey: `sdk:${sessionId}:${agentId}:${subagent.sessionId}`,
+      investigationSessionId: sessionId,
       startedAt: new Date(subagent.startedAt).toISOString(),
       messagePreview: subagent.messagePreview || `subagent of ${subagent.parentAgentId || 'glados'}`,
       parentAgentId: subagent.parentAgentId || null,
@@ -238,7 +343,8 @@ function currentSessionForAgent(agentId) {
     live: true,
     runtime: 'agent-sdk',
     sessionId: turn.turnId,
-    sessionKey: `sdk:${agentId}:${turn.turnId}`,
+    sessionKey: `sdk:${sessionId}:${agentId}:${turn.turnId}`,
+    investigationSessionId: sessionId,
     startedAt: new Date(turn.startedAt).toISOString(),
     messagePreview: turn.messagePreview,
   };
@@ -264,10 +370,11 @@ function isAllowedSubagentDispatch(parentAgentId, targetAgentId) {
   return loadAgentRegistry().some(agent => agent.id === targetAgentId);
 }
 
-function startSubagentTurn(parentAgentId, targetAgent, { toolCallId = null, parentTurnId = null, messagePreview = '', taskPrompt = '' } = {}) {
+function startSubagentTurn(sessionId, parentAgentId, targetAgent, { toolCallId = null, parentTurnId = null, messagePreview = '', taskPrompt = '' } = {}) {
   if (!targetAgent || targetAgent === parentAgentId) return;
-  const existing = activeSubagentTurns.get(targetAgent);
-  if (toolCallId) activeTaskToolIds.set(toolCallId, targetAgent);
+  const key = runtimeKey(sessionId, targetAgent);
+  const existing = activeSubagentTurns.get(key);
+  if (toolCallId) activeTaskToolIds.set(toolCallId, { sessionId, agentId: targetAgent });
   if (existing?.live) {
     // SubagentStart/liveness can precede the parent Task tool call. Merge the
     // later Task payload so a halt always preserves the exact assignment.
@@ -277,11 +384,11 @@ function startSubagentTurn(parentAgentId, targetAgent, { toolCallId = null, pare
     if (taskPrompt) existing.taskPrompt = taskPrompt;
     return;
   }
-  const sessionId = toolCallId || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const subagentSessionId = toolCallId || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const startedAt = Date.now();
-  activeSubagentTurns.set(targetAgent, {
+  activeSubagentTurns.set(key, {
     live: true,
-    sessionId,
+    sessionId: subagentSessionId,
     startedAt,
     parentAgentId,
     parentTurnId,
@@ -289,48 +396,50 @@ function startSubagentTurn(parentAgentId, targetAgent, { toolCallId = null, pare
     messagePreview,
     taskPrompt,
   });
-  broadcastLobby('session-started', { agentId: targetAgent, sessionId, startedAt, parentAgentId, parentTurnId, toolCallId });
+  broadcastLobby('session-started', { investigationSessionId: sessionId, agentId: targetAgent, sessionId: subagentSessionId, startedAt, parentAgentId, parentTurnId, toolCallId });
 }
 
-function finishSubagentTurn(targetAgent, { toolCallId = null, reason = null } = {}) {
+function finishSubagentTurn(sessionId, targetAgent, { toolCallId = null, reason = null } = {}) {
   if (!targetAgent) return;
-  const turn = activeSubagentTurns.get(targetAgent);
+  const key = runtimeKey(sessionId, targetAgent);
+  const turn = activeSubagentTurns.get(key);
   if (!turn) {
     if (toolCallId) activeTaskToolIds.delete(toolCallId);
     return;
   }
-  activeSubagentTurns.delete(targetAgent);
+  activeSubagentTurns.delete(key);
   if (toolCallId) activeTaskToolIds.delete(toolCallId);
   else if (turn.toolCallId) activeTaskToolIds.delete(turn.toolCallId);
-  broadcastLobby('session-ended', { agentId: targetAgent, sessionId: turn.sessionId, toolCallId: turn.toolCallId, reason });
+  broadcastLobby('session-ended', { investigationSessionId: sessionId, agentId: targetAgent, sessionId: turn.sessionId, toolCallId: turn.toolCallId, reason });
 }
 
-function finishSubagentsForTurn(parentAgentId, parentTurnId, reason = 'parent turn ended') {
-  for (const [agentId, turn] of [...activeSubagentTurns.entries()]) {
+function finishSubagentsForTurn(sessionId, parentAgentId, parentTurnId, reason = 'parent turn ended') {
+  for (const [, turn] of [...activeSubagentTurns.entries()]) {
     if (turn.parentAgentId === parentAgentId && (!parentTurnId || turn.parentTurnId === parentTurnId)) {
-      finishSubagentTurn(agentId, { toolCallId: turn.toolCallId, reason });
+      finishSubagentTurn(sessionId, activeTaskToolIds.get(turn.toolCallId)?.agentId, { toolCallId: turn.toolCallId, reason });
     }
   }
 }
 
-function sendMessageToAgentTrackedRuntime(agentId, message) {
+function sendMessageToAgentTrackedRuntime(agentId, message, sessionId = activeInvestigationSession().id) {
   return {
     child: null,
-    promise: sendMessageToAgentRuntime(agentId, message),
+    promise: sendMessageToAgentRuntime(sessionId, agentId, message),
   };
 }
 
-function pushBuffer(agentId, ev) {
+function pushBuffer(sessionId, agentId, ev) {
   ev = compactTranscriptEventForTransport(ev);
-  let buf = buffers.get(agentId);
-  if (!buf) { buf = []; buffers.set(agentId, buf); }
+  const key = runtimeKey(sessionId, agentId);
+  let buf = buffers.get(key);
+  if (!buf) { buf = []; buffers.set(key, buf); }
   if (ev?.id && buf.some(existing => existing?.id === ev.id)) return;
   buf.push(ev);
   if (buf.length > BUFFER_LIMIT) buf.shift();
 }
 
-function broadcastTranscript(agentId, ev) {
-  const set = sseClients.get(agentId);
+function broadcastTranscript(sessionId, agentId, ev) {
+  const set = sseClients.get(runtimeKey(sessionId, agentId));
   if (!set) return;
   const transportEvent = compactTranscriptEventForTransport(ev);
   for (const client of set) {
@@ -344,8 +453,9 @@ function broadcastLobby(type, data) {
   for (const res of lobbyClients) res.write(payload);
 }
 
-function startChatTurn(agentId, message) {
-  const conflict = activeTurnConflict(activeChatTurns, agentId);
+function startChatTurn(sessionId, agentId, message) {
+  const key = runtimeKey(sessionId, agentId);
+  const conflict = activeTurnConflict(activeChatTurns, key);
   if (conflict) {
     const error = new Error(conflict.error);
     error.code = conflict.code;
@@ -354,7 +464,9 @@ function startChatTurn(agentId, message) {
   }
   const turnId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const startedAt = Date.now();
-  activeChatTurns.set(agentId, {
+  activeChatTurns.set(key, {
+    sessionId,
+    agentId,
     turnId,
     startedAt,
     messagePreview: String(message || '').slice(0, 160),
@@ -363,12 +475,12 @@ function startChatTurn(agentId, message) {
     interrupt: null,
     stopRequested: false,
   });
-  broadcastLobby('chat-turn-started', { agentId, turnId, startedAt });
+  broadcastLobby('chat-turn-started', { investigationSessionId: sessionId, agentId, turnId, startedAt });
   return turnId;
 }
 
-function attachChatTurnInterrupt(agentId, turnId, interrupt) {
-  const turn = activeChatTurns.get(agentId);
+function attachChatTurnInterrupt(sessionId, agentId, turnId, interrupt) {
+  const turn = activeChatTurns.get(runtimeKey(sessionId, agentId));
   if (!turn || turn.turnId !== turnId) return;
   turn.interrupt = interrupt;
   if (turn.stopRequested && typeof interrupt === 'function') {
@@ -376,8 +488,9 @@ function attachChatTurnInterrupt(agentId, turnId, interrupt) {
   }
 }
 
-function stopChatTurn(agentId, reason = 'operator stop') {
-  const turn = activeChatTurns.get(agentId);
+function stopChatTurn(sessionId, agentId, reason = 'operator stop') {
+  const key = runtimeKey(sessionId, agentId);
+  const turn = activeChatTurns.get(key);
   if (!turn) return { ok: true, stopped: false, agentId, reason: 'no active turn' };
   turn.stopRequested = true;
   try {
@@ -388,21 +501,22 @@ function stopChatTurn(agentId, reason = 'operator stop') {
   if (typeof turn.interrupt === 'function') {
     Promise.resolve(turn.interrupt(reason)).catch(() => {});
   }
-  activeChatTurns.delete(agentId);
-  finishSubagentsForTurn(agentId, turn.turnId, reason);
-  broadcastLobby('chat-turn-ended', { agentId, turnId: turn.turnId, stopped: true, reason });
-  transcriptEvent(agentId, 'meta', `Stopped current turn: ${reason}`, {
+  activeChatTurns.delete(key);
+  finishSubagentsForTurn(sessionId, agentId, turn.turnId, reason);
+  broadcastLobby('chat-turn-ended', { investigationSessionId: sessionId, agentId, turnId: turn.turnId, stopped: true, reason });
+  transcriptEvent(sessionId, agentId, 'meta', `Stopped current turn: ${reason}`, {
     sub: 'operator-stop',
     turnId: turn.turnId,
   });
   return { ok: true, stopped: true, agentId, turnId: turn.turnId, reason };
 }
 
-function finishChatTurn(agentId, turnId) {
-  const current = activeChatTurns.get(agentId);
+function finishChatTurn(sessionId, agentId, turnId) {
+  const key = runtimeKey(sessionId, agentId);
+  const current = activeChatTurns.get(key);
   if (!current || current.turnId !== turnId) return;
-  activeChatTurns.delete(agentId);
-  broadcastLobby('chat-turn-ended', { agentId, turnId });
+  activeChatTurns.delete(key);
+  broadcastLobby('chat-turn-ended', { investigationSessionId: sessionId, agentId, turnId });
   if (agentId === 'glados') {
     if (approvedPlanQueue.length) setImmediate(drainApprovedPlanExecutions);
     else if (resumeContinuationQueue.length) setImmediate(drainResumeContinuations);
@@ -410,9 +524,10 @@ function finishChatTurn(agentId, turnId) {
 }
 
 function stopInvestigationRuntime(result, { reason = 'operator ended investigation' } = {}) {
-  for (const agentId of [...activeChatTurns.keys()]) stopChatTurn(agentId, reason);
-  for (const [agentId, turn] of [...activeSubagentTurns.entries()]) {
-    finishSubagentTurn(agentId, { toolCallId: turn.toolCallId, reason });
+  for (const turn of [...activeChatTurns.values()]) stopChatTurn(turn.sessionId, turn.agentId, reason);
+  for (const turn of [...activeSubagentTurns.values()]) {
+    const task = activeTaskToolIds.get(turn.toolCallId);
+    if (task) finishSubagentTurn(task.sessionId, task.agentId, { toolCallId: turn.toolCallId, reason });
   }
   const endedPlans = new Set(result?.plans_ended || []);
   for (let index = approvedPlanQueue.length - 1; index >= 0; index -= 1) {
@@ -427,9 +542,9 @@ function stopInvestigationRuntime(result, { reason = 'operator ended investigati
   return { stoppedAgents: true, queuedApprovalsRemoved: endedPlans.size };
 }
 
-function transcriptEvent(agentId, kind, text, extra = {}) {
+function transcriptEvent(sessionId, agentId, kind, text, extra = {}) {
   let ev = {
-    agentId,
+    agentId, sessionId,
     kind,
     text,
     ts: new Date().toISOString(),
@@ -437,27 +552,27 @@ function transcriptEvent(agentId, kind, text, extra = {}) {
     ...extra,
   };
   try {
-    ev = transcriptStore.record(agentId, ev);
+    ev = transcriptStore.record(sessionId, agentId, ev);
   } catch (e) {
     console.warn('[transcript-store] could not persist dashboard event:', e.message);
   }
-  pushBuffer(agentId, ev);
-  broadcastTranscript(agentId, ev);
+  pushBuffer(sessionId, agentId, ev);
+  broadcastTranscript(sessionId, agentId, ev);
   return ev;
 }
 
-function recordUserTranscript(agentId, text, extra = {}) {
-  return transcriptEvent(agentId, 'user-message', text, {
+function recordUserTranscript(sessionId, agentId, text, extra = {}) {
+  return transcriptEvent(sessionId, agentId, 'user-message', text, {
     id: `dashboard-user:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
     ...extra,
   });
 }
 
-function admitUserTranscript(agentId, text, clientId) {
+function admitUserTranscript(sessionId, agentId, text, clientId) {
   const safeClientId = String(clientId || '')
     .replace(/[^a-zA-Z0-9._:-]/g, '')
     .slice(0, 160) || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-  const ev = transcriptStore.record(agentId, {
+  const ev = transcriptStore.record(sessionId, agentId, {
     agentId,
     kind: 'user-message',
     text,
@@ -467,17 +582,18 @@ function admitUserTranscript(agentId, text, clientId) {
     runtime: 'agent-sdk',
     admitted: true,
   });
-  pushBuffer(agentId, ev);
-  broadcastTranscript(agentId, ev);
+  pushBuffer(sessionId, agentId, ev);
+  broadcastTranscript(sessionId, agentId, ev);
   return ev;
 }
 
-async function sendMessageToAgentRuntime(agentId, message, { turnId = null, recordPrompt = true } = {}) {
-  if (recordPrompt) recordUserTranscript(agentId, message, { runtime: 'agent-sdk' });
-  const turn = turnId ? activeChatTurns.get(agentId) : null;
+async function sendMessageToAgentRuntime(sessionId, agentId, message, { turnId = null, recordPrompt = true } = {}) {
+  if (recordPrompt) recordUserTranscript(sessionId, agentId, message, { runtime: 'agent-sdk' });
+  const turn = turnId ? activeChatTurns.get(runtimeKey(sessionId, agentId)) : null;
   let events = [];
   try {
     const sdkCwd = resolveSdkWorkingDirectory({ env: process.env });
+    const turnEnv = { ...process.env, GLADOS_SESSION_ID: sessionId };
     events = await streamAgentTurn({
       agentId,
       prompt: message,
@@ -489,14 +605,14 @@ async function sendMessageToAgentRuntime(agentId, message, { turnId = null, reco
           const child = ev.targetAgentId || targetAgentFromToolInput(ev.toolInput);
           if (isAllowedSubagentDispatch(targetAgent, child)) {
             const childPrompt = String(ev.toolInput?.prompt || '').trim();
-            startSubagentTurn(targetAgent, child, {
+            startSubagentTurn(sessionId, targetAgent, child, {
               toolCallId: ev.toolCallId,
               parentTurnId: turnId,
               messagePreview: ev.toolInput?.description || childPrompt || ev.text || '',
               taskPrompt: childPrompt,
             });
             if (childPrompt) {
-              recordUserTranscript(child, childPrompt, {
+              recordUserTranscript(sessionId, child, childPrompt, {
                 id: `subagent-prompt:${ev.toolCallId}`,
                 runtime: 'agent-sdk',
                 parentAgentId: targetAgent,
@@ -510,35 +626,36 @@ async function sendMessageToAgentRuntime(agentId, message, { turnId = null, reco
           // completion arrives later as task_notification and must own the
           // liveness transition; ending here creates a false idle/active flicker.
           if (!/^Subagent launched\.?$/i.test(String(ev.text || '').trim())) {
-            finishSubagentTurn(activeTaskToolIds.get(ev.toolCallId), { toolCallId: ev.toolCallId });
+            const task = activeTaskToolIds.get(ev.toolCallId);
+            finishSubagentTurn(task.sessionId, task.agentId, { toolCallId: ev.toolCallId });
           }
         } else if (isAllowedSubagentDispatch(agentId, targetAgent) && (ev.kind === 'thinking-stream' || ev.kind === 'text-stream' || ev.kind === 'assistant-text' || ev.kind === 'tool-call')) {
-          startSubagentTurn(agentId, targetAgent, {
+          startSubagentTurn(sessionId, agentId, targetAgent, {
             toolCallId: ev.parentToolUseId || ev.toolCallId || null,
             parentTurnId: turnId,
             messagePreview: ev.text || ev.toolName || '',
           });
         }
-        pushBuffer(targetAgent, ev);
-        broadcastTranscript(targetAgent, ev);
+        pushBuffer(sessionId, targetAgent, ev);
+        broadcastTranscript(sessionId, targetAgent, ev);
         if (ev.kind === 'liveness') {
           if (isAllowedSubagentDispatch(agentId, targetAgent)) {
-            if (ev.live) startSubagentTurn(agentId, targetAgent, { toolCallId: ev.parentToolUseId || ev.toolCallId || null, parentTurnId: turnId, messagePreview: ev.text || ev.state || '' });
-            else finishSubagentTurn(targetAgent, { toolCallId: ev.parentToolUseId || ev.toolCallId || null, reason: ev.state || 'liveness ended' });
+            if (ev.live) startSubagentTurn(sessionId, agentId, targetAgent, { toolCallId: ev.parentToolUseId || ev.toolCallId || null, parentTurnId: turnId, messagePreview: ev.text || ev.state || '' });
+            else finishSubagentTurn(sessionId, targetAgent, { toolCallId: ev.parentToolUseId || ev.toolCallId || null, reason: ev.state || 'liveness ended' });
           }
-          broadcastLobby('agent-liveness', { agentId: targetAgent, live: ev.live, state: ev.state, sessionId: currentSessionForAgent(targetAgent)?.sessionId || null });
+          broadcastLobby('agent-liveness', { investigationSessionId: sessionId, agentId: targetAgent, live: ev.live, state: ev.state, sessionId: currentSessionForAgent(targetAgent, sessionId)?.sessionId || null });
         }
       },
       options: {
-        cwd: sdkCwd,
+        cwd: sdkCwd, env: turnEnv, investigationSessionId: sessionId,
         abortSignal: turn?.turnId === turnId ? turn.abortController?.signal : undefined,
-        onInterruptReady: interrupt => attachChatTurnInterrupt(agentId, turnId, interrupt),
-        resumeSessionId: sdkSessionRegistry.get(agentId, sdkCwd),
-        onSessionId: sessionId => sdkSessionRegistry.set(agentId, sessionId, sdkCwd),
+        onInterruptReady: interrupt => attachChatTurnInterrupt(sessionId, agentId, turnId, interrupt),
+        resumeSessionId: sdkSessionRegistry.get(sessionId, agentId, sdkCwd),
+        onSessionId: sdkId => sdkSessionRegistry.set(sessionId, agentId, sdkId, sdkCwd),
         onInvalidSession: (_sessionId, error) => {
-          sdkSessionRegistry.clear(agentId);
+          sdkSessionRegistry.clear(sessionId, agentId);
           const timeoutRecovery = error?.code === 'GLADOS_FIRST_ACTIVITY_TIMEOUT';
-          transcriptEvent(agentId, 'meta', timeoutRecovery
+          transcriptEvent(sessionId, agentId, 'meta', timeoutRecovery
             ? 'The resumed Agent SDK session produced no activity. Cleared it and retried this message once in a fresh session.'
             : 'Recovered a stale Agent SDK session after the application working directory changed.', {
             sub: 'session-recovery',
@@ -548,7 +665,7 @@ async function sendMessageToAgentRuntime(agentId, message, { turnId = null, reco
       },
     });
   } finally {
-    finishSubagentsForTurn(agentId, turnId);
+    finishSubagentsForTurn(sessionId, agentId, turnId);
   }
   const finalText = events
     .filter(ev => ev.kind === 'result' || ev.kind === 'assistant-text')
@@ -565,10 +682,10 @@ async function sendMessageToAgentRuntime(agentId, message, { turnId = null, reco
   };
 }
 
-function queueAcceptedChatTurn({ agentId, message, turnId, onSuccess = null, onFailure = null }) {
+function queueAcceptedChatTurn({ sessionId, agentId, message, turnId, onSuccess = null, onFailure = null }) {
   setImmediate(async () => {
     try {
-      const result = await sendMessageToAgentRuntime(agentId, message, {
+      const result = await sendMessageToAgentRuntime(sessionId, agentId, message, {
         turnId,
         recordPrompt: false,
       });
@@ -576,10 +693,10 @@ function queueAcceptedChatTurn({ agentId, message, turnId, onSuccess = null, onF
       if (resultError) throw new Error(resultError);
       // An operator stop removes the authoritative active turn before the SDK
       // finishes unwinding. Do not let that cancelled run mark a goal complete.
-      if (activeChatTurns.get(agentId)?.turnId !== turnId) return;
+      if (activeChatTurns.get(runtimeKey(sessionId, agentId))?.turnId !== turnId) return;
       await onSuccess?.(result);
     } catch (error) {
-      transcriptEvent(agentId, 'prompt-error', error.message || String(error), {
+      transcriptEvent(sessionId, agentId, 'prompt-error', error.message || String(error), {
         error: error.message || String(error),
         code: error.code || null,
         provider: 'LiteLLM Anthropic Messages',
@@ -589,7 +706,7 @@ function queueAcceptedChatTurn({ agentId, message, turnId, onSuccess = null, onF
       });
       try { await onFailure?.(error); } catch {}
     } finally {
-      finishChatTurn(agentId, turnId);
+      finishChatTurn(sessionId, agentId, turnId);
     }
   });
 }
@@ -600,34 +717,35 @@ function queueResumeContinuation(snapshot) {
 }
 
 async function drainResumeContinuations() {
-  if (resumeContinuationRunning || approvedPlanQueueRunning || activeChatTurns.has('glados')) return;
+  const sessionId = activeInvestigationSession().id;
+  if (resumeContinuationRunning || approvedPlanQueueRunning || activeChatTurns.has(runtimeKey(sessionId, 'glados'))) return;
   const snapshot = resumeContinuationQueue.shift();
   if (!snapshot) return;
   resumeContinuationRunning = true;
   const prompt = resumeCoordinator.buildContinuationPrompt(snapshot);
-  const turnId = startChatTurn('glados', prompt);
-  transcriptEvent('glados', 'operator-event', `Continuing ${snapshot.agentId} after operator resume.`, {
+  const turnId = startChatTurn(sessionId, 'glados', prompt);
+  transcriptEvent(sessionId, 'glados', 'operator-event', `Continuing ${snapshot.agentId} after operator resume.`, {
     resumedAgentId: snapshot.agentId,
     continuation: true,
   });
   try {
-    const result = await sendMessageToAgentRuntime('glados', prompt, { turnId });
+    const result = await sendMessageToAgentRuntime(sessionId, 'glados', prompt, { turnId });
     const error = harnessResultError(result);
     if (error) {
-      transcriptEvent('glados', 'prompt-error', `Could not continue ${snapshot.agentId}: ${error}`, {
+      transcriptEvent(sessionId, 'glados', 'prompt-error', `Could not continue ${snapshot.agentId}: ${error}`, {
         resumedAgentId: snapshot.agentId,
         continuation: true,
         isError: true,
       });
     }
   } catch (error) {
-    transcriptEvent('glados', 'prompt-error', `Could not continue ${snapshot.agentId}: ${error.message}`, {
+    transcriptEvent(sessionId, 'glados', 'prompt-error', `Could not continue ${snapshot.agentId}: ${error.message}`, {
       resumedAgentId: snapshot.agentId,
       continuation: true,
       isError: true,
     });
   } finally {
-    finishChatTurn('glados', turnId);
+    finishChatTurn(sessionId, 'glados', turnId);
     resumeContinuationRunning = false;
     if (resumeContinuationQueue.length) setImmediate(drainResumeContinuations);
   }
@@ -643,15 +761,21 @@ function queueApprovedPlanExecution({ id, engagement_id: engagementId, decision,
     engagementId: String(engagementId || '').trim(),
     decision: String(decision || 'approve_all'),
     vectors: Array.isArray(vectors) ? vectors.map(String) : [],
+    sessionId: activeInvestigationSession().id,
   });
   setImmediate(drainApprovedPlanExecutions);
   return { executionQueued: true, queueDepth: approvedPlanQueue.length };
 }
 
 async function drainApprovedPlanExecutions() {
-  if (approvedPlanQueueRunning || resumeContinuationRunning || activeChatTurns.has('glados')) return;
+  const activeSessionId = activeInvestigationSession().id;
+  if (approvedPlanQueueRunning || resumeContinuationRunning || activeChatTurns.has(runtimeKey(activeSessionId, 'glados'))) return;
   const approval = approvedPlanQueue.shift();
   if (!approval) return;
+  if (approval.sessionId !== activeSessionId) {
+    approvedPlanQueueIds.delete(approval.id);
+    return;
+  }
   approvedPlanQueueRunning = true;
   const prompt = [
     'AUTOMATED PLAN-APPROVAL HANDOFF',
@@ -666,25 +790,25 @@ async function drainApprovedPlanExecutions() {
   ].join('\n');
   let turnId = null;
   try {
-    turnId = startChatTurn('glados', prompt);
-    transcriptEvent('glados', 'operator-event', `Plan ${approval.id} approved; automatically starting the next phase.`, {
+    turnId = startChatTurn(activeSessionId, 'glados', prompt);
+    transcriptEvent(activeSessionId, 'glados', 'operator-event', `Plan ${approval.id} approved; automatically starting the next phase.`, {
       planId: approval.id,
       engagementId: approval.engagementId || null,
       approvalDecision: approval.decision,
       approvedVectors: approval.vectors,
       automatedApprovalHandoff: true,
     });
-    const result = await sendMessageToAgentRuntime('glados', prompt, { turnId });
+    const result = await sendMessageToAgentRuntime(activeSessionId, 'glados', prompt, { turnId });
     const error = harnessResultError(result);
     if (error) throw new Error(error);
   } catch (error) {
-    transcriptEvent('glados', 'prompt-error', `Automatic execution of approved plan ${approval.id} failed: ${error.message}`, {
+    transcriptEvent(activeSessionId, 'glados', 'prompt-error', `Automatic execution of approved plan ${approval.id} failed: ${error.message}`, {
       planId: approval.id,
       automatedApprovalHandoff: true,
       isError: true,
     });
   } finally {
-    if (turnId) finishChatTurn('glados', turnId);
+    if (turnId) finishChatTurn(activeSessionId, 'glados', turnId);
     approvedPlanQueueIds.delete(approval.id);
     approvedPlanQueueRunning = false;
     if (approvedPlanQueue.length) setImmediate(drainApprovedPlanExecutions);
@@ -696,6 +820,7 @@ const controller = new ControllerLite({
   dbPath: BLACKBOARD_DB,
   sendMessageToAgentTracked: sendMessageToAgentTrackedRuntime,
   currentSessionForAgent,
+  getInvestigationSessionId: () => activeInvestigationSession().id,
 });
 if (process.env.GLADOS_CONTROLLER_WORKER !== '0') controller.start();
 
@@ -742,6 +867,7 @@ function kickoffApprovalPrompt(target) {
 }
 
 function createPendingGladosKickoff(target, originalMessage, extra = {}) {
+  const sessionId = activeInvestigationSession().id;
   let goalId = extra.goalId || null;
   if (!goalId) {
     try {
@@ -752,12 +878,13 @@ function createPendingGladosKickoff(target, originalMessage, extra = {}) {
     }
   }
   pendingGladosKickoff = {
+    sessionId,
     target,
     originalMessage,
     goalId,
     createdAt: Date.now(),
   };
-  const ev = transcriptEvent('glados', 'assistant-text', kickoffApprovalPrompt(target), { gated: true });
+  const ev = transcriptEvent(sessionId, 'glados', 'assistant-text', kickoffApprovalPrompt(target), { gated: true });
   return {
     ok: true,
     gated: true,
@@ -833,11 +960,12 @@ function assessmentAgentIds() {
   return [...new Set(ids)];
 }
 
-function resetAgentSession(agentId) {
-  const hadSession = !!currentSessionForAgent(agentId);
+function resetAgentSession(sessionId, agentId) {
+  const key = runtimeKey(sessionId, agentId);
+  const hadSession = !!currentSessionForAgent(agentId, sessionId);
   if (agentId === 'glados') resumeCoordinator.clearAll();
   else resumeCoordinator.clear(agentId);
-  const turn = activeChatTurns.get(agentId);
+  const turn = activeChatTurns.get(key);
   if (turn) {
     turn.stopRequested = true;
     try {
@@ -849,20 +977,22 @@ function resetAgentSession(agentId) {
       Promise.resolve(turn.interrupt('session reset')).catch(() => {});
     }
   }
-  activeChatTurns.delete(agentId);
-  const subagent = activeSubagentTurns.get(agentId);
+  activeChatTurns.delete(key);
+  const subagent = activeSubagentTurns.get(key);
   if (subagent?.toolCallId) activeTaskToolIds.delete(subagent.toolCallId);
-  activeSubagentTurns.delete(agentId);
-  for (const [childId, child] of [...activeSubagentTurns.entries()]) {
+  activeSubagentTurns.delete(key);
+  for (const [childKey, child] of [...activeSubagentTurns.entries()]) {
     if (child.parentAgentId === agentId) {
-      activeSubagentTurns.delete(childId);
+      activeSubagentTurns.delete(childKey);
       if (child.toolCallId) activeTaskToolIds.delete(child.toolCallId);
-      broadcastLobby('session-ended', { agentId: childId, sessionId: child.sessionId, toolCallId: child.toolCallId, reason: 'session reset' });
+      const childAgentId = activeTaskToolIds.get(child.toolCallId)?.agentId || childKey.split('\0').at(-1);
+      broadcastLobby('session-ended', { investigationSessionId: sessionId, agentId: childAgentId, sessionId: child.sessionId, toolCallId: child.toolCallId, reason: 'session reset' });
     }
   }
-  buffers.delete(agentId);
-  sdkSessionRegistry.clear(agentId);
+  buffers.delete(key);
+  sdkSessionRegistry.clear(sessionId, agentId);
   broadcastLobby('session-reset', {
+    investigationSessionId: sessionId,
     agentId,
     runtime: 'agent-sdk',
     hadSession,
@@ -879,11 +1009,9 @@ function clearAllRuntimeSessions(reason = 'runtime restart') {
   const agentIds = new Set([
     'glados',
     ...assessmentAgentIds(),
-    ...buffers.keys(),
-    ...activeChatTurns.keys(),
-    ...activeSubagentTurns.keys(),
+    ...assessmentAgentIds(),
   ]);
-  for (const [agentId, turn] of activeChatTurns.entries()) {
+  for (const turn of activeChatTurns.values()) {
     turn.stopRequested = true;
     try {
       if (turn.abortController && !turn.abortController.signal.aborted) turn.abortController.abort(reason);
@@ -891,10 +1019,10 @@ function clearAllRuntimeSessions(reason = 'runtime restart') {
     if (typeof turn.interrupt === 'function') {
       Promise.resolve(turn.interrupt(reason)).catch(() => {});
     }
-    broadcastLobby('chat-turn-ended', { agentId, turnId: turn.turnId, stopped: true, reason });
+    broadcastLobby('chat-turn-ended', { investigationSessionId: turn.sessionId, agentId: turn.agentId, turnId: turn.turnId, stopped: true, reason });
   }
-  for (const [agentId, turn] of activeSubagentTurns.entries()) {
-    broadcastLobby('session-ended', { agentId, sessionId: turn.sessionId, toolCallId: turn.toolCallId, reason });
+  for (const [key, turn] of activeSubagentTurns.entries()) {
+    broadcastLobby('session-ended', { investigationSessionId: key.split('\0')[0], agentId: key.split('\0').at(-1), sessionId: turn.sessionId, toolCallId: turn.toolCallId, reason });
   }
   activeChatTurns.clear();
   activeSubagentTurns.clear();
@@ -906,10 +1034,8 @@ function clearAllRuntimeSessions(reason = 'runtime restart') {
   approvedPlanQueueRunning = false;
   buffers.clear();
   pendingGladosKickoff = null;
-  try { transcriptStore.clearAll(); } catch (e) { console.warn('[transcript-store] runtime clear failed:', e.message); }
-  sdkSessionRegistry.clearAll();
   for (const agentId of agentIds) {
-    broadcastLobby('session-reset', { agentId, runtime: 'agent-sdk', hadSession: true, reason });
+    broadcastLobby('session-reset', { investigationSessionId: activeInvestigationSession().id, agentId, runtime: 'agent-sdk', hadSession: true, reason });
   }
   return [...agentIds];
 }
@@ -988,17 +1114,17 @@ function wipeAgentMemories() {
   };
 }
 
-function bufferedTranscriptEvents(agentId, lastEventId = null, options = {}) {
+function bufferedTranscriptEvents(sessionId, agentId, lastEventId = null, options = {}) {
   let dashboardEvents = [];
   try {
-    dashboardEvents = transcriptStore.listRecent(agentId, { limit: BUFFER_LIMIT });
+    dashboardEvents = transcriptStore.listRecent(sessionId, agentId, { limit: BUFFER_LIMIT });
   } catch (e) {
     console.warn('[transcript-store] could not list dashboard events:', e.message);
   }
   const mergeOptions = { includeStream: options.includeStream !== false };
   const merged = mergeTranscriptEvents(
     { events: dashboardEvents, options: mergeOptions },
-    { events: buffers.get(agentId) || [], options: mergeOptions }
+    { events: buffers.get(runtimeKey(sessionId, agentId)) || [], options: mergeOptions }
   );
   return afterLastEventId(merged, lastEventId).slice(-BUFFER_LIMIT);
 }
@@ -1006,6 +1132,8 @@ function bufferedTranscriptEvents(agentId, lastEventId = null, options = {}) {
 // --- REST ---
 
 app.post('/api/operator-action-approvals', (req, res) => {
+  const session = requireSession(req, res, { writable: true });
+  if (!session) return;
   const agentId = String(req.body?.agent_id || '');
   if (!assessmentAgentIds().includes(agentId)) return res.status(400).json({ error: 'unknown agent_id' });
   let targetUrl;
@@ -1021,6 +1149,7 @@ app.post('/api/operator-action-approvals', (req, res) => {
   const now = Date.now();
   const approval = {
     id: `action_${crypto.randomBytes(8).toString('hex')}`,
+    session_id: session.id,
     agent_id: agentId,
     target_url: targetUrl,
     method,
@@ -1035,8 +1164,8 @@ app.post('/api/operator-action-approvals', (req, res) => {
   try {
     db.prepare(`
       INSERT INTO operator_action_approvals
-        (id, agent_id, target_url, method, risk_to_target, operator, reason, created_at, expires_at)
-      VALUES (@id, @agent_id, @target_url, @method, @risk_to_target, @operator, @reason, @created_at, @expires_at)
+        (id, session_id, agent_id, target_url, method, risk_to_target, operator, reason, created_at, expires_at)
+      VALUES (@id, @session_id, @agent_id, @target_url, @method, @risk_to_target, @operator, @reason, @created_at, @expires_at)
     `).run(approval);
   } finally {
     db.close();
@@ -1046,9 +1175,11 @@ app.post('/api/operator-action-approvals', (req, res) => {
 });
 
 app.get('/api/agents', (req, res) => {
+  const session = requireSession(req, res);
+  if (!session) return;
   const registry = loadAgentRegistry();
   const out = registry.map(a => {
-    const snap = currentSessionForAgent(a.id);
+    const snap = currentSessionForAgent(a.id, session.id);
     return {
       id: a.id,
       name: a.name,
@@ -1060,11 +1191,13 @@ app.get('/api/agents', (req, res) => {
       halted: watchdogHalt.agentStatus(a.id).haltActive,
     };
   });
-  res.json({ agents: out });
+  res.json({ agents: out, sessionId: session.id });
 });
 
 // Lobby event stream — session-started / session-ended.
 app.get('/api/agents/stream', (req, res) => {
+  const session = requireSession(req, res);
+  if (!session) return;
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-transform',
@@ -1074,15 +1207,17 @@ app.get('/api/agents/stream', (req, res) => {
   lobbyClients.add(res);
   const registry = loadAgentRegistry();
   const snapshot = registry
-    .map(a => ({ agentId: a.id, session: currentSessionForAgent(a.id) }))
+    .map(a => ({ agentId: a.id, session: currentSessionForAgent(a.id, session.id) }))
     .filter(r => r.session && r.session.live)
-    .map(r => ({ agentId: r.agentId, sessionId: r.session.sessionId }));
+    .map(r => ({ investigationSessionId: session.id, agentId: r.agentId, sessionId: r.session.sessionId }));
   res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
   req.on('close', () => lobbyClients.delete(res));
 });
 
 // Per-agent transcript SSE. On connect, backfills recent buffer then streams live.
 app.get('/api/agents/:id/transcript', (req, res) => {
+  const session = requireSession(req, res);
+  if (!session) return;
   const agentId = req.params.id;
   const includeStream = req.query.stream === 'v4';
   res.writeHead(200, {
@@ -1094,29 +1229,38 @@ app.get('/api/agents/:id/transcript', (req, res) => {
 
   // Backfill from the durable SDK transcript store plus the in-memory live ring.
   const lastEventId = req.get('Last-Event-ID') || req.query.lastEventId || null;
-  for (const ev of bufferedTranscriptEvents(agentId, lastEventId, { includeStream })) {
+  for (const ev of bufferedTranscriptEvents(session.id, agentId, lastEventId, { includeStream })) {
     const payload = sseFrame(ev, { includeStream });
     if (payload) res.write(payload);
   }
 
-  let set = sseClients.get(agentId);
-  if (!set) { set = new Set(); sseClients.set(agentId, set); }
+  const key = runtimeKey(session.id, agentId);
+  let set = sseClients.get(key);
+  if (!set) { set = new Set(); sseClients.set(key, set); }
   const client = { res, includeStream };
   set.add(client);
-  req.on('close', () => set.delete(client));
+  req.on('close', () => { set.delete(client); if (!set.size) sseClients.delete(key); });
 });
 
 // GLaDOS chat — POST message; reply arrives via the normal transcript stream.
 app.post('/api/chat/glados', async (req, res) => {
+  const session = requireSession(req, res, { writable: true });
+  if (!session) return;
   const message = (req.body && req.body.message) || '';
   if (!message.trim()) return res.status(400).json({ error: 'message required' });
-  const conflict = activeTurnConflict(activeChatTurns, 'glados');
+  const namedSession = investigationSessions.nameFromFirstPrompt(session.id, message);
+  if (namedSession?.name !== session.name) {
+    session.name = namedSession.name;
+    session.metadata = namedSession.metadata;
+    broadcastLobby('investigation-session-updated', { session: namedSession });
+  }
+  const conflict = activeTurnConflict(activeChatTurns, runtimeKey(session.id, 'glados'));
   if (conflict) return res.status(409).json(conflict);
   let admittedEvent;
   try {
     // Persist before starting the SDK. A renderer/app restart can no longer
     // erase a message that was sitting in an hours-long HTTP request.
-    admittedEvent = admitUserTranscript('glados', message, req.body?.client_id);
+    admittedEvent = admitUserTranscript(session.id, 'glados', message, req.body?.client_id);
   } catch (error) {
     return res.status(503).json({ ok: false, error: `message was not admitted: ${error.message}` });
   }
@@ -1127,27 +1271,27 @@ app.post('/api/chat/glados', async (req, res) => {
   if (/\bwhat\s+(?:model|llm)\b|\bwhich\s+model\b|\bmodel\s+(?:are|r)\b/.test(normalizedMessage)) {
     const glados = loadAgentRegistry().find(agent => agent.id === 'glados');
     const text = `I'm running ${glados?.model || 'the configured GLaDOS model'} for this session.`;
-    const ev = transcriptEvent('glados', 'assistant-text', text, { fastPath: 'model' });
+    const ev = transcriptEvent(session.id, 'glados', 'assistant-text', text, { fastPath: 'model' });
     return res.json({ ok: true, fastPath: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
   }
   if (/\b(?:what\s+)?version\b.*\bglados\b|\bglados\b.*\bversion\b/.test(normalizedMessage)) {
     const text = `This is GLaDOS ${getVersionInfo().version}.`;
-    const ev = transcriptEvent('glados', 'assistant-text', text, { fastPath: 'version' });
+    const ev = transcriptEvent(session.id, 'glados', 'assistant-text', text, { fastPath: 'version' });
     return res.json({ ok: true, fastPath: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
   }
 
-  if (pendingGladosKickoff) {
+  if (pendingGladosKickoff?.sessionId === session.id) {
     if (isKickoffCancel(message)) {
       const cancelled = pendingGladosKickoff;
       pendingGladosKickoff = null;
       if (cancelled.goalId) controller.updateGoalStatus(cancelled.goalId, 'cancelled');
-      const ev = transcriptEvent('glados', 'assistant-text', `Cancelled the pending investigation kickoff for \`${cancelled.target}\`. No resources were checked and no agents were dispatched.`);
+      const ev = transcriptEvent(session.id, 'glados', 'assistant-text', `Cancelled the pending investigation kickoff for \`${cancelled.target}\`. No resources were checked and no agents were dispatched.`);
       return res.json({ ok: true, gated: true, cancelled: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
     }
 
     if (!isKickoffApproval(message) && !/\b(skip|only|domainsai|dradis|dradistab)\b/i.test(message)) {
       const ev = transcriptEvent(
-        'glados',
+        session.id, 'glados',
         'assistant-text',
         `I am still paused before starting \`${pendingGladosKickoff.target}\`. Reply with "continue", "skip DradisTab/Dradis and proceed with DomainsAI", or another explicit change before I check resources or dispatch agents.`
       );
@@ -1158,14 +1302,15 @@ app.post('/api/chat/glados', async (req, res) => {
     pendingGladosKickoff = null;
     if (approved.goalId) controller.updateGoalStatus(approved.goalId, 'running');
     const approvedMessage = buildApprovedKickoffMessage(approved, message);
-    const turnId = startChatTurn('glados', approvedMessage);
-    transcriptEvent('glados', 'operator-event', approvedMessage, {
+    const turnId = startChatTurn(session.id, 'glados', approvedMessage);
+    transcriptEvent(session.id, 'glados', 'operator-event', approvedMessage, {
       sub: 'kickoff-handoff',
       turnId,
       admittedUserEventId: admittedEvent.sseId,
     });
     res.status(202).json({ ok: true, accepted: true, gated: true, approved: true, turnId });
     queueAcceptedChatTurn({
+      sessionId: session.id,
       agentId: 'glados',
       message: approvedMessage,
       turnId,
@@ -1187,16 +1332,16 @@ app.post('/api/chat/glados', async (req, res) => {
       ? 'Yes — this is a fresh GLaDOS session. No active agents are running, and the blackboard is clean.'
       : `Not completely fresh: ${activeAgents} active agent(s), ${rows ?? 'unknown'} blackboard row(s).`;
     const ev = transcriptEvent(
-      'glados',
+      session.id, 'glados',
       'assistant-text',
       stateText
     );
     return res.json({ ok: true, gated: true, synthetic: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
   }
 
-  const turnId = startChatTurn('glados', message);
+  const turnId = startChatTurn(session.id, 'glados', message);
   res.status(202).json({ ok: true, accepted: true, turnId, eventId: admittedEvent.sseId });
-  queueAcceptedChatTurn({ agentId: 'glados', message, turnId });
+  queueAcceptedChatTurn({ sessionId: session.id, agentId: 'glados', message, turnId });
 });
 
 // Direct specialist chat is the authoritative operator-to-worker handoff for
@@ -1204,34 +1349,40 @@ app.post('/api/chat/glados', async (req, res) => {
 // irreversible target lifecycle action). The dashboard user message is sent
 // as the specialist's root turn rather than quoted through GLaDOS/SendMessage.
 app.post('/api/chat/:agent', async (req, res) => {
+  const session = requireSession(req, res, { writable: true });
+  if (!session) return;
   const agentId = String(req.params.agent || '');
   const message = (req.body && req.body.message) || '';
   if (!assessmentAgentIds().includes(agentId) || agentId === 'glados') {
     return res.status(404).json({ error: 'agent not found' });
   }
   if (!message.trim()) return res.status(400).json({ error: 'message required' });
-  const conflict = activeTurnConflict(activeChatTurns, agentId);
+  const conflict = activeTurnConflict(activeChatTurns, runtimeKey(session.id, agentId));
   if (conflict) return res.status(409).json(conflict);
   let admittedEvent;
   try {
-    admittedEvent = admitUserTranscript(agentId, message, req.body?.client_id);
+    admittedEvent = admitUserTranscript(session.id, agentId, message, req.body?.client_id);
   } catch (error) {
     return res.status(503).json({ ok: false, error: `message was not admitted: ${error.message}` });
   }
 
-  const turnId = startChatTurn(agentId, message);
+  const turnId = startChatTurn(session.id, agentId, message);
   res.status(202).json({ ok: true, accepted: true, direct: true, agentId, turnId, eventId: admittedEvent.sseId });
-  queueAcceptedChatTurn({ agentId, message, turnId });
+  queueAcceptedChatTurn({ sessionId: session.id, agentId, message, turnId });
 });
 
 app.post('/api/chat/:agent/stop', (req, res) => {
+  const session = requireSession(req, res, { writable: true });
+  if (!session) return;
   const agentId = req.params.agent;
   const reason = String(req.body?.reason || 'operator stop').slice(0, 200);
-  res.json(stopChatTurn(agentId, reason));
+  res.json(stopChatTurn(session.id, agentId, reason));
 });
 
 app.get('/api/chat/status/:agent', (req, res) => {
-  const turn = activeChatTurns.get(req.params.agent);
+  const session = requireSession(req, res);
+  if (!session) return;
+  const turn = activeChatTurns.get(runtimeKey(session.id, req.params.agent));
   if (!turn) return res.json({ active: false, agentId: req.params.agent });
   res.json({
     active: true,
@@ -1247,10 +1398,11 @@ async function haltAgent(agentId, reason = 'dashboard halt', initiator = 'dashbo
   if (!assessmentAgentIds().includes(agentId)) throw new Error(`unknown GLaDOS agent: ${agentId}`);
   const result = await watchdogHalt.agentHalt(agentId, reason, { initiator });
   let interruptedParent = null;
-  const direct = activeChatTurns.get(agentId);
-  const subagent = activeSubagentTurns.get(agentId);
+  const sessionId = activeInvestigationSession().id;
+  const direct = activeChatTurns.get(runtimeKey(sessionId, agentId));
+  const subagent = activeSubagentTurns.get(runtimeKey(sessionId, agentId));
   if (subagent) {
-    const parentTurn = activeChatTurns.get(subagent.parentAgentId);
+    const parentTurn = activeChatTurns.get(runtimeKey(sessionId, subagent.parentAgentId));
     resumeCoordinator.capture(agentId, {
       parentAgentId: subagent.parentAgentId,
       taskPrompt: subagent.taskPrompt,
@@ -1264,16 +1416,16 @@ async function haltAgent(agentId, reason = 'dashboard halt', initiator = 'dashbo
   }
   if (subagent?.parentAgentId) {
     interruptedParent = subagent.parentAgentId;
-    const parentTurn = activeChatTurns.get(interruptedParent);
+    const parentTurn = activeChatTurns.get(runtimeKey(sessionId, interruptedParent));
     try { parentTurn?.abortController?.abort(`${agentId} halted by operator`); } catch {}
     if (typeof parentTurn?.interrupt === 'function') {
       await Promise.resolve(parentTurn.interrupt(`${agentId} halted by operator`)).catch(() => {});
     }
   }
   const notice = `Operator halted ${agentId}: ${reason}. ${interruptedParent ? `Its owning ${interruptedParent} turn was interrupted and its task context was saved for resume.` : 'Future tool calls are denied until this agent is resumed.'}`;
-  transcriptEvent(agentId, 'operator-event', notice, { halted: true, initiator, isError: true });
-  if (agentId !== 'glados') transcriptEvent('glados', 'operator-event', notice, { haltedAgentId: agentId, halted: true, initiator, isError: true });
-  broadcastLobby('halt', { agentId, reason, interruptedParent, haltActive: true });
+  transcriptEvent(sessionId, agentId, 'operator-event', notice, { halted: true, initiator, isError: true });
+  if (agentId !== 'glados') transcriptEvent(sessionId, 'glados', 'operator-event', notice, { haltedAgentId: agentId, halted: true, initiator, isError: true });
+  broadcastLobby('halt', { investigationSessionId: sessionId, agentId, reason, interruptedParent, haltActive: true });
   return { ...result, interruptedParent };
 }
 
@@ -1285,9 +1437,10 @@ async function resumeAgent(agentId, initiator = 'dashboard') {
   const notice = pausedWork
     ? `Operator resumed ${agentId}. The halt gate is clear and GLaDOS will re-dispatch the saved task context to continue its work.`
     : `Operator resumed ${agentId}. New turns and tool calls are permitted by the per-agent halt gate.`;
-  transcriptEvent(agentId, 'operator-event', notice, { halted: false, initiator });
-  if (agentId !== 'glados') transcriptEvent('glados', 'operator-event', notice, { haltedAgentId: agentId, halted: false, initiator });
-  broadcastLobby('resume', { agentId, haltActive: false });
+  const sessionId = activeInvestigationSession().id;
+  transcriptEvent(sessionId, agentId, 'operator-event', notice, { halted: false, initiator });
+  if (agentId !== 'glados') transcriptEvent(sessionId, 'glados', 'operator-event', notice, { haltedAgentId: agentId, halted: false, initiator });
+  broadcastLobby('resume', { investigationSessionId: sessionId, agentId, haltActive: false });
   return { ...result, continuationScheduled: !!pausedWork };
 }
 
@@ -1330,10 +1483,10 @@ function activeAgentStatus() {
   }
 }
 
-function overviewPayload() {
+function overviewPayload(sessionId = activeInvestigationSession().id) {
   const Database = require('better-sqlite3');
   const agents = loadAgentRegistry().map(agent => {
-    const session = currentSessionForAgent(agent.id);
+    const session = currentSessionForAgent(agent.id, sessionId);
     return {
       id: agent.id,
       name: agent.name,
@@ -1356,13 +1509,13 @@ function overviewPayload() {
     db = new Database(BLACKBOARD_DB, { readonly: true, fileMustExist: true });
     engagement = db.prepare(`
       SELECT id, target_name AS target, scope, status, started_at AS startedAt, completed_at AS completedAt
-      FROM engagements
+       FROM engagements WHERE session_id = ?
       -- The overview represents the most recently started engagement. Giving
       -- every active row absolute priority lets an older, empty kickoff stub
       -- permanently mask a later canonical completed engagement.
       ORDER BY datetime(started_at) DESC, rowid DESC
       LIMIT 1
-    `).get() || null;
+    `).get(sessionId) || null;
     if (engagement) {
       try { assessmentMetrics = engagementMetrics(db, engagement.id); }
       catch (error) { console.warn('[overview] could not calculate engagement metrics:', error.message); }
@@ -1480,12 +1633,12 @@ function overviewPayload() {
   };
 }
 
-function planSummary() {
+function planSummary(sessionId = activeInvestigationSession().id) {
   const Database = require('better-sqlite3');
   let db;
   try {
     db = new Database(BLACKBOARD_DB, { readonly: true, fileMustExist: true });
-    const rows = db.prepare('SELECT state, COUNT(*) AS n FROM plans GROUP BY state').all();
+    const rows = db.prepare('SELECT p.state, COUNT(*) AS n FROM plans p JOIN engagements e ON e.id=p.engagement_id WHERE e.session_id=? GROUP BY p.state').all(sessionId);
     const out = {};
     for (const row of rows) out[row.state] = row.n;
     return {
@@ -1511,20 +1664,20 @@ function controllerStatusPayload() {
     } : null,
     activeAgents: activeAgentStatus(),
     targetHealth: watchdogHealth.listHealth(),
-    plans: planSummary(),
+    plans: planSummary(activeInvestigationSession().id),
   });
 }
 
-async function runSlash(raw) {
+async function runSlash(raw, sessionId = activeInvestigationSession().id) {
   const parsed = slash.parseSlashCommand(raw);
   const events = [];
   const emit = (text, kind = 'assistant-text', extra = {}) => {
-    const ev = transcriptEvent('glados', kind, text, { slash: true, ...extra });
+    const ev = transcriptEvent(sessionId, 'glados', kind, text, { slash: true, ...extra });
     events.push(ev);
     return ev;
   };
 
-  const commandEvent = recordUserTranscript('glados', `$ ${String(raw || '').trim()}`, { slash: true });
+  const commandEvent = recordUserTranscript(sessionId, 'glados', `$ ${String(raw || '').trim()}`, { slash: true });
   events.push(commandEvent);
 
   if (!parsed.ok) {
@@ -1587,12 +1740,14 @@ async function runSlash(raw) {
 }
 
 app.post('/api/slash/run', async (req, res) => {
+  const session = requireSession(req, res, { writable: true });
+  if (!session) return;
   try {
     const command = String(req.body?.command || '');
     if (!command.trim()) return res.status(400).json({ ok: false, error: 'command required' });
-    res.json(await runSlash(command));
+    res.json(await runSlash(command, session.id));
   } catch (e) {
-    const ev = transcriptEvent('glados', 'assistant-text', `error: ${e.message}`, { slash: true, isError: true });
+    const ev = transcriptEvent(session.id, 'glados', 'assistant-text', `error: ${e.message}`, { slash: true, isError: true });
     res.status(500).json({ ok: false, error: e.message, events: [ev] });
   }
 });
@@ -1603,10 +1758,12 @@ app.get('/api/controller/status', (req, res) => {
 });
 
 app.get('/api/overview', async (req, res) => {
+  const session = requireSession(req, res);
+  if (!session) return;
   try {
     const llmUsage = await getLiteLlmUsage({ force: req.query.usage === 'refresh' });
     res.set('Cache-Control', 'no-store');
-    res.json({ ok: true, ...overviewPayload(), llmUsage });
+    res.json({ ok: true, session, ...overviewPayload(session.id), llmUsage });
   }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
@@ -1801,8 +1958,8 @@ app.post('/api/gateway/restart', async (req, res) => {
   const managedProxy = process.env.GLADOS_DESKTOP === '1' && proxyConfig.backend === 'mitmproxy';
   if (managedProxy) await stopDesktopProxy();
 
-  const blackboard = wipeBlackboard();
-  const proxy = clearProxyTraffic(proxyConfig);
+  const blackboard = { ok: true, preserved: true };
+  const proxy = { ok: true, preserved: true };
   if (managedProxy) startDesktopProxy();
 
   const ok = blackboard.ok && proxy.ok;
@@ -1813,15 +1970,15 @@ app.post('/api/gateway/restart', async (req, res) => {
     resetAll: true,
     resetCount: agentIds.length,
     agentIds,
-    plansReset: blackboard.ok,
-    blackboardReset: blackboard.ok,
-    proxyReset: proxy.ok,
+    plansReset: false,
+    blackboardReset: false,
+    proxyReset: false,
     blackboard,
     proxy,
     proxyRestarted: managedProxy,
     message: ok
-      ? 'Agent runtime, blackboard engagement state, plan workflow, and proxy capture state were refreshed.'
-      : 'Runtime sessions were refreshed, but the blackboard or proxy store could not be cleared completely.',
+      ? 'Agent runtime processes were refreshed. Investigation sessions, blackboard data, transcripts, and proxy history were preserved.'
+      : 'Runtime processes were refreshed with errors.',
   };
   broadcastLobby('runtime-refresh', result);
   res.status(ok ? 200 : 500).json(result);
@@ -1834,27 +1991,24 @@ app.post('/api/gateway/restart', async (req, res) => {
 // are removed during a full GLaDOS reset.
 app.post('/api/agents/:id/reset-session', (req, res) => {
   const agentId = req.params.id;
+  const session = requireSession(req, res, { writable: true });
+  if (!session) return;
   try {
     const ids = agentId === 'glados' ? assessmentAgentIds() : [agentId];
     const results = ids.map(id => {
-      try { return resetAgentSession(id); }
+      try { return resetAgentSession(session.id, id); }
       catch (e) { return { ok: false, agentId: id, error: e.message }; }
     });
     const failed = results.filter(r => !r.ok);
     if (failed.length) return res.status(500).json({ ok: false, agentId, cascade: agentId === 'glados', results });
-    try { transcriptStore.clearAgents(ids); } catch (e) { console.warn('[transcript-store] reset clear failed:', e.message); }
-
     let blackboard = null;
     let memories = null;
     let looseArtifacts = null;
     if (agentId === 'glados') {
       pendingGladosKickoff = null;
-      blackboard = wipeBlackboard();
-      memories = wipeAgentMemories();
-      looseArtifacts = cleanupLooseInvestigationArtifacts(GLADOS_INVESTIGATIONS_DIR);
-      broadcastLobby('blackboard-wiped', blackboard);
-      broadcastLobby('memories-wiped', memories);
-      broadcastLobby('loose-artifacts-wiped', looseArtifacts);
+      blackboard = { ok: true, preserved: true };
+      memories = { ok: true, preserved: true };
+      looseArtifacts = { ok: true, preserved: true };
     }
 
     const primary = results.find(r => r.agentId === agentId) || results[0];
@@ -1972,6 +2126,9 @@ app.get('/api/health/proxy', (req, res) => {
 });
 
 app.post('/api/engagements/:id/end', (req, res) => {
+  const session = requireSession(req, res, { writable: true });
+  if (!session) return;
+  if (!investigationSessions.ownsEngagement(session.id, req.params.id)) return res.status(404).json({ ok: false, error: 'engagement not found in this investigation session' });
   const Database = require('better-sqlite3');
   const reason = String(req.body?.reason || 'operator ended investigation from Overview').slice(0, 1000);
   const operator = String(req.body?.operator || 'operator').slice(0, 120);
@@ -2000,6 +2157,7 @@ app.post('/api/engagements/:id/end', (req, res) => {
 app.use('/api/plans', planRoutes(broadcastLobby, {
   onApproved: queueApprovedPlanExecution,
   onEnded: stopInvestigationRuntime,
+  getSessionId: req => requestSessionId(req),
 }));
 
 // v4.0.0 (Blocker E) — Replan-proposal watcher.
@@ -2054,12 +2212,14 @@ app.use('/api/plans', planRoutes(broadcastLobby, {
 
 // REST surface for the dashboard Plans tab to list / resolve replan proposals.
 app.get('/api/replan-proposals', (req, res) => {
+  const session = requireSession(req, res);
+  if (!session) return;
   const path = require('node:path');
   const Database = require('better-sqlite3');
   const dbPath = BLACKBOARD_DB;
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
-    const where = []; const args = [];
+    const where = ['engagement_id IN (SELECT id FROM engagements WHERE session_id=?)']; const args = [session.id];
     if (req.query.engagement_id) { where.push('engagement_id = ?'); args.push(req.query.engagement_id); }
     where.push("state = ?"); args.push(req.query.state || 'open');
     const rows = db.prepare(
@@ -2070,6 +2230,8 @@ app.get('/api/replan-proposals', (req, res) => {
   function safeJson(s){ try { return s ? JSON.parse(s) : null; } catch { return null; } }
 });
 app.post('/api/replan-proposals/:id/resolve', express.json(), (req, res) => {
+  const session = requireSession(req, res, { writable: true });
+  if (!session) return;
   const Database = require('better-sqlite3');
   const dbPath = BLACKBOARD_DB;
   const db = new Database(dbPath);
@@ -2077,8 +2239,8 @@ app.post('/api/replan-proposals/:id/resolve', express.json(), (req, res) => {
     const state = req.body?.state || 'dismissed';
     if (!['accepted','dismissed','superseded'].includes(state)) return res.status(400).json({ error: 'bad state' });
     const r = db.prepare(
-      "UPDATE replan_proposals SET state = ?, resolved_at = datetime('now'), resolved_by = ? WHERE id = ?"
-    ).run(state, req.body?.resolved_by || 'operator', req.params.id);
+      "UPDATE replan_proposals SET state = ?, resolved_at = datetime('now'), resolved_by = ? WHERE id = ? AND engagement_id IN (SELECT id FROM engagements WHERE session_id=?)"
+    ).run(state, req.body?.resolved_by || 'operator', req.params.id, session.id);
     if (!r.changes) return res.status(404).json({ error: 'proposal not found' });
     broadcastLobby('plan-replan-resolved', { proposal_id: Number(req.params.id), state });
     res.json({ ok: true, state });

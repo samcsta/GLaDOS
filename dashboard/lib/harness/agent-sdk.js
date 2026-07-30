@@ -534,15 +534,17 @@ function buildCanUseTool(agentId, policy = loadPolicy(), hookOptions = {}) {
 }
 
 function buildMcpEnv(env = process.env) {
+  const runtimeDir = path.resolve(env.GLADOS_RUNTIME_DIR || GLADOS_RUNTIME_DIR);
+  const workspaces = path.resolve(env.GLADOS_AGENT_WORKSPACES || path.join(runtimeDir, 'workspaces', 'agents'));
   return {
     ...env,
-    GLADOS_RUNTIME_DIR,
+    GLADOS_RUNTIME_DIR: runtimeDir,
     GLADOS_REPO_ROOT: REPO_ROOT,
-    GLADOS_AGENT_WORKSPACES,
-    GLADOS_REPORTS_DIR: env.GLADOS_REPORTS_DIR || path.join(GLADOS_RUNTIME_DIR, 'reports'),
-    GLADOS_INVESTIGATIONS_DIR: env.GLADOS_INVESTIGATIONS_DIR || path.join(GLADOS_RUNTIME_DIR, 'investigations'),
-    BLACKBOARD_DB,
-    WATCHDOG_DB,
+    GLADOS_AGENT_WORKSPACES: workspaces,
+    GLADOS_REPORTS_DIR: env.GLADOS_REPORTS_DIR || path.join(runtimeDir, 'reports'),
+    GLADOS_INVESTIGATIONS_DIR: env.GLADOS_INVESTIGATIONS_DIR || path.join(runtimeDir, 'investigations'),
+    BLACKBOARD_DB: env.BLACKBOARD_DB || path.join(runtimeDir, 'blackboard', 'blackboard.db'),
+    WATCHDOG_DB: env.WATCHDOG_DB || path.join(runtimeDir, 'watchdog', 'watchdog.db'),
     PATH: env.PATH,
   };
 }
@@ -592,6 +594,7 @@ function writeBrowserMcpConfig(agentId, env = process.env) {
         ignoreHTTPSErrors: true,
         extraHTTPHeaders: {
           'X-GLaDOS-Agent': agentId,
+          'X-GLaDOS-Session': env.GLADOS_SESSION_ID || 'legacy',
           'X-GLaDOS-Transport': 'browser-mcp',
         },
       },
@@ -1482,7 +1485,7 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
         // durable transcript record.
         const isStreamDelta = ev.kind === 'text-stream' || ev.kind === 'thinking-stream';
         const recorded = transcriptStore && !isStreamDelta
-          ? transcriptStore.record(ev.agentId || agentId, ev)
+          ? transcriptStore.record(options.investigationSessionId || options.env?.GLADOS_SESSION_ID || 'legacy', ev.agentId || agentId, ev)
           : ev;
         events.push(recorded);
         if (onEvent) onEvent(recorded, message);

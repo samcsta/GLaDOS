@@ -58,9 +58,10 @@ function getDb() {
 // application-defined ('active' is the default per the schema).
 function currentEngagementId(db) {
   try {
+    const sessionId = process.env.GLADOS_SESSION_ID || 'legacy';
     const row = db.prepare(
-      "SELECT id FROM engagements WHERE status = 'active' ORDER BY started_at DESC LIMIT 1"
-    ).get();
+      "SELECT id FROM engagements WHERE status = 'active' AND session_id=? ORDER BY started_at DESC LIMIT 1"
+    ).get(sessionId);
     return row?.id || null;
   } catch { return null; }
 }

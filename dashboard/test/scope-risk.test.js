@@ -42,6 +42,7 @@ test('explicit operator action approvals are exact, time bounded capabilities', 
   db.exec(`
     CREATE TABLE operator_action_approvals (
       id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
       agent_id TEXT NOT NULL,
       target_url TEXT NOT NULL,
       method TEXT NOT NULL,
@@ -53,8 +54,8 @@ test('explicit operator action approvals are exact, time bounded capabilities', 
     )
   `);
   const now = 1_000_000;
-  db.prepare(`INSERT INTO operator_action_approvals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run('action_test', 'webapp-recon', normalizeActionTarget('http://example.test/begin/'), 'POST', 'high', 'operator', 'start timer', now, now + 60_000);
+  db.prepare(`INSERT INTO operator_action_approvals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run('action_test', 'legacy', 'webapp-recon', normalizeActionTarget('http://example.test/begin/'), 'POST', 'high', 'operator', 'start timer', now, now + 60_000);
 
   assert.equal(findExplicitOperatorActionApproval(db, {
     agent_id: 'webapp-recon',

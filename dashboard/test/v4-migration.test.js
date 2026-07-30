@@ -244,6 +244,12 @@ test('v4 operator workspace exposes overview, search, provenance, notifications,
   for (const id of ['open-overview', 'agent-search', 'notifications-toggle', 'notification-drawer', 'sidebar-splitter', 'events-splitter']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
+  assert.doesNotMatch(html, /investigation-session-select|new-investigation-session|session-picker/);
+  assert.match(app, /overview-session-host/);
+  assert.match(app, /data-session-rename/);
+  assert.match(app, /data-session-delete/);
+  assert.match(app, /function showNameInput\(/);
+  assert.match(styles, /\.overview-session-popover/);
   assert.match(server, /app\.get\('\/api\/overview'/);
   assert.match(server, /getLiteLlmUsage/);
   assert.match(server, /engagementMetrics\(db, engagement\.id\)/);
@@ -308,15 +314,15 @@ test('v4 long-run workspace bounds transcript memory and retries tab reads', () 
   assert.match(app, /function compactTranscriptEvent\(ev\)/);
   assert.match(app, /function pruneTranscriptEvents\(rec\)/);
   assert.match(app, /fetchJson\('\/api\/reports\/tree', \{ timeoutMs: 30000, retries: 1 \}\)/);
-  assert.match(app, /fetchJson\('\/api\/plans' \+ q, \{ timeoutMs: 20000, retries: 1 \}\)/);
+  assert.match(app, /fetchJson\(withSession\('\/api\/plans' \+ q\), \{ timeoutMs: 20000, retries: 1 \}\)/);
   assert.match(app, /fetchJson\('\/api\/proxy\/history\?limit=500', \{ timeoutMs: 20000, retries: 1 \}\)/);
   assert.match(server, /The overview represents the most recently started engagement/);
-  assert.match(server, /blackboardReset: blackboard\.ok/);
+  assert.match(server, /blackboardReset: false/);
   assert.match(server, /onApproved: queueApprovedPlanExecution/);
-  assert.match(server, /transcriptStore\.listRecent\(agentId, \{ limit: BUFFER_LIMIT \}\)/);
+  assert.match(server, /transcriptStore\.listRecent\(sessionId, agentId, \{ limit: BUFFER_LIMIT \}\)/);
   assert.match(app, /data-overview-end/);
   assert.match(app, /load\.inFlight/);
-  assert.match(server, /admitUserTranscript\('glados', message, req\.body\?\.client_id\)/);
+  assert.match(server, /admitUserTranscript\(session\.id, 'glados', message, req\.body\?\.client_id\)/);
   assert.match(server, /fastPath: 'model'/);
   assert.match(server, /fastPath: 'version'/);
   assert.match(server, /res\.status\(202\)\.json\(\{ ok: true, accepted: true/);

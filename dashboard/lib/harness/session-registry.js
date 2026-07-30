@@ -17,7 +17,9 @@ class SdkSessionRegistry {
   _read() {
     try {
       const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      return parsed?.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {};
+      if (parsed?.version >= 3 && parsed?.sessions && typeof parsed.sessions === 'object') return parsed.sessions;
+      if (parsed?.sessions && typeof parsed.sessions === 'object') return { legacy: parsed.sessions };
+      return {};
     } catch {
       return {};
     }
@@ -28,38 +30,54 @@ class SdkSessionRegistry {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.chmodSync(dir, 0o700);
     const tmp = `${this.file}.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, `${JSON.stringify({ version: 2, sessions: this.sessions }, null, 2)}\n`, { mode: 0o600 });
+    fs.writeFileSync(tmp, `${JSON.stringify({ version: 3, sessions: this.sessions }, null, 2)}\n`, { mode: 0o600 });
     fs.chmodSync(tmp, 0o600);
     fs.renameSync(tmp, this.file);
     fs.chmodSync(this.file, 0o600);
   }
 
-  get(agentId, cwdScope = null) {
+  get(sessionId, agentId, cwdScope = null) {
+    if (arguments.length < 3) { cwdScope = agentId; agentId = sessionId; sessionId = 'legacy'; }
+    const session = this.sessions[String(sessionId || 'legacy')] || {};
     const key = String(agentId || '');
-    const entry = this.sessions[key];
+    const entry = session[key];
     if (!entry?.sessionId) return null;
     const requestedScope = normalizeCwdScope(cwdScope);
     if (requestedScope && normalizeCwdScope(entry.cwdScope) !== requestedScope) {
-      delete this.sessions[key];
-      this._write();
       return null;
     }
     return entry.sessionId;
   }
 
-  set(agentId, sessionId, cwdScope = null) {
-    if (!agentId || !sessionId) return null;
-    this.sessions[String(agentId)] = {
-      sessionId: String(sessionId),
+  set(investigationSessionId, agentId, sdkSessionId, cwdScope = null) {
+    if (arguments.length < 4) {
+      cwdScope = sdkSessionId;
+      sdkSessionId = agentId;
+      agentId = investigationSessionId;
+      investigationSessionId = 'legacy';
+    }
+    if (!agentId || !sdkSessionId) return null;
+    const scope = String(investigationSessionId || 'legacy');
+    this.sessions[scope] ||= {};
+    this.sessions[scope][String(agentId)] = {
+      sessionId: String(sdkSessionId),
       cwdScope: normalizeCwdScope(cwdScope),
       updatedAt: new Date().toISOString(),
     };
     this._write();
-    return sessionId;
+    return sdkSessionId;
   }
 
-  clear(agentId) {
-    delete this.sessions[String(agentId || '')];
+  clear(sessionId, agentId) {
+    if (agentId === undefined) { agentId = sessionId; sessionId = 'legacy'; }
+    const scope = String(sessionId || 'legacy');
+    delete this.sessions[scope]?.[String(agentId || '')];
+    if (this.sessions[scope] && !Object.keys(this.sessions[scope]).length) delete this.sessions[scope];
+    this._write();
+  }
+
+  clearSession(sessionId) {
+    delete this.sessions[String(sessionId || 'legacy')];
     this._write();
   }
 

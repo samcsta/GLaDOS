@@ -20,10 +20,17 @@ const GLADOS_RUNTIME_DIR = process.env.GLADOS_RUNTIME_DIR || path.join(os.homedi
 const DB_PATH =
   process.env.BLACKBOARD_DB ||
   path.join(GLADOS_RUNTIME_DIR, "blackboard", "blackboard.db");
+const SESSION_ID = process.env.GLADOS_SESSION_ID || "legacy";
 
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
+
+function assertEngagementScope(engagementId) {
+  if (!engagementId) throw new Error("engagement_id required");
+  const row = db.prepare("SELECT 1 FROM engagements WHERE id=? AND session_id=?").get(engagementId, SESSION_ID);
+  if (!row) throw new Error(`engagement '${engagementId}' does not belong to this investigation session`);
+}
 
 // --- Tool definitions ---
 
@@ -259,6 +266,7 @@ const TOOLS = [
 // --- Tool handlers ---
 
 function handleBlackboardRead(args) {
+  assertEngagementScope(args.engagement_id);
   let sql = "SELECT * FROM findings WHERE 1=1";
   const params = [];
 
@@ -295,19 +303,25 @@ function handleBlackboardRead(args) {
 }
 
 function handleBlackboardWrite(args) {
+  assertEngagementScope(args.engagement_id);
   if (args.id) {
     // Update
+    const mutable = new Set([
+      "target_url", "finding_type", "cwe_id", "affected_component", "severity", "priority",
+      "cvss_score", "title", "description", "evidence", "reproduction_steps", "discovered_by",
+      "validated_by", "validation_status",
+    ]);
     const sets = [];
     const params = [];
     for (const [k, v] of Object.entries(args)) {
-      if (k === "id") continue;
+      if (!mutable.has(k)) continue;
       sets.push(`${k} = ?`);
       params.push(v);
     }
     sets.push("updated_at = datetime('now')");
-    params.push(args.id);
+    params.push(args.id, args.engagement_id);
 
-    const result = db.prepare(`UPDATE findings SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+    const result = db.prepare(`UPDATE findings SET ${sets.join(", ")} WHERE id = ? AND engagement_id = ?`).run(...params);
     return { content: [{ type: "text", text: `Updated finding #${args.id} (${result.changes} rows affected)` }] };
   } else {
     // Insert
@@ -329,6 +343,7 @@ function handleBlackboardWrite(args) {
 }
 
 function handleTaskRead(args) {
+  assertEngagementScope(args.engagement_id);
   let sql = "SELECT * FROM tasks WHERE 1=1";
   const params = [];
 
@@ -351,6 +366,7 @@ function handleTaskRead(args) {
 }
 
 function handleTaskUpdate(args) {
+  assertEngagementScope(args.engagement_id);
   const sets = [];
   const params = [];
 
@@ -359,11 +375,13 @@ function handleTaskUpdate(args) {
   sets.push("updated_at = datetime('now')");
   params.push(args.task_id);
 
-  const result = db.prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+  params.push(args.engagement_id);
+  const result = db.prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ? AND engagement_id = ?`).run(...params);
   return { content: [{ type: "text", text: `Updated task #${args.task_id} (${result.changes} rows affected)` }] };
 }
 
 function handleTaskCreate(args) {
+  assertEngagementScope(args.engagement_id);
   const stmt = db.prepare(`
     INSERT INTO tasks (engagement_id, assigned_to, assigned_by, task_type, target, description)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -376,7 +394,8 @@ function handleTaskCreate(args) {
 }
 
 function handleEngagementStatus(args) {
-  const engagement = db.prepare("SELECT * FROM engagements WHERE id = ?").get(args.engagement_id);
+  assertEngagementScope(args.engagement_id);
+  const engagement = db.prepare("SELECT * FROM engagements WHERE id = ? AND session_id = ?").get(args.engagement_id, SESSION_ID);
   if (!engagement) {
     return { content: [{ type: "text", text: `Engagement '${args.engagement_id}' not found` }] };
   }
@@ -398,12 +417,13 @@ function handleEngagementStatus(args) {
 }
 
 function handleEngagementCreate(args) {
-  const result = createOrReuseEngagement(db, args);
+  const result = createOrReuseEngagement(db, { ...args, session_id: SESSION_ID });
   const action = result.created ? "Created" : "Reused existing";
   return { content: [{ type: "text", text: `${action} engagement '${args.id}'` }] };
 }
 
 function handleEngagementUpdate(args) {
+  assertEngagementScope(args.engagement_id);
   const engagement = updateEngagement(db, {
     engagementId: args.engagement_id,
     status: args.status,
@@ -412,12 +432,14 @@ function handleEngagementUpdate(args) {
 }
 
 function handlePlanCreate(args) {
+  assertEngagementScope(args.plan?.engagement_id);
   const result = createOrReusePlan(db, args.plan, args.id || null);
   return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...result }, null, 2) }] };
 }
 
 // --- v3.1.04252026 (Blocker D) — baseline recon handlers ---
 function handleBaselineGet(args) {
+  assertEngagementScope(args.engagement_id);
   const row = db.prepare(
     "SELECT engagement_id, summary_json, complete, started_at, completed_at, updated_at FROM baseline_recon WHERE engagement_id = ?"
   ).get(args.engagement_id);
@@ -440,12 +462,14 @@ function handleBaselineGet(args) {
 }
 
 function handleBaselineUpsert(args) {
+  assertEngagementScope(args.engagement_id);
   const eng = args.engagement_id;
   const result = upsertBaseline(db, args);
   return { content: [{ type: "text", text: JSON.stringify({ ok: true, engagement_id: eng, ...result }, null, 2) }] };
 }
 
 function handleReconStepLog(args) {
+  assertEngagementScope(args.engagement_id);
   const outJson = args.output != null ? JSON.stringify(args.output) : null;
   if (args.finish === true) {
     // Update most-recent matching row to finished.
@@ -471,6 +495,7 @@ function handleReconStepLog(args) {
 }
 
 function handleReconStepsList(args) {
+  assertEngagementScope(args.engagement_id);
   const rows = db.prepare(
     "SELECT id, step, agent_id, status, duration_ms, started_at, finished_at, output_json FROM recon_steps WHERE engagement_id = ? ORDER BY id ASC"
   ).all(args.engagement_id);
@@ -487,7 +512,7 @@ const REPLAN_THRESHOLD = 0.9;
 
 function handleFindingValidate(args) {
   const id = args.finding_id;
-  const finding = db.prepare("SELECT id, engagement_id, cwe_id FROM findings WHERE id = ?").get(id);
+  const finding = db.prepare("SELECT f.id, f.engagement_id, f.cwe_id FROM findings f JOIN engagements e ON e.id=f.engagement_id WHERE f.id = ? AND f.engagement_id=? AND e.session_id=?").get(id, args.engagement_id, SESSION_ID);
   if (!finding) return { content: [{ type: "text", text: `Finding #${id} not found` }], isError: true };
 
   const sets = ["updated_at = datetime('now')"];
@@ -537,6 +562,7 @@ function handleFindingValidate(args) {
 }
 
 function handleReplanProposalsList(args) {
+  assertEngagementScope(args.engagement_id);
   const where = [];
   const params = [];
   if (args.engagement_id) { where.push("engagement_id = ?"); params.push(args.engagement_id); }
@@ -547,9 +573,10 @@ function handleReplanProposalsList(args) {
 }
 
 function handleReplanProposalResolve(args) {
+  assertEngagementScope(args.engagement_id);
   const r = db.prepare(
-    "UPDATE replan_proposals SET state = ?, resolved_at = datetime('now'), resolved_by = ? WHERE id = ?"
-  ).run(args.state, args.resolved_by || null, args.id);
+    "UPDATE replan_proposals SET state = ?, resolved_at = datetime('now'), resolved_by = ? WHERE id = ? AND engagement_id=?"
+  ).run(args.state, args.resolved_by || null, args.id, args.engagement_id);
   if (!r.changes) return { content: [{ type: "text", text: `Proposal #${args.id} not found` }], isError: true };
   return { content: [{ type: "text", text: `Proposal #${args.id} -> ${args.state}` }] };
 }

@@ -7,6 +7,7 @@ const DEFAULT_TRANSPORT_FIELD_CHARS = 64 * 1024;
 function openTranscriptDb(dbPath) {
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
   return db;
 }
@@ -16,41 +17,48 @@ class DashboardTranscriptStore {
     this.db = openTranscriptDb(dbPath);
     this.insert = this.db.prepare(`
       INSERT INTO dashboard_transcript_events
-        (agent_id, client_event_id, kind, text, event_json, ts)
-      VALUES (?, ?, ?, ?, ?, ?)
+        (session_id, agent_id, client_event_id, kind, text, event_json, ts)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
     this.updateJson = this.db.prepare(`
       UPDATE dashboard_transcript_events SET event_json = ? WHERE id = ?
     `);
     this.listByAgent = this.db.prepare(`
-      SELECT id, agent_id, client_event_id, kind, text, event_json, ts
+      SELECT id, session_id, agent_id, client_event_id, kind, text, event_json, ts
       FROM dashboard_transcript_events
-      WHERE agent_id = ?
+      WHERE session_id = ? AND agent_id = ?
       ORDER BY id ASC
     `);
     this.listRecentByAgent = this.db.prepare(`
-      SELECT id, agent_id, client_event_id, kind,
+      SELECT id, session_id, agent_id, client_event_id, kind,
              substr(text, 1, ?) AS text,
              length(text) AS text_length,
              CASE WHEN length(event_json) <= ? THEN event_json ELSE NULL END AS event_json,
              length(event_json) AS event_json_length,
              ts
       FROM dashboard_transcript_events
-      WHERE agent_id = ?
+      WHERE session_id = ? AND agent_id = ?
       ORDER BY id DESC
       LIMIT ?
     `);
     this.deleteByAgent = this.db.prepare(`
-      DELETE FROM dashboard_transcript_events WHERE agent_id = ?
+      DELETE FROM dashboard_transcript_events WHERE session_id = ? AND agent_id = ?
     `);
+    this.deleteBySession = this.db.prepare(`DELETE FROM dashboard_transcript_events WHERE session_id = ?`);
     this.deleteAll = this.db.prepare(`
       DELETE FROM dashboard_transcript_events
     `);
   }
 
-  record(agentId, event) {
-    const ev = normalizeEvent(agentId, event);
+  record(sessionId, agentId, event) {
+    if (event === undefined) {
+      event = agentId;
+      agentId = sessionId;
+      sessionId = 'legacy';
+    }
+    const ev = normalizeEvent(agentId, { ...(event || {}), sessionId: sessionId || 'legacy' });
     const info = this.insert.run(
+      sessionId || 'legacy',
       agentId,
       ev.id || null,
       ev.kind || 'meta',
@@ -67,13 +75,15 @@ class DashboardTranscriptStore {
     return out;
   }
 
-  list(agentId) {
-    return this.listByAgent.all(agentId).map(row => {
+  list(sessionId, agentId) {
+    if (agentId === undefined) { agentId = sessionId; sessionId = 'legacy'; }
+    return this.listByAgent.all(sessionId || 'legacy', agentId).map(row => {
       let ev = null;
       try { ev = JSON.parse(row.event_json); } catch {}
       return normalizeEvent(row.agent_id, {
         ...(ev && typeof ev === 'object' ? ev : {}),
         agentId: row.agent_id,
+        sessionId: row.session_id,
         kind: ev?.kind || row.kind,
         text: ev?.text ?? row.text,
         ts: ev?.ts || row.ts,
@@ -87,11 +97,16 @@ class DashboardTranscriptStore {
   // Dashboard reconnects only need a bounded working set. Reading every full
   // event made one large specialist transcript capable of blocking the Node
   // event loop — and therefore every Overview/Plans/Settings/Proxy request.
-  listRecent(agentId, options = {}) {
+  listRecent(sessionId, agentId, options = {}) {
+    if (typeof agentId !== 'string') {
+      options = agentId || {};
+      agentId = sessionId;
+      sessionId = 'legacy';
+    }
     const limit = Math.max(1, Math.min(5000, Number(options.limit) || DEFAULT_RECENT_LIMIT));
     const maxFieldChars = Math.max(1024, Math.min(1024 * 1024,
       Number(options.maxFieldChars) || DEFAULT_TRANSPORT_FIELD_CHARS));
-    return this.listRecentByAgent.all(maxFieldChars, maxFieldChars, agentId, limit)
+    return this.listRecentByAgent.all(maxFieldChars, maxFieldChars, sessionId || 'legacy', agentId, limit)
       .reverse()
       .map(row => {
         let ev = null;
@@ -101,6 +116,7 @@ class DashboardTranscriptStore {
         return normalizeEvent(row.agent_id, {
           ...(ev && typeof ev === 'object' ? ev : {}),
           agentId: row.agent_id,
+          sessionId: row.session_id,
           kind: ev?.kind || row.kind,
           text: ev?.text ?? row.text,
           ts: ev?.ts || row.ts,
@@ -116,12 +132,17 @@ class DashboardTranscriptStore {
       });
   }
 
-  clearAgents(agentIds) {
+  clearAgents(sessionId, agentIds) {
+    if (agentIds === undefined) { agentIds = sessionId; sessionId = 'legacy'; }
     const ids = Array.isArray(agentIds) ? agentIds : [agentIds];
     const tx = this.db.transaction(() => {
-      for (const id of ids) this.deleteByAgent.run(id);
+      for (const id of ids) this.deleteByAgent.run(sessionId || 'legacy', id);
     });
     tx();
+  }
+
+  clearSession(sessionId) {
+    this.deleteBySession.run(sessionId || 'legacy');
   }
 
   clearAll() {

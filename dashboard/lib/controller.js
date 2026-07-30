@@ -43,6 +43,7 @@ class ControllerLite {
     dbPath,
     sendMessageToAgentTracked = null,
     currentSessionForAgent = null,
+    getInvestigationSessionId = () => 'legacy',
     workerId = `dashboard-${process.pid}-${Date.now().toString(36)}`,
     maxConcurrent = Number(process.env.GLADOS_CONTROLLER_MAX_CONCURRENT || 3),
     leaseMs = Number(process.env.GLADOS_CONTROLLER_LEASE_MS || 20 * 60 * 1000),
@@ -50,6 +51,7 @@ class ControllerLite {
     this.db = openControllerDb(dbPath);
     this.sendMessageToAgentTracked = sendMessageToAgentTracked;
     this.currentSessionForAgent = currentSessionForAgent;
+    this.getInvestigationSessionId = getInvestigationSessionId;
     this.workerId = workerId;
     this.maxConcurrent = Math.max(1, maxConcurrent);
     this.leaseMs = Math.max(60_000, leaseMs);
@@ -60,8 +62,8 @@ class ControllerLite {
 
   _prepare() {
     this.insertEngagement = this.db.prepare(`
-      INSERT INTO engagements (id, target_name, scope, status)
-      VALUES (?, ?, ?, 'active')
+      INSERT INTO engagements (id, session_id, target_name, scope, status)
+      VALUES (?, ?, ?, ?, 'active')
       ON CONFLICT(id) DO UPDATE SET target_name=excluded.target_name
     `);
     this.insertGoal = this.db.prepare(`
@@ -171,8 +173,9 @@ class ControllerLite {
   }
 
   ensureEngagement(target) {
-    const engagementId = engagementIdForTarget(target);
-    this.insertEngagement.run(engagementId, target, JSON.stringify([target]));
+    const sessionId = this.getInvestigationSessionId();
+    const engagementId = `${engagementIdForTarget(target)}-${crypto.randomBytes(3).toString('hex')}`;
+    this.insertEngagement.run(engagementId, sessionId, target, JSON.stringify([target]));
     return engagementId;
   }
 

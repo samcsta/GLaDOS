@@ -51,6 +51,25 @@ test('clearAll removes durable transcripts for every agent', () => {
   store.close();
 });
 
+test('investigation sessions isolate transcript replay and clearing', () => {
+  const { dbPath } = tempDb();
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath);
+  db.prepare("UPDATE investigation_sessions SET state='archived', archived_at=datetime('now') WHERE id='legacy'").run();
+  db.prepare("INSERT INTO investigation_sessions (id, name, state) VALUES ('session-a', 'A', 'active')").run();
+  db.prepare("INSERT INTO investigation_sessions (id, name, state) VALUES ('session-b', 'B', 'archived')").run();
+  db.close();
+  const store = new DashboardTranscriptStore(dbPath);
+  store.record('session-a', 'glados', { kind: 'assistant-text', text: 'only A' });
+  store.record('session-b', 'glados', { kind: 'assistant-text', text: 'only B' });
+  assert.deepEqual(store.list('session-a', 'glados').map(event => event.text), ['only A']);
+  assert.deepEqual(store.list('session-b', 'glados').map(event => event.text), ['only B']);
+  store.clearSession('session-a');
+  assert.equal(store.list('session-a', 'glados').length, 0);
+  assert.equal(store.list('session-b', 'glados').length, 1);
+  store.close();
+});
+
 test('recent transcript replay is newest-first bounded and does not parse oversized event JSON', () => {
   const { dbPath } = tempDb();
   const store = new DashboardTranscriptStore(dbPath);

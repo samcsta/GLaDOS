@@ -18,14 +18,15 @@ function findExplicitOperatorActionApproval(db, args, now = Date.now()) {
     return db.prepare(`
       SELECT id, agent_id, target_url, method, risk_to_target, operator, reason, created_at, expires_at
       FROM operator_action_approvals
-      WHERE agent_id = ?
+      WHERE session_id = ?
+        AND agent_id = ?
         AND target_url = ?
         AND (method = '*' OR method = ?)
         AND (risk_to_target = '*' OR risk_to_target = ?)
         AND expires_at > ?
       ORDER BY created_at DESC
       LIMIT 1
-    `).get(String(args.agent_id || ''), targetUrl, method, risk, now) || null;
+    `).get(String(args.session_id || process.env.GLADOS_SESSION_ID || 'legacy'), String(args.agent_id || ''), targetUrl, method, risk, now) || null;
   } catch {
     return null;
   }
