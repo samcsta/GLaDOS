@@ -1353,6 +1353,9 @@ body.events-collapsed #events-splitter { cursor: default; }
 .overview-session-label > span { color: var(--fg); font-size: 10px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
 .overview-session-label > small { margin-top: 3px; color: var(--fg-dim); font-size: 9px; }
 .overview-session-menu { position: relative; width: min(480px, 56vw); }
+.overview-session-controls { width: min(600px, 66vw); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.overview-session-controls .overview-session-menu { width: 100%; }
+.overview-new-session { min-width: 102px; min-height: 43px; border-color: var(--accent-soft-border); color: var(--accent-hi); background: var(--accent-soft); font-weight: 700; }
 .overview-session-menu summary {
   min-height: 43px; padding: 7px 12px; display: grid; grid-template-columns: 9px minmax(0,1fr) 14px; align-items: center; gap: 10px;
   border: 1px solid var(--control-border); border-radius: 7px; color: var(--fg); background: var(--control-bg); cursor: pointer; list-style: none;
@@ -1375,16 +1378,20 @@ body.events-collapsed #events-splitter { cursor: default; }
 .overview-session-popover-head { border-bottom: 1px solid var(--border); color: var(--fg); font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .overview-session-popover-head button, .overview-session-popover-actions button { min-height: 29px; padding: 4px 10px; font-size: 10px; }
 .overview-session-list { min-height: 0; overflow: auto; padding: 5px; }
+.overview-session-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 30px; align-items: center; border-radius: 6px; }
+.overview-session-row.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
 .overview-session-option {
   width: 100%; min-height: 54px; padding: 8px 9px; display: grid; grid-template-columns: 9px minmax(0,1fr) auto; align-items: center; gap: 10px;
   border: 0; border-radius: 6px; background: transparent; text-align: left;
 }
 .overview-session-option:hover { background: rgba(255,255,255,.035); }
-.overview-session-option.selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.overview-session-row:not(.selected):hover { background: rgba(255,255,255,.035); }
 .overview-session-option strong, .overview-session-option small { display: block; }
 .overview-session-option strong { color: #e4e9f1; font: 650 11px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 .overview-session-option small { margin-top: 3px; color: var(--fg-dim); font: 9px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .session-current-mark { color: var(--accent-hi); font-size: 8px; font-weight: 800; text-transform: uppercase; }
+.session-row-delete { width: 27px; min-width: 27px; height: 27px; padding: 0; border: 0; color: var(--fg-dim); background: transparent; font-size: 16px; }
+.session-row-delete:hover:not(:disabled) { color: var(--danger-fg); background: var(--danger-bg); }
 .overview-session-popover-actions { justify-content: flex-end; border-top: 1px solid var(--border); }
 .session-name-modal label { display: block; margin-bottom: 7px; color: var(--fg-dim); font-size: 10px; text-transform: uppercase; }
 .session-name-modal input { width: 100%; height: 38px; padding: 0 10px; color: var(--fg); background: var(--bg); border: 1px solid var(--control-border); border-radius: 5px; font: 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
@@ -1591,6 +1598,7 @@ body.events-collapsed #events-splitter { cursor: default; }
   .overview-session-bar { padding: 10px 16px; }
   .overview-session-label { display: none; }
   .overview-session-menu { width: 100%; }
+  .overview-session-controls { width: 100%; }
 }
 
 @media (max-width: 640px) {

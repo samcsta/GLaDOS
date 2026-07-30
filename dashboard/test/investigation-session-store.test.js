@@ -83,3 +83,54 @@ test('deleting the active session creates an unassigned replacement and removes 
   verify.close();
   store.close();
 });
+
+test('deleting archived sessions does not create additional unassigned sessions', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-investigation-delete-archived-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  const store = new InvestigationSessionStore(dbPath);
+  const first = store.getActive();
+  store.rename(first.id, 'Named session');
+  const unassigned = store.createUnassigned();
+  const archivedOne = store.create({ name: 'Old one', activate: false });
+  const archivedTwo = store.create({ name: 'Old two', activate: false });
+  const before = store.list().filter(session => session.metadata.unassigned).length;
+  store.delete(archivedOne.id);
+  store.delete(archivedTwo.id);
+  const after = store.list().filter(session => session.metadata.unassigned).length;
+  assert.equal(before, 1);
+  assert.equal(after, 1);
+  assert.equal(store.getActive().id, unassigned.id);
+  store.close();
+});
+
+test('deleting active session reuses an existing archived session', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-investigation-delete-reuse-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  const store = new InvestigationSessionStore(dbPath);
+  const first = store.getActive();
+  store.rename(first.id, 'First');
+  const second = store.create({ name: 'Second' });
+  const countBefore = store.list().length;
+  const result = store.delete(second.id);
+  assert.equal(result.replacement.id, first.id);
+  assert.equal(store.list().length, countBefore - 1);
+  store.close();
+});
+
+test('startup removes duplicate empty archived unassigned sessions', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-investigation-dedupe-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  let store = new InvestigationSessionStore(dbPath);
+  const active = store.getActive();
+  store.rename(active.id, 'Named');
+  store.create({ name: 'Unassigned session', metadata: { unassigned: true }, activate: false });
+  store.create({ name: 'Unassigned session', metadata: { unassigned: true }, activate: false });
+  store.create({ name: 'Unassigned session', metadata: { unassigned: true }, activate: false });
+  store.close();
+  store = new InvestigationSessionStore(dbPath);
+  assert.equal(store.list().filter(session => session.metadata.unassigned).length, 1);
+  store.close();
+});

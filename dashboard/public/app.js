@@ -93,9 +93,13 @@ async function activateInvestigationSession(sessionId) {
 }
 
 async function createInvestigationSession() {
-  const name = `Investigation ${new Date().toLocaleString()}`;
+  const current = state.investigationSessions.find(session => session.id === state.currentSessionId);
+  if (current?.metadata?.unassigned) {
+    showToast('The current session is already unassigned and ready for a new GLaDOS prompt.', { kind: 'info', label: 'Investigation session' });
+    return current;
+  }
   const response = await fetch('/api/investigation-sessions', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Unassigned session', metadata: { unassigned: true } }),
   });
   const body = await response.json();
   if (!response.ok || !body.ok) throw new Error(body.error || 'could not create investigation');
@@ -107,6 +111,7 @@ async function createInvestigationSession() {
   await loadAgents();
   renderPane();
   if (!state._lobbySource) subscribeLobby();
+  return body.session;
 }
 
 async function renameInvestigationSession(sessionId, name) {
@@ -873,20 +878,26 @@ async function renderOverviewPane() {
     const sorted = [...state.investigationSessions].sort((a, b) => (a.state === 'active' ? -1 : b.state === 'active' ? 1 : Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
     sessionHost.innerHTML = `<div class="overview-session-bar">
       <div class="overview-session-label"><span>Investigation workspace</span><small>Transcripts, findings, plans, and agent context</small></div>
-      <details class="overview-session-menu">
-        <summary aria-label="Select investigation"><span class="session-state-dot ${current?.state || 'active'}"></span><span><strong>${escapeHtml(current?.name || 'Unassigned session')}</strong><small>${current?.metadata?.unassigned ? 'Waiting for the first GLaDOS prompt' : `${current?.engagementCount || 0} engagement${current?.engagementCount === 1 ? '' : 's'}`}</small></span></summary>
-        <div class="overview-session-popover">
-          <div class="overview-session-popover-head"><span>Investigations</span><button type="button" data-session-new>New session</button></div>
-          <div class="overview-session-list">
-            ${sorted.map(session => `<button type="button" class="overview-session-option${session.id === state.currentSessionId ? ' selected' : ''}" data-session-select="${escapeHtml(session.id)}">
-              <span class="session-state-dot ${session.state}"></span><span><strong>${escapeHtml(session.name)}</strong><small>${session.state === 'active' ? 'Active' : 'Archived'} · ${new Date(session.updatedAt).toLocaleDateString()} · ${session.engagementCount || 0} engagement${session.engagementCount === 1 ? '' : 's'}</small></span>${session.id === state.currentSessionId ? '<span class="session-current-mark">Current</span>' : ''}
-            </button>`).join('')}
+      <div class="overview-session-controls">
+        <details class="overview-session-menu">
+          <summary aria-label="Select investigation"><span class="session-state-dot ${current?.state || 'active'}"></span><span><strong>${escapeHtml(current?.name || 'Unassigned session')}</strong><small>${current?.metadata?.unassigned ? 'Waiting for the first GLaDOS prompt' : `${current?.engagementCount || 0} engagement${current?.engagementCount === 1 ? '' : 's'}`}</small></span></summary>
+          <div class="overview-session-popover">
+            <div class="overview-session-popover-head"><span>Investigations</span></div>
+            <div class="overview-session-list">
+              ${sorted.map(session => `<div class="overview-session-row${session.id === state.currentSessionId ? ' selected' : ''}">
+                <button type="button" class="overview-session-option" data-session-select="${escapeHtml(session.id)}">
+                  <span class="session-state-dot ${session.state}"></span><span><strong>${escapeHtml(session.name)}</strong><small>${session.state === 'active' ? 'Active' : 'Archived'} · ${new Date(session.updatedAt).toLocaleDateString()} · ${session.engagementCount || 0} engagement${session.engagementCount === 1 ? '' : 's'}</small></span>${session.id === state.currentSessionId ? '<span class="session-current-mark">Current</span>' : ''}
+                </button>
+                ${session.id !== state.currentSessionId ? `<button type="button" class="session-row-delete" data-session-delete-id="${escapeHtml(session.id)}" title="Delete ${escapeHtml(session.name)}" aria-label="Delete ${escapeHtml(session.name)}">×</button>` : ''}
+              </div>`).join('')}
+            </div>
+            <div class="overview-session-popover-actions">
+              <button type="button" data-session-rename>Rename</button><button type="button" class="danger" data-session-delete>Delete current</button>
+            </div>
           </div>
-          <div class="overview-session-popover-actions">
-            <button type="button" data-session-rename>Rename</button><button type="button" class="danger" data-session-delete>Delete</button>
-          </div>
-        </div>
-      </details>
+        </details>
+        <button type="button" class="overview-new-session" data-session-new>New session</button>
+      </div>
     </div>`;
     const details = sessionHost.querySelector('details');
     sessionHost.querySelectorAll('[data-session-select]').forEach(button => button.addEventListener('click', async () => {
@@ -899,6 +910,19 @@ async function renderOverviewPane() {
       try { await createInvestigationSession(); }
       catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
     });
+    sessionHost.querySelectorAll('[data-session-delete-id]').forEach(button => button.addEventListener('click', async event => {
+      event.stopPropagation();
+      const session = state.investigationSessions.find(item => item.id === button.dataset.sessionDeleteId);
+      if (!session || !await confirmAction({ title: 'Delete investigation session', message: `Permanently delete "${session.name}" and its blackboard records, plans, tasks, findings, and transcripts? Evidence and report files are preserved.`, confirmLabel: 'Delete session', danger: true })) return;
+      try {
+        const response = await fetch(`/api/investigation-sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
+        const body = await response.json();
+        if (!response.ok || !body.ok) throw new Error(body.error || 'could not delete investigation');
+        state.investigationSessions = body.sessions || [];
+        details.open = false;
+        renderSessionManager();
+      } catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
+    }));
     sessionHost.querySelector('[data-session-rename]')?.addEventListener('click', async () => {
       details.open = false;
       const name = await showNameInput({ title: 'Rename investigation', value: current?.name || '', confirmLabel: 'Rename' });

@@ -9,6 +9,7 @@ class InvestigationSessionStore {
     this.db.pragma('busy_timeout = 5000');
     this.db.pragma('secure_delete = ON');
     this.ensureInitialSession();
+    this.removeDuplicateEmptyUnassignedSessions();
   }
 
   ensureInitialSession() {
@@ -23,7 +24,36 @@ class InvestigationSessionStore {
   }
 
   createUnassigned() {
+    const active = this.getActive();
+    if (active?.metadata?.unassigned) return active;
+    const existing = this.db.prepare(`
+      SELECT id FROM investigation_sessions
+      WHERE state='archived' AND json_extract(metadata_json, '$.unassigned')=1
+      ORDER BY datetime(updated_at) DESC LIMIT 1
+    `).get();
+    if (existing) return this.activate(existing.id);
     return this.create({ name: 'Unassigned session', metadata: { unassigned: true }, activate: true });
+  }
+
+  removeDuplicateEmptyUnassignedSessions() {
+    const rows = this.db.prepare(`
+      SELECT s.id, s.state
+      FROM investigation_sessions s
+      WHERE json_extract(s.metadata_json, '$.unassigned')=1
+        AND NOT EXISTS (SELECT 1 FROM engagements e WHERE e.session_id=s.id)
+        AND NOT EXISTS (SELECT 1 FROM dashboard_transcript_events t WHERE t.session_id=s.id)
+      ORDER BY CASE s.state WHEN 'active' THEN 0 ELSE 1 END, datetime(s.updated_at) DESC
+    `).all();
+    if (rows.length <= 1) return 0;
+    const remove = rows.slice(1).map(row => row.id);
+    const tx = this.db.transaction(() => {
+      for (const id of remove) {
+        this.db.prepare('DELETE FROM operator_action_approvals WHERE session_id=?').run(id);
+        this.db.prepare("DELETE FROM investigation_sessions WHERE id=? AND state='archived'").run(id);
+      }
+    });
+    tx();
+    return remove.length;
   }
 
   list({ includeArchived = true } = {}) {
@@ -137,9 +167,21 @@ class InvestigationSessionStore {
     const tx = this.db.transaction(() => {
       if (session.state === 'active') {
         this.db.prepare(`UPDATE investigation_sessions SET state='archived', archived_at=datetime('now'), updated_at=datetime('now') WHERE id=?`).run(id);
-        const replacementId = `session_${Date.now().toString(36)}_${crypto.randomBytes(5).toString('hex')}`;
-        this.db.prepare(`INSERT INTO investigation_sessions (id, name, state, metadata_json) VALUES (?, 'Unassigned session', 'active', '{"unassigned":true}')`).run(replacementId);
-        replacement = replacementId;
+        const existing = this.db.prepare(`
+          SELECT id FROM investigation_sessions
+          WHERE id<>? AND state='archived'
+          ORDER BY CASE WHEN json_extract(metadata_json, '$.unassigned')=1 THEN 0 ELSE 1 END,
+                   datetime(updated_at) DESC
+          LIMIT 1
+        `).get(id);
+        if (existing) {
+          this.db.prepare(`UPDATE investigation_sessions SET state='active', archived_at=NULL, updated_at=datetime('now') WHERE id=?`).run(existing.id);
+          replacement = existing.id;
+        } else {
+          const replacementId = `session_${Date.now().toString(36)}_${crypto.randomBytes(5).toString('hex')}`;
+          this.db.prepare(`INSERT INTO investigation_sessions (id, name, state, metadata_json) VALUES (?, 'Unassigned session', 'active', '{"unassigned":true}')`).run(replacementId);
+          replacement = replacementId;
+        }
       }
       runDelete('controller_events', `DELETE FROM controller_events WHERE goal_id IN (SELECT id FROM controller_goals WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?)) OR job_id IN (SELECT id FROM controller_jobs WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?))`, id, id);
       runDelete('controller_jobs', `DELETE FROM controller_jobs WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?) OR goal_id IN (SELECT id FROM controller_goals WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?))`, id, id);
