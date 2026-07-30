@@ -153,7 +153,7 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     }
     const overview = await request(srv.port, 'GET', '/api/overview');
     assert.equal(overview.status, 200, overview.raw);
-    assert.equal(overview.json.version, 'v4.0.1');
+    assert.equal(overview.json.version, 'v4.1.0');
     assert.equal(overview.json.engagement.target, 'example.com');
     assert.equal(overview.json.phase, 'Awaiting approval');
     assert.equal(overview.json.pendingApprovals, 1);

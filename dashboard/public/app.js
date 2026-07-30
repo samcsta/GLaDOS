@@ -1,3 +1,5 @@
+const ALERT_KINDS = new Set(['error', 'failed', 'offline', 'denied']);
+
 const state = {
   agents: [],          // from /api/agents
   active: new Map(),   // agentId -> { sessionId }
@@ -11,7 +13,10 @@ const state = {
   agentFilter: (() => { try { return localStorage.getItem('glados-dash.agent-filter') || 'all'; } catch { return 'all'; } })(),
   agentQuery: (() => { try { return localStorage.getItem('glados-dash.agent-query') || ''; } catch { return ''; } })(),
   notifications: (() => {
-    try { return JSON.parse(localStorage.getItem('glados-dash.notifications') || '[]').slice(-100); }
+    try {
+      const stored = JSON.parse(localStorage.getItem('glados-dash.notifications') || '[]');
+      return Array.isArray(stored) ? stored.filter(item => ALERT_KINDS.has(item?.kind)).slice(-100) : [];
+    }
     catch { return []; }
   })(),
   unreadNotifications: 0,
@@ -77,6 +82,10 @@ function renderNotifications() {
 }
 
 function pushNotification(kind, text, { toast = false, label = null, unread = true } = {}) {
+  if (!ALERT_KINDS.has(kind)) {
+    if (toast) showToast(text, { kind, label });
+    return null;
+  }
   const item = { id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, kind, text: String(text), label, ts: Date.now() };
   state.notifications.push(item);
   if (unread && notificationDrawerEl?.getAttribute('aria-hidden') !== 'false') state.unreadNotifications++;
@@ -248,7 +257,7 @@ async function handleHaltAgent(agentId) {
     });
     setAgentHaltedState(agentId, true);
     logEvent('ended', `halted ${agentId}${result.interruptedParent ? `; interrupted ${result.interruptedParent}` : ''}`);
-    pushNotification('halt', `${agentId} was halted. GLaDOS has been notified.`, { toast: true, label: 'Agent halted' });
+    showToast(`${agentId} was halted. GLaDOS has been notified.`, { kind: 'warning', label: 'Agent halted' });
   } catch (error) {
     pushNotification('error', `Could not halt ${agentId}: ${error.message}`, { toast: true, label: 'Halt failed' });
   }
@@ -263,7 +272,7 @@ async function handleResumeAgent(agentId) {
     });
     setAgentHaltedState(agentId, false);
     logEvent('started', `resumed ${agentId}${result.continuationScheduled ? '; saved work queued through GLaDOS' : ''}`);
-    pushNotification('resume', `${agentId} resumed${result.continuationScheduled ? ' and its saved task was queued through GLaDOS' : ''}.`, { toast: true, label: 'Agent resumed' });
+    showToast(`${agentId} resumed${result.continuationScheduled ? ' and its saved task was queued through GLaDOS' : ''}.`, { kind: 'success', label: 'Agent resumed' });
   } catch (error) {
     pushNotification('error', `Could not resume ${agentId}: ${error.message}`, { toast: true, label: 'Resume failed' });
   }
@@ -1107,6 +1116,8 @@ function ensureTranscript(tabId, agentId) {
     const recentOperationalEvent = !transcriptEventMs(ev) || Date.now() - transcriptEventMs(ev) < 30_000;
     if (ev.kind === 'prompt-error' && recentOperationalEvent) {
       pushNotification('error', `${rec.agentId}: ${ev.error || ev.text || 'LLM prompt failed'}`, { toast: true, label: 'Agent runtime' });
+    } else if (ev.kind === 'tool-result' && ev.isError && recentOperationalEvent) {
+      pushNotification('error', `${rec.agentId}: ${ev.toolName || 'tool'} failed`, { toast: true, label: 'Tool error' });
     } else if (ev.kind === 'permission-denied' && recentOperationalEvent) {
       pushNotification('denied', `${rec.agentId}: ${ev.decisionReason || ev.text || 'tool use denied'}`, { toast: true, label: 'Safety gate' });
     }
@@ -1598,6 +1609,7 @@ function handleStreamDelta(rec, ev) {
         const ts = entry.el.querySelector('.ts')?.outerHTML || '';
         entry.el.innerHTML = `${ts}${renderMarkdown(entry.content || '')}`;
         enhanceMarkdownContent(entry.el);
+        addAskGladosAction(entry.el, entry.content, rec);
         const toggle = entry.el.querySelector('.expand-toggle');
         if (toggle) {
           toggle.addEventListener('click', () => {
@@ -1781,8 +1793,9 @@ function installChatRetryContextMenu(entryEl, agentId, msg) {
 
 function renderChatPane() {
   const chat = document.createElement('div');
-  chat.className = 'chat-pane';
-  chat.appendChild(createAgentViewToolbar('glados'));
+  chat.className = 'chat-pane chat-visual-chamber';
+  const toolbar = createAgentViewToolbar('glados');
+  chat.appendChild(toolbar);
   const transcript = document.createElement('div');
   transcript.className = 'transcript';
   const sendingEl = document.createElement('div');
@@ -1866,14 +1879,14 @@ function renderChatPane() {
       body: JSON.stringify({ message: msg, client_id: clientId }),
     }).then(r => r.json()).then(j => {
       if (!j.ok) {
-        logEvent('ended', 'chat error: ' + (j.error || 'unknown'));
+        logEvent('error', 'chat error: ' + (j.error || 'unknown'));
         finishTranscriptTurn(rec, tabId);
       }
       // On success, the "sending" flag gets cleared by the SSE handler when
       // the first assistant/thinking/result event arrives (which is usually
       // before the POST resolves, since the CLI blocks until turn end).
     }).catch(e => {
-      logEvent('ended', 'chat exception: ' + e.message);
+      logEvent('error', 'chat exception: ' + e.message);
       finishTranscriptTurn(rec, tabId);
     });
   };
@@ -1914,7 +1927,7 @@ async function stopChatTurnFromUi(tabId, agentId) {
     const j = await r.json().catch(() => ({}));
     logEvent(j.stopped ? 'ended' : 'meta', j.stopped ? `stopped ${agentId}` : `${agentId} was not running`);
   } catch (e) {
-    logEvent('ended', `stop ${agentId} failed: ${e.message}`);
+    logEvent('error', `stop ${agentId} failed: ${e.message}`);
   } finally {
     finishTranscriptTurn(rec, tabId);
   }
@@ -2021,6 +2034,26 @@ function enhanceMarkdownContent(container) {
   });
 }
 
+function addAskGladosAction(entry, responseText, rec) {
+  if (!entry || rec?.agentId !== 'glados') return;
+  entry.querySelector('.ask-glados-action')?.remove();
+  const action = document.createElement('div');
+  action.className = 'ask-glados-action';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = 'Ask GLaDOS';
+  button.title = 'Ask GLaDOS to elaborate and explain this response more clearly';
+  button.addEventListener('click', () => {
+    const excerpt = String(responseText || '').trim().slice(0, 12_000);
+    if (!excerpt) return;
+    chatRetriers.get('glados')?.(
+      `Please elaborate on the response below and explain it in a more understandable way. Preserve the important technical details.\n\n${excerpt}`
+    );
+  });
+  action.appendChild(button);
+  entry.appendChild(action);
+}
+
 function extractEventUrl(ev) {
   const source = ev?.arguments ?? ev?.toolInput ?? ev?.text ?? '';
   const text = typeof source === 'string' ? source : JSON.stringify(source);
@@ -2119,6 +2152,7 @@ function appendEntry(container, ev, rec) {
     // v4: markdown for assistant output (bold, code, links, lists, headers).
     el.innerHTML = `<span class="ts">${ts}</span>${renderMarkdown(displayTranscriptText(ev.text || ''))}`;
     enhanceMarkdownContent(el);
+    addAskGladosAction(el, displayTranscriptText(ev.text || ''), rec);
   } else if (kind === 'thinking' || kind === 'user-message') {
     const displayText = kind === 'thinking' ? displayTranscriptText(ev.text || '') : (ev.text || '');
     el.innerHTML = `<span class="ts">${ts}</span>${renderCollapsible(displayText)}`;
@@ -2259,7 +2293,9 @@ function logEvent(kind, text) {
   eventsEl.appendChild(el);
   while (eventsEl.children.length > 200) eventsEl.removeChild(eventsEl.firstChild);
   eventsEl.scrollTop = eventsEl.scrollHeight;
-  pushNotification(kind, text, { unread: true });
+  if (ALERT_KINDS.has(kind)) {
+    pushNotification(kind, text, { unread: true });
+  }
 }
 
 // Proxy health banner. Startup only warns when the selected proxy backend
@@ -3773,7 +3809,7 @@ async function renderSettingsPane() {
       <h2>Agents</h2>
       <div id="settings-version" class="settings-version">Version loading…</div>
       <div id="settings-model-catalog" class="settings-version">LiteLLM model catalog loading…</div>
-      <p style="color:var(--fg-dim);">Click an agent to expand. Enable/disable and model changes update the local agent workspace and v4 model override store. New turns pick up the change automatically.</p>
+      <p style="color:var(--fg-dim);">Open any agents you want to edit, choose their models, then save all staged assignments together. New turns pick up saved models automatically.</p>
       <div class="settings-agent-controls">
         <input id="settings-agent-search" type="search" placeholder="Search agents or models…" aria-label="Search agent settings" />
         <div class="segmented" role="group" aria-label="Filter agent settings">
@@ -3781,6 +3817,10 @@ async function renderSettingsPane() {
           <button type="button" data-settings-filter="enabled">Enabled</button>
           <button type="button" data-settings-filter="disabled">Disabled</button>
         </div>
+      </div>
+      <div class="settings-save-bar">
+        <span id="settings-pending-models">No pending model changes</span>
+        <button id="settings-save-models" type="button" class="safe" disabled>Save Changes</button>
       </div>
       <div id="settings-list">loading…</div>
     </section>`;
@@ -3804,6 +3844,86 @@ async function renderSettingsPane() {
     const settingsAgents = settingsResp.agents || [];
     const listEl = document.getElementById('settings-list');
     const settingsSearch = document.getElementById('settings-agent-search');
+    const saveModels = document.getElementById('settings-save-models');
+    const pendingModels = document.getElementById('settings-pending-models');
+    const modelDrafts = new Map();
+    let savingModels = false;
+
+    const refreshModelSaveBar = () => {
+      const count = modelDrafts.size;
+      pendingModels.textContent = count ? `${count} pending model change${count === 1 ? '' : 's'}` : 'No pending model changes';
+      saveModels.disabled = !count || savingModels;
+      saveModels.textContent = savingModels ? 'Saving...' : `Save Changes${count ? ` (${count})` : ''}`;
+    };
+
+    const stageModelChange = (agentId, expectedModel, model, card, select) => {
+      if (model === expectedModel) modelDrafts.delete(agentId);
+      else modelDrafts.set(agentId, { agentId, expectedModel, model });
+      card.dataset.model = model;
+      card.classList.toggle('model-dirty', modelDrafts.has(agentId));
+      select.classList.toggle('model-dirty', modelDrafts.has(agentId));
+      card.querySelector('[data-model-error]')?.remove();
+      refreshModelSaveBar();
+    };
+
+    saveModels.addEventListener('click', async () => {
+      const submitted = [...modelDrafts.values()].map(change => ({ ...change }));
+      if (!submitted.length || savingModels) return;
+      savingModels = true;
+      refreshModelSaveBar();
+      try {
+        const response = await fetch('/api/settings/agents/models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ changes: submitted }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok && !Array.isArray(body.results)) throw new Error(body.error || `HTTP ${response.status}`);
+        let saved = 0;
+        let failed = 0;
+        for (const result of body.results || []) {
+          const currentDraft = modelDrafts.get(result.agentId);
+          const submittedDraft = submitted.find(change => change.agentId === result.agentId);
+          const card = listEl.querySelector(`.agent-card[data-agent-id="${CSS.escape(result.agentId)}"]`);
+          const select = card?.querySelector('[data-model-select]');
+          card?.querySelector('[data-model-error]')?.remove();
+          if (result.ok) {
+            saved++;
+            if (currentDraft?.model === submittedDraft?.model) modelDrafts.delete(result.agentId);
+            else if (currentDraft) modelDrafts.set(result.agentId, { ...currentDraft, expectedModel: result.newModel });
+            if (card) {
+              card.dataset.committedModel = result.newModel;
+              card.dataset.model = currentDraft && currentDraft.model !== submittedDraft.model ? currentDraft.model : result.newModel;
+              card.classList.toggle('model-dirty', modelDrafts.has(result.agentId));
+              const savedModel = card.querySelector('[data-saved-model]');
+              if (savedModel) savedModel.textContent = result.newModel;
+            }
+            if (select) select.classList.toggle('model-dirty', modelDrafts.has(result.agentId));
+          } else {
+            failed++;
+            if (card) card.classList.add('model-dirty');
+            if (select) {
+              select.classList.add('model-dirty');
+              select.insertAdjacentHTML('afterend', `<span data-model-error class="model-save-error">${escapeHtml(result.error || 'Save failed')}</span>`);
+            }
+          }
+        }
+        if (saved) {
+          await loadAgents();
+          showToast(`Saved ${saved} model assignment${saved === 1 ? '' : 's'}${failed ? `; ${failed} still need attention` : ''}.`, {
+            kind: failed ? 'warning' : 'success',
+            label: 'Agent models',
+          });
+        }
+        if (!saved && failed) pushNotification('error', `${failed} model assignment${failed === 1 ? '' : 's'} could not be saved.`, { toast: true, label: 'Agent models' });
+      } catch (error) {
+        pushNotification('error', `Save failed: ${error.message}`, { toast: true, label: 'Agent models' });
+      } finally {
+        savingModels = false;
+        refreshModelSaveBar();
+      }
+    });
+    refreshModelSaveBar();
     let settingsFilter = 'all';
     const applySettingsFilter = () => {
       const query = settingsSearch.value.trim().toLowerCase();
@@ -3835,6 +3955,7 @@ async function renderSettingsPane() {
       card.dataset.agentId = agent.id;
       card.dataset.enabled = String(!!agent.enabled);
       card.dataset.model = agent.model || '';
+      card.dataset.committedModel = agent.model || '';
       const badges = [
         agent.enabled ? '<span class="agent-badge enabled">enabled</span>' : '<span class="agent-badge disabled">disabled</span>',
         agent.registered
@@ -3856,7 +3977,10 @@ async function renderSettingsPane() {
         const isOpen = card.classList.toggle('open');
         const body = card.querySelector('.agent-card-body');
         if (isOpen && body.dataset.loaded === 'false') {
-          await hydrateAgentCard(agent.id, body, models);
+          await hydrateAgentCard(agent.id, body, models, {
+            draft: modelDrafts.get(agent.id),
+            onModelChange: (expectedModel, model, select) => stageModelChange(agent.id, expectedModel, model, card, select),
+          });
           body.dataset.loaded = 'true';
         }
       });
@@ -3880,15 +4004,16 @@ function renderSettingsVersion(info) {
     <code>${escapeHtml(info.version || 'unknown')}</code>`;
 }
 
-async function hydrateAgentCard(agentId, body, models) {
+async function hydrateAgentCard(agentId, body, models, { draft = null, onModelChange = null } = {}) {
   try {
     const d = await fetchJson(`/api/agents/${encodeURIComponent(agentId)}/details`, { timeoutMs: 8000 });
     if (d.error) { body.textContent = 'error: ' + d.error; return; }
     const liveModels = new Set(models || []);
-    const modelChoices = [...new Set([d.model, ...liveModels].filter(Boolean))];
+    const selectedModel = draft?.model || d.model;
+    const modelChoices = [...new Set([selectedModel, d.model, ...liveModels].filter(Boolean))];
     const modelOpts = modelChoices.map(m => {
       const unavailable = m === d.model && !liveModels.has(m);
-      return `<option value="${escapeHtml(m)}"${m === d.model ? ' selected' : ''}>${escapeHtml(m)}${unavailable ? ' (unavailable on LiteLLM)' : ''}</option>`;
+      return `<option value="${escapeHtml(m)}"${m === selectedModel ? ' selected' : ''}>${escapeHtml(m)}${unavailable ? ' (unavailable on LiteLLM)' : ''}</option>`;
     }).join('');
     const skills = (d.skills || []).map(s =>
       `<div class="skill"><strong>${escapeHtml(s.name)}</strong>${s.description ? `<span class="desc">${escapeHtml(s.description.slice(0, 300))}${s.description.length > 300 ? '…' : ''}</span>` : ''}</div>`
@@ -3907,10 +4032,9 @@ async function hydrateAgentCard(agentId, body, models) {
         </button>
       </div>
 
-      <label>Model (current: <code>${escapeHtml(d.model || '?')}</code>)</label>
+      <label>Model (saved: <code data-saved-model>${escapeHtml(d.model || '?')}</code>)</label>
       <div class="model-row">
         <select data-model-select ${d.registered ? '' : 'disabled'}>${modelOpts}</select>
-        <button data-save ${d.registered ? '' : 'disabled title="Enable this agent before changing its active model"'}>Save</button>
       </div>
 
       <label>Workspace</label>
@@ -3934,6 +4058,9 @@ async function hydrateAgentCard(agentId, body, models) {
       <label>IDENTITY.md</label>
       <div class="doc">${escapeHtml(d.identity || '(missing)')}</div>
     `;
+    const modelSelect = body.querySelector('[data-model-select]');
+    if (draft) modelSelect?.classList.add('model-dirty');
+    modelSelect?.addEventListener('change', () => onModelChange?.(d.model, modelSelect.value, modelSelect));
     body.querySelector('[data-toggle-enabled]')?.addEventListener('click', async () => {
       const nextEnabled = !d.enabled;
       const action = nextEnabled ? 'enable' : 'disable';
@@ -3954,30 +4081,6 @@ async function hydrateAgentCard(agentId, body, models) {
         renderPane();
       } else {
         pushNotification('error', 'Update failed: ' + (r.error || 'unknown'), { toast: true, label: agentId });
-      }
-    });
-    body.querySelector('[data-save]')?.addEventListener('click', async () => {
-      const sel = body.querySelector('[data-model-select]');
-      const newModel = sel.value;
-      if (!await confirmAction({
-        title: 'Change agent model',
-        message: `Change ${agentId}'s model to ${newModel}?\n\nThis writes the v4 model override store. The next Agent SDK turn will use the new model.`,
-        confirmLabel: 'Change model',
-      })) return;
-      const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/model`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: newModel }),
-      }).then(r => r.json());
-      if (r.ok) {
-        logEvent('started', `${agentId} model → ${newModel}`);
-        await loadAgents();
-        body.dataset.loaded = 'false';
-        body.innerHTML = '<div style="color:var(--fg-dim);">reloading…</div>';
-        await hydrateAgentCard(agentId, body, models);
-        body.dataset.loaded = 'true';
-      } else {
-        pushNotification('error', 'Save failed: ' + (r.error || 'unknown'), { toast: true, label: agentId });
       }
     });
   } catch (e) {

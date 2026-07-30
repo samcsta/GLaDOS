@@ -125,10 +125,7 @@ function persistModelOverride(agentId, newModel) {
   try { overrides = JSON.parse(fs.readFileSync(MODEL_OVERRIDES_JSON, 'utf8')) || {}; } catch {}
   if (newModel) overrides[agentId] = bareModelAlias(newModel, { fallback: null });
   else delete overrides[agentId];
-  fs.mkdirSync(path.dirname(MODEL_OVERRIDES_JSON), { recursive: true });
-  const tmp = MODEL_OVERRIDES_JSON + '.tmp';
-  fs.writeFileSync(tmp, `${JSON.stringify(overrides, null, 2)}\n`);
-  fs.renameSync(tmp, MODEL_OVERRIDES_JSON);
+  writeJsonAtomic(MODEL_OVERRIDES_JSON, overrides);
 }
 
 function updateAgentModel(agentId, newModel) {
@@ -146,6 +143,93 @@ function updateAgentModel(agentId, newModel) {
   };
   writeJsonAtomic(path.join(local.workspace, 'agent.json'), next);
   return { agentId, oldModel: old, newModel: durableModel, runtime: 'agent-sdk', requiresRestart: false };
+}
+
+function updateAgentModels(changes, availableModels) {
+  if (!Array.isArray(changes) || !changes.length) throw new Error('at least one model change is required');
+  if (changes.length > 100) throw new Error('too many model changes');
+
+  const catalog = new Set(availableModels || []);
+  const registry = new Map(loadAgentRegistry().filter(row => row?.id).map(row => [row.id, row]));
+  const upstream = templateRegistryById();
+  const seen = new Set();
+  const results = [];
+  const accepted = [];
+
+  for (const change of changes) {
+    const agentId = String(change?.agentId || '').trim();
+    const requested = String(change?.model || '').trim();
+    const expected = bareModelAlias(change?.expectedModel, { fallback: null });
+    const current = bareModelAlias(registry.get(agentId)?.model, { fallback: null });
+    let error = null;
+    let code = null;
+
+    if (!agentId || seen.has(agentId)) {
+      code = 'duplicate_or_missing_agent';
+      error = agentId ? `duplicate agent: ${agentId}` : 'agentId required';
+    } else if (!upstream.has(agentId)) {
+      code = 'agent_not_found';
+      error = `agent not found: ${agentId}`;
+    } else if (!requested || requested.includes('/')) {
+      code = 'invalid_model';
+      error = `invalid model alias: ${requested || '(empty)'}`;
+    } else if (!catalog.has(requested)) {
+      code = 'model_unavailable';
+      error = `model is not currently available on LiteLLM: ${requested}`;
+    } else if (expected && current !== expected) {
+      code = 'model_conflict';
+      error = `${agentId} changed from ${expected} to ${current || '(unset)'} before this save`;
+    }
+
+    seen.add(agentId);
+    if (error) {
+      results.push({ agentId, ok: false, code, error });
+      continue;
+    }
+    if (current === requested) {
+      results.push({ agentId, ok: true, unchanged: true, oldModel: current, newModel: requested, runtime: 'agent-sdk', requiresRestart: false });
+      continue;
+    }
+    const result = { agentId, ok: true, oldModel: current, newModel: requested, runtime: 'agent-sdk', requiresRestart: false };
+    results.push(result);
+    accepted.push(result);
+  }
+
+  if (accepted.length) {
+    let overrides = {};
+    try {
+      if (fs.existsSync(MODEL_OVERRIDES_JSON)) overrides = JSON.parse(fs.readFileSync(MODEL_OVERRIDES_JSON, 'utf8'));
+    } catch (error) {
+      throw new Error(`could not read model overrides: ${error.message}`);
+    }
+    if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) {
+      throw new Error('model override store must contain a JSON object');
+    }
+    for (const result of accepted) overrides[result.agentId] = result.newModel;
+    writeJsonAtomic(MODEL_OVERRIDES_JSON, overrides);
+
+    for (const result of accepted) {
+      try {
+        const local = workspaceMeta(result.agentId);
+        const next = {
+          id: local.meta.id || local.upstream.id || result.agentId,
+          name: local.meta.name || local.upstream.name || result.agentId,
+          ...local.meta,
+          model: result.newModel,
+        };
+        writeJsonAtomic(path.join(local.workspace, 'agent.json'), next);
+      } catch (error) {
+        result.warning = `runtime override saved; workspace metadata was not updated: ${error.message}`;
+      }
+    }
+  }
+
+  return {
+    ok: results.every(result => result.ok),
+    partial: results.some(result => result.ok) && results.some(result => !result.ok),
+    changed: accepted.length,
+    results,
+  };
 }
 
 function updateAgentEnabled(agentId, enabled) {
@@ -183,4 +267,4 @@ async function listKnownModels(options = {}) {
   });
 }
 
-module.exports = { agentDetails, updateAgentModel, updateAgentEnabled, listKnownModels, listSettingsAgents };
+module.exports = { agentDetails, updateAgentModel, updateAgentModels, updateAgentEnabled, listKnownModels, listSettingsAgents };

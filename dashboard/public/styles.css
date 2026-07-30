@@ -436,6 +436,12 @@ button.secondary:hover:not(:disabled) { color: var(--fg); border-color: var(--wa
 }
 .entry .ts { color: var(--fg-dim); font-size: 10px; margin-right: 6px; }
 .entry pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+.ask-glados-action { display: flex; justify-content: flex-end; margin-top: 9px; padding-top: 7px; border-top: 1px solid var(--border); }
+.ask-glados-action button {
+  min-height: 25px; padding: 3px 9px; border: 1px solid var(--accent-soft-border); border-radius: 4px;
+  color: var(--accent-hi); background: var(--accent-soft); font-size: 10px; font-weight: 700;
+}
+.ask-glados-action button:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft-hover); }
 
 body.errors-only .entry:not(.tool-result.error):not(.prompt-error):not(.operator-event.halt-event) { display: none; }
 
@@ -608,7 +614,6 @@ body.debug-off .entry.tool-result.error { display: block; }
 .chat-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .chat-pane .transcript { flex: 1; min-height: 0; }
 .entry.optimistic { opacity: 0.7; }
-
 /* Health banner */
 .health-banner {
   position: fixed; top: 40px; left: 0; right: 0; z-index: 50;
@@ -794,6 +799,7 @@ body.debug-off .entry.tool-result.error { display: block; }
 .settings-version code { color: var(--accent-hi); font-size: 13px; }
 .settings-version-hint { color: var(--warn); margin-left: auto; }
 .agent-card { background: var(--bg-alt); border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+.agent-card.model-dirty { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
 .agent-card.disabled-agent { background: rgba(45, 45, 45, 0.55); border-style: dashed; }
 .agent-card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; cursor: pointer; }
 .agent-card-head .title { font-weight: 600; color: var(--fg); font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -811,6 +817,7 @@ body.debug-off .entry.tool-result.error { display: block; }
 .agent-card.open .agent-card-body { display: block; }
 .agent-card label { display: block; color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 10px; margin-bottom: 4px; }
 .agent-card select, .agent-card input { background: var(--bg-hi); color: var(--fg); border: 1px solid var(--border); padding: 5px 8px; border-radius: 4px; font: inherit; width: 100%; }
+.agent-card select.model-dirty { border-color: var(--accent); background: var(--accent-soft); }
 .agent-card button { background: var(--bg-hi); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 5px 12px; font: inherit; cursor: pointer; white-space: nowrap; }
 .agent-card button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-hi); }
 .agent-card button:disabled { opacity: 0.55; cursor: not-allowed; }
@@ -1502,6 +1509,14 @@ body.events-collapsed #events-splitter { cursor: default; }
 
 .settings-agent-controls { display: grid; grid-template-columns: minmax(220px, 1fr) auto; gap: 8px; margin: 12px 0; }
 .settings-agent-controls input { height: 34px; }
+.settings-save-bar {
+  position: sticky; top: calc(-1 * var(--settings-pad-y)); z-index: 15; display: flex; align-items: center;
+  justify-content: space-between; gap: 14px; min-height: 52px; margin: 0 0 12px; padding: 8px 10px;
+  border: 1px solid var(--control-border); border-radius: 6px; background: rgba(17,21,29,.96); box-shadow: 0 8px 20px rgba(0,0,0,.25);
+}
+.settings-save-bar span { color: var(--fg-dim); font-size: 11px; }
+.settings-save-bar button { min-width: 150px; height: 34px; font-weight: 700; }
+.model-save-error { display: block; margin-top: 5px; color: var(--err); font-size: 10px; line-height: 1.35; }
 .settings-filter-empty { padding: 20px 4px; color: var(--fg-dim); font-size: 11px; }
 .entry-related-action { margin: 7px 0 1px 6px; padding: 3px 7px; color: var(--accent-hi); background: rgba(90,166,255,.07); border-color: rgba(90,166,255,.22); }
 .entry.provenance-focus, .proxy-table tr.provenance-focus { animation: provenance-pulse 1s ease-in-out 3; box-shadow: inset 0 0 0 1px var(--accent); }

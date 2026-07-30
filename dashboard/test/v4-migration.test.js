@@ -218,6 +218,22 @@ test('v4 desktop UI keeps app operations in Settings and agent operations in con
   assert.doesNotMatch(`${html}\n${app}`, /indicators-heading|indicators-group|proxy-rps|refreshIndicators|Proxy RPS|Burp RPS/);
   assert.match(app, /Enter to send, Shift\+Enter for newline/);
   assert.match(app, /ev\.key === 'Enter' && !ev\.shiftKey/);
+  assert.doesNotMatch(app, /glados-dash\.chat-visual-mode|data-chat-mode|createChatModeSwitch|chat-visual-classic/);
+  assert.match(app, /chat\.className = 'chat-pane chat-visual-chamber'/);
+  assert.match(html, /chat-alternate\.css/);
+  assert.match(styles, /\.ask-glados-action/);
+  assert.match(app, /function addAskGladosAction\(/);
+  assert.match(app, /Please elaborate on the response below/);
+  assert.match(app, /const ALERT_KINDS = new Set\(\['error', 'failed', 'offline', 'denied'\]\)/);
+  assert.match(app, /stored\.filter\(item => ALERT_KINDS\.has\(item\?\.kind\)\)/);
+  assert.match(app, /if \(ALERT_KINDS\.has\(kind\)\)/);
+  assert.match(app, /ev\.kind === 'tool-result' && ev\.isError/);
+  assert.match(app, /id="settings-save-models"/);
+  assert.match(app, /\/api\/settings\/agents\/models/);
+  assert.match(app, /const modelDrafts = new Map\(\)/);
+  assert.match(styles, /\.settings-save-bar/);
+  assert.doesNotMatch(app, /data-save(?:\s|>)/);
+  assert.equal(fs.existsSync(path.join(ROOT, 'dashboard/public/chat-alternate.css')), true);
 });
 
 test('v4 operator workspace exposes overview, search, provenance, notifications, and persistent layout controls', () => {

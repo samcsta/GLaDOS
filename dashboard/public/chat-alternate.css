@@ -1,0 +1,228 @@
+/*
+ * Permanent GLaDOS chat layout. It remains scoped to the chat pane so agent
+ * transcript views keep their compact operational presentation.
+ */
+.chat-visual-chamber {
+  --chamber-grid: rgba(255,255,255,.025);
+  --chamber-shadow: rgba(0,0,0,.22);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.chat-visual-chamber .agent-view-toolbar {
+  min-height: 54px;
+  padding: 8px clamp(12px, 2.4vw, 28px);
+  border-bottom: 2px solid var(--accent);
+  background: var(--bg-alt);
+  box-shadow: 0 3px 0 var(--chamber-shadow);
+}
+.chat-visual-chamber .agent-view-identity { gap: 12px; }
+.chat-visual-chamber .agent-view-identity > strong {
+  color: var(--fg);
+  font: 800 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+.chat-visual-chamber .agent-runtime-status {
+  border-color: var(--control-border);
+  border-radius: 2px;
+  color: var(--fg-dim);
+  background: var(--control-bg);
+  letter-spacing: .08em;
+}
+.chat-visual-chamber .agent-runtime-status.running {
+  color: var(--ok);
+  border-color: rgba(74, 222, 128, .32);
+  background: var(--ok-bg);
+}
+.chat-visual-chamber .agent-actions summary {
+  border-color: var(--control-border);
+  border-radius: 2px;
+  color: var(--control-fg);
+  background: var(--control-bg);
+}
+
+.chat-visual-chamber .transcript {
+  padding: 30px clamp(18px, 6vw, 86px) 36px;
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--chamber-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--chamber-grid) 1px, transparent 1px),
+    radial-gradient(circle at 92% 12%, var(--accent-soft), transparent 22%),
+    radial-gradient(circle at 6% 88%, rgba(184, 146, 255, .05), transparent 24%);
+  background-size: 28px 28px, 28px 28px, auto, auto;
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.chat-visual-chamber .entry {
+  position: relative;
+  width: fit-content;
+  max-width: min(78%, 850px);
+  margin: 12px 0;
+  padding: 13px 16px 14px;
+  border: 1px solid var(--control-border);
+  border-left-width: 4px;
+  border-radius: 3px 18px 18px 18px;
+  color: var(--fg);
+  background: var(--bg-alt);
+  box-shadow: 0 5px 15px var(--chamber-shadow);
+}
+.chat-visual-chamber .entry .ts {
+  display: block;
+  margin: 0 0 6px;
+  color: var(--fg-dim);
+  font-size: 9px;
+  letter-spacing: .05em;
+}
+.chat-visual-chamber .entry.assistant-text {
+  border-color: var(--control-border);
+  border-left-color: var(--accent);
+  background: var(--bg-alt);
+}
+.chat-visual-chamber .entry.assistant-text::before {
+  content: "GLADOS / CHAMBER FEED";
+  position: absolute;
+  top: -7px;
+  left: 13px;
+  padding: 1px 6px;
+  border: 1px solid var(--accent-soft-border);
+  border-radius: 2px;
+  color: var(--accent-hi);
+  background: var(--bg);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .12em;
+}
+.chat-visual-chamber .entry.user-message {
+  margin-left: auto;
+  padding: 13px 16px 14px;
+  border: 1px solid var(--control-border);
+  border-right: 4px solid var(--accent);
+  border-radius: 18px 3px 18px 18px;
+  color: var(--fg);
+  background: var(--bg-hi);
+  box-shadow: 0 7px 18px var(--chamber-shadow);
+}
+.chat-visual-chamber .entry.user-message::before {
+  content: "OPERATOR";
+  display: block;
+  margin: 0 0 5px;
+  color: var(--accent-hi);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .13em;
+}
+.chat-visual-chamber .entry.user-message .ts { color: var(--fg-dim); }
+.chat-visual-chamber .entry.thinking {
+  max-width: min(70%, 760px);
+  border: 1px dashed rgba(184, 146, 255, .42);
+  border-left: 3px solid var(--think);
+  border-radius: 3px 14px 14px 14px;
+  color: var(--think);
+  background: rgba(184, 146, 255, .06);
+  box-shadow: none;
+}
+.chat-visual-chamber .entry.thinking::before { color: var(--think); }
+.chat-visual-chamber .entry.tool-call,
+.chat-visual-chamber .entry.tool-result,
+.chat-visual-chamber .entry.meta,
+.chat-visual-chamber .entry.operator-event,
+.chat-visual-chamber .entry.permission-denied,
+.chat-visual-chamber .entry.session-start,
+.chat-visual-chamber .entry.harness-init,
+.chat-visual-chamber .entry.liveness,
+.chat-visual-chamber .entry.prompt-error {
+  width: min(100%, 980px);
+  max-width: 100%;
+  margin: 7px auto;
+  border-radius: 3px;
+  box-shadow: none;
+}
+.chat-visual-chamber .entry.tool-call { border-color: rgba(250, 204, 21, .34); background: rgba(250, 204, 21, .05); }
+.chat-visual-chamber .entry.tool-call .tool-name { color: var(--warn); }
+.chat-visual-chamber .entry.tool-result { border-color: rgba(74, 222, 128, .30); background: rgba(74, 222, 128, .04); }
+.chat-visual-chamber .entry.tool-result .tool-name { color: var(--ok); }
+.chat-visual-chamber .entry.operator-event { border-color: var(--accent-soft-border); background: var(--accent-soft); }
+.chat-visual-chamber .entry.operator-event .operator-event-label { color: var(--accent-hi); }
+.chat-visual-chamber .entry.prompt-error,
+.chat-visual-chamber .entry.tool-result.error { border-color: var(--danger-border); color: var(--danger-fg); background: var(--err-bg); }
+.chat-visual-chamber .entry.prompt-error pre { color: var(--danger-fg); }
+.chat-visual-chamber .entry .args,
+.chat-visual-chamber .entry .out { color: var(--fg-dim); }
+
+.chat-visual-chamber .entry .md-content { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; line-height: 1.62; }
+.chat-visual-chamber .entry .md-content h1,
+.chat-visual-chamber .entry .md-content h2,
+.chat-visual-chamber .entry .md-content h3,
+.chat-visual-chamber .entry .md-content h4 { color: var(--fg); border-color: var(--border); }
+.chat-visual-chamber .entry .md-content code { color: var(--accent-hi); background: rgba(255,255,255,.08); }
+.chat-visual-chamber .entry .md-content pre { border-color: var(--border); color: var(--fg); background: #0b0f17; }
+.chat-visual-chamber .entry .md-content pre code { color: var(--fg); }
+.chat-visual-chamber .entry .md-content a { color: var(--accent); }
+.chat-visual-chamber .entry .md-content blockquote { color: var(--fg-dim); border-color: var(--accent); background: var(--accent-soft); }
+.chat-visual-chamber .entry .md-content th,
+.chat-visual-chamber .entry .md-content td { border-color: var(--border); }
+.chat-visual-chamber .entry .md-content th { background: var(--bg-hi); }
+.chat-visual-chamber .entry pre.collapsible:not(.open)::after,
+.chat-visual-chamber .entry .md-content.collapsible:not(.open)::after { background: linear-gradient(transparent, var(--bg-alt)); }
+.chat-visual-chamber .entry .expand-toggle { color: var(--accent); }
+.chat-visual-chamber .ask-glados-action { border-color: var(--border); }
+
+.chat-visual-chamber .sending-indicator {
+  padding: 7px clamp(18px, 6vw, 86px);
+  border: 0;
+  color: var(--accent-hi);
+  background: var(--bg-hi);
+  font: 700 9px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.chat-visual-chamber .chat-input {
+  gap: 9px;
+  padding: 13px clamp(14px, 4vw, 58px) 15px;
+  border-top: 2px solid var(--accent);
+  background: var(--bg-alt);
+  box-shadow: 0 -10px 30px var(--chamber-shadow);
+}
+.chat-visual-chamber .chat-input textarea {
+  height: 66px;
+  padding: 12px 15px;
+  border: 1px solid var(--control-border);
+  border-radius: 3px 14px 14px 14px;
+  color: var(--fg);
+  background: var(--bg-hi);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  caret-color: var(--accent);
+  box-shadow: inset 4px 0 0 var(--accent);
+}
+.chat-visual-chamber .chat-input textarea::placeholder { color: var(--fg-dim); }
+.chat-visual-chamber .chat-input textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+.chat-visual-chamber .chat-input button {
+  min-width: 78px;
+  border-radius: 3px;
+  border-color: var(--accent);
+  color: var(--on-accent);
+  background: var(--accent);
+  font: 800 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.chat-visual-chamber .chat-input button:hover:not(:disabled) { color: var(--on-accent); background: var(--accent-hi); }
+.chat-visual-chamber .chat-input button.secondary { border-color: var(--control-border); color: var(--fg-dim); background: var(--control-bg); }
+.chat-visual-chamber .chat-input button.secondary:hover:not(:disabled) { border-color: var(--danger-border); color: var(--danger-fg); background: var(--danger-bg); }
+.chat-visual-chamber .slash-menu { border-color: var(--control-border); border-radius: 3px; color: var(--fg); background: var(--bg-hi); }
+.chat-visual-chamber .slash-menu .item { border-color: var(--border); }
+.chat-visual-chamber .slash-menu .item:hover,
+.chat-visual-chamber .slash-menu .item.active { color: var(--on-accent); background: var(--accent); }
+
+@media (max-width: 760px) {
+  .chat-visual-chamber .agent-view-toolbar { padding-inline: 9px; gap: 7px; }
+  .chat-visual-chamber .agent-runtime-status { display: none; }
+  .chat-visual-chamber .transcript { padding: 22px 12px 28px; }
+  .chat-visual-chamber .entry,
+  .chat-visual-chamber .entry.thinking { max-width: 92%; }
+  .chat-visual-chamber .chat-input { display: grid; grid-template-columns: 1fr 1fr; padding: 10px; }
+  .chat-visual-chamber .chat-input textarea { grid-column: 1 / -1; width: 100%; }
+  .chat-visual-chamber .chat-input button { min-height: 38px; }
+}
