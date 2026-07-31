@@ -1714,24 +1714,25 @@ async function runSlash(raw, sessionId = activeInvestigationSession().id) {
       if (kickoff.event) events.push(kickoff.event);
     }
   } else if (cmd === '/security-review') {
-    if (!arg) {
-      emit('usage: /security-review <url|domain|local-path>');
-    } else if (slash.isExistingLocalPath(arg)) {
-      const goal = controller.createSecurityReviewGoal(path.resolve(arg), { source: cmd, target_kind: 'local_path' });
-      const job = controller.enqueueSecurityReviewPath(arg, { goalId: goal.id, engagementId: goal.engagement_id });
-      emit(`Queued source-code security review for \`${job.target}\`.\nJob: ${job.id}`);
-    } else if (slash.isUrlOrDomain(arg)) {
-      const target = normalizeTarget(arg);
+    const review = slash.parseSecurityReviewArg(arg);
+    if (!review.ok) {
+      emit(`${review.error}\nusage: /security-review [--blind|--regression|--informed] <url|domain|local-path>`);
+    } else if (review.isLocalPath) {
+      const goal = controller.createSecurityReviewGoal(path.resolve(review.target), { source: cmd, target_kind: 'local_path', context_mode: review.mode });
+      const job = controller.enqueueSecurityReviewPath(review.target, { goalId: goal.id, engagementId: goal.engagement_id, contextMode: review.mode });
+      emit(`Queued staged source-code security review for \`${job.target}\`.\nJob: ${job.id}\nContext mode: ${review.mode}.\nWorkflow: inventory, blind discovery, six specialist tracks, omission-focused validation, and hard completion gates${review.mode === 'blind' ? '; prior-report lookup and regression are prohibited for this run' : '; historical regression follows the selected context policy'}.`);
+    } else if (review.isUrlOrDomain) {
+      const target = normalizeTarget(review.target);
       const goal = controller.createGoal({
         type: 'security_review',
         target,
         status: 'pending_approval',
-        metadata: { source: cmd, target_kind: 'url_or_domain' },
+        metadata: { source: cmd, target_kind: 'url_or_domain', context_mode: review.mode },
       });
       const kickoff = createPendingGladosKickoff(target, raw, { goalId: goal.id, source: 'slash-security-review' });
       if (kickoff.event) events.push(kickoff.event);
     } else {
-      emit('usage: /security-review <url|domain|local-path>');
+      emit('usage: /security-review [--blind|--regression|--informed] <url|domain|local-path>');
     }
   } else if (cmd === '/clear') {
     return { ok: true, events, action: { type: 'clear-local-transcript' } };

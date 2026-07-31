@@ -4,7 +4,7 @@ const SLASH_COMMANDS = [
   { cmd: '/help', desc: 'List dashboard slash commands' },
   { cmd: '/goal <target>', desc: 'Start an approval-gated webapp investigation goal' },
   { cmd: '/investigate <target>', desc: 'Alias for /goal <target>' },
-  { cmd: '/security-review <url|domain|path>', desc: 'Start a security-review workflow; local paths queue source-code' },
+  { cmd: '/security-review <url|domain|path>', desc: 'Start a source review; use --blind (default), --regression, or --informed' },
   { cmd: '/status', desc: 'Show active goals, jobs, agents, plans, and target health' },
   { cmd: '/agents', desc: 'Show live subagents (curl /api/agents)' },
   { cmd: '/halt <agent>', desc: 'Halt one agent and interrupt its owning SDK turn' },
@@ -60,6 +60,16 @@ function isExistingLocalPath(value, fs = require('node:fs')) {
   try { return fs.existsSync(resolved); } catch { return false; }
 }
 
+function parseSecurityReviewArg(value, fs = require('node:fs')) {
+  const raw = String(value || '').trim();
+  const modeMatches = [...raw.matchAll(/(?:^|\s)--(blind|regression|informed)(?=\s|$)/gi)];
+  if (modeMatches.length > 1) return { ok: false, error: 'choose only one security-review mode: --blind, --regression, or --informed' };
+  const mode = modeMatches[0]?.[1]?.toLowerCase() || 'blind';
+  const target = raw.replace(/(?:^|\s)--(?:blind|regression|informed)(?=\s|$)/ig, ' ').replace(/\s+/g, ' ').trim();
+  if (!target) return { ok: false, error: 'security-review target required' };
+  return { ok: true, mode, target, isLocalPath: isExistingLocalPath(target, fs), isUrlOrDomain: isUrlOrDomain(target) };
+}
+
 function formatStatus(status) {
   const lines = [];
   const goals = status?.goals || [];
@@ -90,5 +100,6 @@ module.exports = {
   investigateReadyPrompt,
   isUrlOrDomain,
   isExistingLocalPath,
+  parseSecurityReviewArg,
   formatStatus,
 };

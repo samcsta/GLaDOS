@@ -98,10 +98,11 @@ const TOOLS = [
       type: "object",
       properties: {
         task_id: { type: "number", description: "Task ID to update" },
+        engagement_id: { type: "string", description: "Owning engagement ID used to enforce investigation isolation" },
         status: { type: "string", description: "pending, in_progress, completed, failed, cancelled" },
         result: { type: "string", description: "JSON string with task output" },
       },
-      required: ["task_id"],
+      required: ["task_id", "engagement_id"],
     },
   },
   {
@@ -229,12 +230,13 @@ const TOOLS = [
       type: "object",
       properties: {
         finding_id: { type: "number" },
+        engagement_id: { type: "string", description: "Owning engagement ID used to enforce investigation isolation" },
         validation_status: { type: "string", description: "validated | disputed | rejected" },
         validated_by: { type: "string", description: "validator agent id" },
         confidence_score: { type: "number", description: "0..1; >= 0.9 + non-empty enables_vectors triggers replan proposal" },
         enables_vectors: { type: "array", items: { type: "string" }, description: "vector names from cwe-cascade.json (e.g. postex, ad-expert)" },
       },
-      required: ["finding_id"],
+      required: ["finding_id", "engagement_id"],
     },
   },
   {
@@ -246,6 +248,7 @@ const TOOLS = [
         engagement_id: { type: "string" },
         state: { type: "string", description: "open|accepted|dismissed|superseded" },
       },
+      required: ["engagement_id"],
     },
   },
   {
@@ -255,10 +258,11 @@ const TOOLS = [
       type: "object",
       properties: {
         id: { type: "number" },
+        engagement_id: { type: "string", description: "Owning engagement ID used to enforce investigation isolation" },
         state: { type: "string", description: "accepted|dismissed|superseded" },
         resolved_by: { type: "string" },
       },
-      required: ["id", "state"],
+      required: ["id", "engagement_id", "state"],
     },
   },
 ];

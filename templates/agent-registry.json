@@ -178,6 +178,13 @@
     "enabled": true
   },
   {
+    "id": "source-review-validator",
+    "name": "source-review-validator",
+    "description": "Independent omission-focused validator for staged local source-code security reviews.",
+    "model": "claude-sonnet-5",
+    "enabled": true
+  },
+  {
     "id": "webapp-recon",
     "name": "webapp-recon",
     "model": "claude-sonnet-5",

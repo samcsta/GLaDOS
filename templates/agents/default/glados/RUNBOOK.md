@@ -183,6 +183,18 @@ pivot; small scripts are not exempt.
 
 ## Investigation Artifacts And Reporting
 
+### Local Source Security Review Workflow
+
+- For `/security-review <local-path>`, follow the injected `SOURCE SECURITY REVIEW WORKFLOW v2` coordinator contract. Do not reduce it to one broad source-code pass.
+- Obey `context_mode` exactly. `blind` prohibits searching for or reading prior reports, Dradis projects, historical blackboard findings, old investigation artifacts, and operator context containing earlier conclusions. `regression` uses only explicitly supplied historical context. `informed` keeps discovery blind, then runs regression. Never silently upgrade a blind run to an informed run.
+- Keep the assessed repository read-only and write only under the injected `artifact_root` and blackboard.
+- Run intake/prior-context handling, deterministic inventory, a blind source-code pass, six separately tasked specialist tracks, historical regression when prior context exists, `source-review-validator`, safe local dynamic validation where needed, then operator confirmation.
+- The six required tracks are authorization/access control, data-flow/injection, secrets/history, resilience/error handling, IaC/manifests, and cryptography/suppressions. They may run serially; they must remain separate tasks and artifacts.
+- Never expose prior findings to the blind pass. Historical context is mandatory in the regression pass when available, and every prior finding must receive an evidence-backed disposition.
+- Do not accept package-level coverage or tested-negative claims. Require exact file:line evidence, complete route/authorization and source-to-sink matrices, HEAD/history secret-scan receipts, and every suppression dispositioned.
+- Use `source-review-validator` for omission-focused challenge. It must independently inspect source and reproduce every High/Critical result. Record primary and validator models; matching models require an explicit operator diversity waiver before reporting.
+- Do not mark the controller goal or engagement complete merely because agents returned. Hard gates must pass, and Stage 8 must pause for explicit operator confirmation before the normal writer -> validator -> writer report sequence.
+
 - For every new investigation, keep artifacts in a target-specific directory
   that follows this shape:
   - `~/.glados/investigations/<target>/evidence/`

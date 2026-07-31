@@ -167,6 +167,24 @@ test('v4 model aliases are bare Anthropic Messages aliases without provider pref
   }
 });
 
+test('source security review uses staged coordinator and independent validator contracts', () => {
+  const registry = readJson('templates/agent-registry.json');
+  const policy = readJson('config/glados-policy.json');
+  const controller = fs.readFileSync(path.join(ROOT, 'dashboard/lib/controller.js'), 'utf8');
+  const gladosRunbook = fs.readFileSync(path.join(ROOT, 'templates/agents/default/glados/RUNBOOK.md'), 'utf8');
+  const sourceRunbook = fs.readFileSync(path.join(ROOT, 'templates/agents/default/source-code/RUNBOOK.md'), 'utf8');
+  const validatorRunbook = fs.readFileSync(path.join(ROOT, 'templates/agents/default/source-review-validator/RUNBOOK.md'), 'utf8');
+  assert.equal(registry.some(agent => agent.id === 'source-review-validator' && agent.enabled), true);
+  assert.equal(policy.taskDispatch.allowAgents.includes('source-review-validator'), true);
+  assert.match(controller, /security_review_workflow_v2/);
+  assert.match(controller, /securityReviewCoordinatorPrompt/);
+  assert.match(gladosRunbook, /SOURCE SECURITY REVIEW WORKFLOW v2/);
+  assert.match(sourceRunbook, /authorization-access-control/);
+  assert.match(sourceRunbook, /historical-regression/);
+  assert.match(validatorRunbook, /omitted classes/i);
+  assert.match(validatorRunbook, /challenge-matrix\.json/);
+});
+
 test('disabled high-risk agent posture survives registry migration', () => {
   const registry = readJson('templates/agent-registry.json');
   for (const agent of registry.filter(a => /^(c2|phish|postex)|^phisherman$/.test(a.id))) {

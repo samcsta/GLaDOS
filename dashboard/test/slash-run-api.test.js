@@ -153,7 +153,7 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     }
     const overview = await request(srv.port, 'GET', '/api/overview');
     assert.equal(overview.status, 200, overview.raw);
-    assert.equal(overview.json.version, 'v4.4.1');
+    assert.equal(overview.json.version, 'v4.4.2');
     assert.equal(overview.json.engagement.target, 'example.com');
     assert.equal(overview.json.phase, 'Awaiting approval');
     assert.equal(overview.json.pendingApprovals, 1);
@@ -203,9 +203,13 @@ test('POST /api/slash/run executes workflow and safety commands through server w
 
     const localRepo = path.join(srv.root, 'repo');
     fs.mkdirSync(localRepo);
+    cp.execFileSync('git', ['init', '-q', localRepo]);
+    fs.writeFileSync(path.join(localRepo, 'main.go'), 'package main\nfunc main() {}\n');
+    cp.execFileSync('git', ['-C', localRepo, 'add', '.']);
+    cp.execFileSync('git', ['-C', localRepo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
     const review = await slashRun(srv.port, `/security-review ${localRepo}`);
     assert.equal(review.ok, true);
-    assert.match(review.events.at(-1).text, /Queued source-code security review/);
+    assert.match(review.events.at(-1).text, /Queued staged source-code security review/);
 
     const status = await slashRun(srv.port, '/status');
     assert.equal(status.ok, true);
@@ -257,7 +261,7 @@ test('POST /api/slash/run executes workflow and safety commands through server w
       assert.equal(goals.some(g => g.type === 'security_review' && g.target === localRepo), true);
       const jobs = db.prepare('SELECT agent_id, job_type, target, status FROM controller_jobs').all();
       assert.deepEqual(jobs.map(j => [j.agent_id, j.job_type, j.target, j.status]), [
-        ['source-code', 'security_review_local_path', localRepo, 'queued'],
+        ['glados', 'security_review_workflow_v2', localRepo, 'queued'],
       ]);
     } finally {
       db.close();

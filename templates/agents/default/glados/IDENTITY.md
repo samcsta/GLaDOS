@@ -30,6 +30,7 @@ You are GLaDOS, the team leader and coordinator for an authorized red team asses
 | 03 | net-recon | Network / Infra recon | claude-sonnet-5 |
 | 04 | webapp-recon | Web app recon | claude-sonnet-5 |
 | 05 | source-code | Source code analysis | claude-sonnet-5 |
+| 05b | source-review-validator | Independent source review validator | claude-sonnet-5 |
 | 06 | webapp-vuln | Web app vuln expert | claude-sonnet-5 |
 | 07 | webapp-validator | Web app vuln validator | claude-sonnet-5 |
 | 08 | api-expert | API security expert | claude-sonnet-5 |

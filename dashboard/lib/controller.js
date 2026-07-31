@@ -2,6 +2,8 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const Database = require('better-sqlite3');
+const { securityReviewArtifactRoot, securityReviewCoordinatorPrompt } = require('./security-review/workflow');
+const { generateSecurityReviewInventory } = require('./security-review/inventory');
 
 const RUNNING_STATUSES = ['running', 'cancelling'];
 
@@ -196,22 +198,20 @@ class ControllerLite {
     return this.createGoal({ type: 'security_review', target, metadata, status: 'queued' });
   }
 
-  enqueueSecurityReviewPath(localPath, { goalId = null, engagementId = null } = {}) {
+  enqueueSecurityReviewPath(localPath, { goalId = null, engagementId = null, contextMode = 'blind' } = {}) {
     const abs = path.resolve(localPath);
     if (!fs.existsSync(abs)) throw new Error(`local path not found: ${abs}`);
     const goal = goalId ? this.getGoal(goalId) : this.createSecurityReviewGoal(abs, { source: 'slash' });
     const jobId = id('job');
     const engId = engagementId || goal.engagement_id || this.ensureEngagement(abs);
-    const prompt = [
-      `Run a source-code security review for this local repository path: ${abs}`,
-      '',
-      'Use local repository tools (`rg`, manifest readers, language-native tests/builds when useful).',
-      'Do not modify files.',
-      'Report findings with file:line, source-to-sink trace, exploitability assumptions, and recommended dynamic validation steps.',
-      'Do not print secret values; report only the location and type.',
-    ].join('\n');
-    this.insertJob.run(jobId, goal.id, engId, 'source-code', 'source-code#1', 'security_review_local_path', abs, prompt, nowIso());
-    this.logEvent(goal.id, jobId, 'job_queued', `Queued source-code security review for ${abs}.`, { agent_id: 'source-code', target: abs });
+    const runtimeDir = path.dirname(path.dirname(this.db.name));
+    const artifactRoot = securityReviewArtifactRoot(runtimeDir, engId);
+    const inventory = generateSecurityReviewInventory({ repositoryPath: abs, artifactRoot });
+    const prompt = securityReviewCoordinatorPrompt({ repositoryPath: abs, engagementId: engId, goalId: goal.id, artifactRoot, contextMode });
+    this.insertJob.run(jobId, goal.id, engId, 'glados', 'glados#security-review', 'security_review_workflow_v2', abs, prompt, nowIso());
+    this.logEvent(goal.id, jobId, 'job_queued', `Queued staged source-code security review for ${abs}.`, {
+      agent_id: 'glados', target: abs, workflow_version: 2, context_mode: contextMode, artifact_root: artifactRoot, repository_head: inventory.head,
+    });
     return this.getJob(jobId);
   }
 

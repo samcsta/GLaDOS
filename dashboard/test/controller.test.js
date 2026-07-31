@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const cp = require('node:child_process');
 
 const { ensureBlackboardDb } = require('../../scripts/lib/glados-local');
 const { ControllerLite } = require('../lib/controller');
@@ -21,6 +22,13 @@ function pendingTracked() {
   return { child, promise, resolve };
 }
 
+function initRepo(repo) {
+  cp.execFileSync('git', ['init', '-q', repo]);
+  fs.writeFileSync(path.join(repo, 'main.go'), 'package main\nfunc main() {}\n');
+  cp.execFileSync('git', ['-C', repo, 'add', '.']);
+  cp.execFileSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
+}
+
 test('creates web goals linked to engagements', () => {
   const { dbPath } = tempEnv();
   const controller = new ControllerLite({ dbPath });
@@ -33,13 +41,17 @@ test('creates web goals linked to engagements', () => {
   controller.close();
 });
 
-test('queues source-code jobs and cancels queued jobs', () => {
+test('queues staged source-code reviews through GLaDOS and cancels queued jobs', () => {
   const { dir, dbPath } = tempEnv();
   const repo = path.join(dir, 'repo');
   fs.mkdirSync(repo);
+  initRepo(repo);
   const controller = new ControllerLite({ dbPath });
   const job = controller.enqueueSecurityReviewPath(repo);
-  assert.equal(job.agent_id, 'source-code');
+  assert.equal(job.agent_id, 'glados');
+  assert.equal(job.job_type, 'security_review_workflow_v2');
+  assert.match(job.prompt, /SOURCE SECURITY REVIEW WORKFLOW v2/);
+  assert.match(job.prompt, /source-review-validator/);
   assert.equal(job.status, 'queued');
   const cancelled = controller.cancelJob(job.id);
   assert.equal(cancelled.status, 'cancelled');
@@ -51,6 +63,7 @@ test('worker enforces one running job per agent', () => {
   const { dir, dbPath } = tempEnv();
   const repo = path.join(dir, 'repo');
   fs.mkdirSync(repo);
+  initRepo(repo);
   const tracked = [];
   const controller = new ControllerLite({
     dbPath,
@@ -75,6 +88,7 @@ test('reconciles stale running jobs on startup', () => {
   const { dir, dbPath } = tempEnv();
   const repo = path.join(dir, 'repo');
   fs.mkdirSync(repo);
+  initRepo(repo);
   const controller = new ControllerLite({ dbPath });
   const job = controller.enqueueSecurityReviewPath(repo);
   controller.db.prepare("UPDATE controller_jobs SET status='running' WHERE id=?").run(job.id);

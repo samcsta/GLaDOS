@@ -159,6 +159,7 @@
       "report-writer",
       "scope-guardian",
       "source-code",
+      "source-review-validator",
       "webapp-recon",
       "webapp-validator",
       "webapp-vuln"

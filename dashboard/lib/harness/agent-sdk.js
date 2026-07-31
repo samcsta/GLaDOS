@@ -715,6 +715,18 @@ function resolveAgentRoot(agentId, { workspaceRoot = agentWorkspaceRoot(), templ
   return { root: path.join(templateRoot, agentId), source: 'template' };
 }
 
+const SECURITY_REVIEW_PROMPT_AGENTS = new Set(['glados', 'source-code', 'source-review-validator']);
+
+function securityReviewTemplateOverlay(agentId, templateRoot = TEMPLATE_AGENT_ROOT) {
+  if (!SECURITY_REVIEW_PROMPT_AGENTS.has(agentId)) return '';
+  const names = agentId === 'glados' ? ['RUNBOOK.md'] : ['IDENTITY.md', 'RUNBOOK.md', 'TOOLS.md'];
+  return names.map(name => {
+    const file = path.join(templateRoot, agentId, name);
+    try { return `## GLaDOS v4 security-review contract (${agentId}/${name})\n${fs.readFileSync(file, 'utf8')}`; }
+    catch { return ''; }
+  }).filter(Boolean).join('\n\n');
+}
+
 function assembleAgentPrompt(agentId, options = {}) {
   const resolved = resolveAgentRoot(agentId, options);
   const parts = [];
@@ -730,6 +742,8 @@ function assembleAgentPrompt(agentId, options = {}) {
   if (skills.length) {
     parts.push(['# Skills', ...skills.map(skillSummary)].join('\n'));
   }
+  const securityReviewOverlay = securityReviewTemplateOverlay(agentId, options.templateRoot);
+  if (securityReviewOverlay) parts.push(securityReviewOverlay);
   return {
     agentId,
     source: resolved.source,
