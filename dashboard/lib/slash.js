@@ -65,7 +65,9 @@ function parseSecurityReviewArg(value, fs = require('node:fs')) {
   const modeMatches = [...raw.matchAll(/(?:^|\s)--(blind|regression|informed)(?=\s|$)/gi)];
   if (modeMatches.length > 1) return { ok: false, error: 'choose only one security-review mode: --blind, --regression, or --informed' };
   const mode = modeMatches[0]?.[1]?.toLowerCase() || 'blind';
-  const target = raw.replace(/(?:^|\s)--(?:blind|regression|informed)(?=\s|$)/ig, ' ').replace(/\s+/g, ' ').trim();
+  let target = raw.replace(/(?:^|\s)--(?:blind|regression|informed)(?=\s|$)/ig, ' ').replace(/\s+/g, ' ').trim();
+  const quote = target[0];
+  if ((quote === '"' || quote === "'") && target.endsWith(quote)) target = target.slice(1, -1).trim();
   if (!target) return { ok: false, error: 'security-review target required' };
   return { ok: true, mode, target, isLocalPath: isExistingLocalPath(target, fs), isUrlOrDomain: isUrlOrDomain(target) };
 }

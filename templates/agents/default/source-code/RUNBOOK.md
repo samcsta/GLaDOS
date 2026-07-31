@@ -6,7 +6,7 @@ Perform one explicitly assigned stage or specialist track of the staged source s
 
 ## Snapshot And Write Boundary
 
-- Confirm the supplied repository path, branch, and HEAD before analysis. Stop if HEAD changes.
+- Confirm the supplied repository path and immutable revision before analysis. The revision may be a Git HEAD or a deterministic `snapshot:<sha256>` for an extracted source copy. Stop if it changes.
 - The assessed repository is read-only. Do not edit, generate, format, or install dependencies into it.
 - Write only to the designated investigation `artifact_root` and blackboard.
 - Every blackboard task update must include both the exact `task_id` and `engagement_id`.

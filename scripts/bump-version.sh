@@ -6,7 +6,7 @@ set -euo pipefail
 # Format:
 #   v<major>.<minor>.<patch>
 #
-# Example: v4.4.2
+# Example: v4.4.3
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION_FILE="$ROOT/VERSION"

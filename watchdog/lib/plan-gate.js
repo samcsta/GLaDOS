@@ -39,6 +39,7 @@ const META_AGENTS = new Set([
   'webapp-validator', 'api-validator', 'poc-validator',
   'postex-validator', 'ad-validator', 'c2-validator',
   'phish-validator', 'evidence-curator', 'scope-guardian',
+  'source-review-validator',
 ]);
 
 let dbHandle = null;
@@ -204,8 +205,8 @@ function planCheckDispatch(agentId, engagementId) {
 }
 
 module.exports = {
-  planCheckDispatch,
   PHASE1_AGENTS,
   EXPLOITATION_AGENTS,
   META_AGENTS,
+  planCheckDispatch,
 };

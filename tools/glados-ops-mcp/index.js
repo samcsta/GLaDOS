@@ -49,6 +49,7 @@ const META_AGENTS = new Set([
   'phish-validator',
   'evidence-curator',
   'scope-guardian',
+  'source-review-validator',
 ]);
 const EXPLOITATION_AGENTS = new Set([
   'webapp-vuln',

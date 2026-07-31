@@ -30,6 +30,7 @@ const {
 const { SdkSessionRegistry } = require('../lib/harness/session-registry');
 const { ResumeCoordinator } = require('../lib/harness/resume-coordinator');
 const { classifyToolUse, extractTargets } = require('glados-watchdog/lib/safety-gate');
+const { planCheckDispatch, PHASE1_AGENTS, EXPLOITATION_AGENTS, META_AGENTS } = require('glados-watchdog/lib/plan-gate');
 
 function baseTestEnv(extra = {}) {
   const env = { ...process.env, ANTHROPIC_AUTH_TOKEN: 'test-token', ...extra };
@@ -99,6 +100,17 @@ test('enforces operator-only net recon and operator-controlled report wrap dispa
   assert.match(investigationDispatchContractViolation('report-validator', {
     prompt: 'operator_wrap_approved: true\noperator_approval_reference: chat-message-73',
   }), /review-and-edit/);
+});
+
+test('every registered agent has exactly one watchdog dispatch classification', () => {
+  const classifications = [PHASE1_AGENTS, EXPLOITATION_AGENTS, META_AGENTS];
+  for (const agent of loadRegistry({ env: baseTestEnv() })) {
+    const count = classifications.filter(group => group.has(agent.id)).length;
+    assert.equal(count, 1, `${agent.id} must have exactly one watchdog dispatch class`);
+  }
+  const validator = planCheckDispatch('source-review-validator');
+  assert.equal(validator.allowed, true);
+  assert.equal(validator.phase, 'meta');
 });
 
 test('uses the caller tool policy and PreToolUse hard deny for direct turns', async () => {

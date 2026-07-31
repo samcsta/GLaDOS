@@ -2,7 +2,7 @@
 
 ## Required Inputs
 
-- exact repository path, branch, and HEAD commit
+- exact repository path and immutable revision (Git HEAD or deterministic snapshot hash)
 - engagement ID and blackboard task ID
 - deterministic file, route, suppression, HTTP-client, crypto, and secret-scan inventories
 - primary findings and specialist-track outputs
@@ -11,7 +11,7 @@
 
 ## Workflow
 
-1. Confirm the repository still matches the supplied HEAD. Stop on snapshot drift.
+1. Confirm the repository still matches the supplied Git HEAD or snapshot hash. Stop on snapshot drift.
 2. Build an independent high-level inventory before relying on primary conclusions.
 3. Search specifically for omitted classes: authorization/BOLA/IDOR, missing mutation scope checks, mass assignment, query construction, authentication initialization, token replay, committed credentials, raw error reflection, timeouts/retries, swallowed failures, production overlay drift, weak crypto, and security-linter suppressions.
 4. Trace authorization-sensitive routes end to end: registration -> middleware -> handler -> service -> repository filter/ORM operation. Check empty filters and operation ordering.

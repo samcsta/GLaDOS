@@ -27,9 +27,19 @@ test('source review coordinator contract requires staged analysis and hard gates
     'route/method/authn/scope/ownership/repository-filter matrix',
     'HEAD and history secret-scan receipts',
     'Every High/Critical finding has validator confirmation',
-    'pending operator confirmation',
+    'Do not require approval to complete or present a security review',
   ]) assert.match(prompt, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
   for (const track of SPECIALIST_TRACKS) assert.match(prompt, new RegExp(track));
+});
+
+test('security review asks for approval only for live actions and formal reporting', () => {
+  const prompt = securityReviewCoordinatorPrompt({
+    repositoryPath: '/tmp/repository', engagementId: 'eng-1', goalId: 'goal-1', artifactRoot: '/tmp/artifacts', contextMode: 'blind',
+  });
+  assert.match(prompt, /Automatically retry incomplete static-analysis\/validation tasks/);
+  assert.match(prompt, /Mark the analysis goal complete and deliver validated results/);
+  assert.match(prompt, /approval is required only for live\/target-facing actions and for generating or publishing the formal report package/i);
+  assert.doesNotMatch(prompt, /finish at pending operator confirmation/);
 });
 
 test('blind source review prohibits prior-report lookup and skips regression without failing the workflow', () => {
@@ -87,4 +97,20 @@ test('security review inventory deterministically enumerates files, suppressions
   assert.match(suppressions, /nolint-gosec/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(artifacts, 'inventory', 'secrets-head.json'), 'utf8')).completed, true);
   assert.equal(JSON.parse(fs.readFileSync(path.join(artifacts, 'inventory', 'secrets-history.json'), 'utf8')).completed, true);
+});
+
+test('security review inventory accepts extracted non-Git source snapshots', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-source-review-snapshot-'));
+  const repo = path.join(root, 'source copy');
+  const artifacts = path.join(root, 'artifacts');
+  fs.mkdirSync(path.join(repo, 'pkg'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'pkg', 'api.go'), 'package pkg\nfunc route() { router.GET("/assets", handler) }\n');
+  const run = generateSecurityReviewInventory({ repositoryPath: repo, artifactRoot: artifacts });
+  assert.equal(run.sourceType, 'directory-snapshot');
+  assert.match(run.head, /^snapshot:[a-f0-9]{64}$/);
+  const history = JSON.parse(fs.readFileSync(path.join(artifacts, 'inventory', 'secrets-history.json'), 'utf8'));
+  assert.equal(history.completed, false);
+  assert.equal(history.unavailable, true);
+  assert.match(history.reason, /no Git metadata/);
+  assert.match(fs.readFileSync(path.join(artifacts, 'inventory', 'files.jsonl'), 'utf8'), /pkg\/api\.go/);
 });

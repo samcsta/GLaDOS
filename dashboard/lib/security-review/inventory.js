@@ -45,6 +45,36 @@ function repositoryFiles(repositoryPath) {
   return tracked.split('\0').filter(Boolean).sort((a, b) => Buffer.from(a).compare(Buffer.from(b)));
 }
 
+function snapshotFiles(repositoryPath) {
+  const files = [];
+  const walk = (directory, prefix = '') => {
+    const entries = fs.readdirSync(directory, { withFileTypes: true })
+      .sort((a, b) => Buffer.from(a.name).compare(Buffer.from(b.name)));
+    for (const entry of entries) {
+      if (!prefix && entry.name === '.git') continue;
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) walk(absolute, relative);
+      else if (entry.isFile() || entry.isSymbolicLink()) files.push(relative);
+    }
+  };
+  walk(repositoryPath);
+  return files;
+}
+
+function snapshotId(repositoryPath, files) {
+  const hash = crypto.createHash('sha256');
+  for (const relative of files) {
+    const file = path.join(repositoryPath, relative);
+    const stat = fs.lstatSync(file);
+    hash.update(relative).update('\0');
+    if (stat.isSymbolicLink()) hash.update(`symlink:${fs.readlinkSync(file)}`);
+    else hash.update(fs.readFileSync(file));
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+}
+
 function classify(relative) {
   const ext = path.extname(relative).toLowerCase();
   if (/^(?:manifests?|deploy|k8s|helm|terraform|infra)\//i.test(relative) || ['.tf', '.tfvars'].includes(ext)) return 'iac';
@@ -88,7 +118,7 @@ function routeCandidates(repositoryPath, files) {
   return lineMatches(repositoryPath, files, patterns, 'route-candidate');
 }
 
-function scanReceipt(repositoryPath, files, history = false) {
+function scanReceipt(repositoryPath, files, history = false, { gitAvailable = true, revision = null } = {}) {
   const rules = [
     { id: 'private-key', regex: /BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY/ },
     { id: 'bearer-or-sas', regex: /(?:Authorization:\s*Bearer|SharedAccessSignature|[?&]sig=)/i },
@@ -99,8 +129,18 @@ function scanReceipt(repositoryPath, files, history = false) {
     return {
       mode: 'HEAD',
       completed: true,
-      head: git(repositoryPath, ['rev-parse', 'HEAD'], null),
+      head: revision,
       findings: lineMatches(repositoryPath, files, rules, 'potential-secret').map(row => ({ ...row, valueRedacted: true })),
+    };
+  }
+  if (!gitAvailable) {
+    return {
+      mode: 'history',
+      completed: false,
+      unavailable: true,
+      reason: 'source snapshot has no Git metadata; history scanning requires a Git work tree',
+      head: revision,
+      findings: [],
     };
   }
   const commits = new Map();
@@ -120,13 +160,15 @@ function scanReceipt(repositoryPath, files, history = false) {
 function generateSecurityReviewInventory({ repositoryPath, artifactRoot }) {
   const root = fs.realpathSync(repositoryPath);
   if (!fs.statSync(root).isDirectory()) throw new Error('security review target must be a directory');
-  if (!isGitWorkTree(root)) throw new Error('security review target must be a Git work tree');
-  const files = repositoryFiles(root);
+  const gitAvailable = isGitWorkTree(root);
+  const files = gitAvailable ? repositoryFiles(root) : snapshotFiles(root);
+  if (!files.length) throw new Error('security review target contains no files');
+  const revision = gitAvailable ? git(root, ['rev-parse', 'HEAD']) : `snapshot:${snapshotId(root, files)}`;
   const fileRows = files.map(relative => {
     const file = path.join(root, relative);
     const stat = fs.lstatSync(file);
     let binary = false;
-    try { binary = isBinary(fs.readFileSync(file)); } catch {}
+    try { if (stat.isFile()) binary = isBinary(fs.readFileSync(file)); } catch {}
     return {
       key: relative,
       path: relative,
@@ -154,10 +196,12 @@ function generateSecurityReviewInventory({ repositoryPath, artifactRoot }) {
   const run = {
     workflowVersion: 2,
     repositoryPath: root,
-    remote: git(root, ['config', '--get', 'remote.origin.url'], null),
-    branch: git(root, ['branch', '--show-current'], null),
-    head: git(root, ['rev-parse', 'HEAD']),
-    dirty: !!git(root, ['status', '--porcelain']),
+    sourceType: gitAvailable ? 'git-work-tree' : 'directory-snapshot',
+    gitHistoryAvailable: gitAvailable,
+    remote: gitAvailable ? git(root, ['config', '--get', 'remote.origin.url'], null) : null,
+    branch: gitAvailable ? git(root, ['branch', '--show-current'], null) : null,
+    head: revision,
+    dirty: gitAvailable ? !!git(root, ['status', '--porcelain']) : null,
     generatedAt: new Date().toISOString(),
     fileCount: fileRows.length,
   };
@@ -168,8 +212,8 @@ function generateSecurityReviewInventory({ repositoryPath, artifactRoot }) {
   writeJsonLines(path.join(artifactRoot, 'inventory', 'suppressions.jsonl'), lineMatches(root, files, suppressionPatterns, 'suppression'));
   writeJsonLines(path.join(artifactRoot, 'inventory', 'http-clients.jsonl'), lineMatches(root, files, httpPatterns, 'http-client'));
   writeJsonLines(path.join(artifactRoot, 'inventory', 'crypto-operations.jsonl'), lineMatches(root, files, cryptoPatterns, 'crypto'));
-  writeJson(path.join(artifactRoot, 'inventory', 'secrets-head.json'), scanReceipt(root, files, false));
-  writeJson(path.join(artifactRoot, 'inventory', 'secrets-history.json'), scanReceipt(root, files, true));
+  writeJson(path.join(artifactRoot, 'inventory', 'secrets-head.json'), scanReceipt(root, files, false, { gitAvailable, revision }));
+  writeJson(path.join(artifactRoot, 'inventory', 'secrets-history.json'), scanReceipt(root, files, true, { gitAvailable, revision }));
   return run;
 }
 

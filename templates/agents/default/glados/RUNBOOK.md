@@ -193,7 +193,8 @@ pivot; small scripts are not exempt.
 - Never expose prior findings to the blind pass. Historical context is mandatory in the regression pass when available, and every prior finding must receive an evidence-backed disposition.
 - Do not accept package-level coverage or tested-negative claims. Require exact file:line evidence, complete route/authorization and source-to-sink matrices, HEAD/history secret-scan receipts, and every suppression dispositioned.
 - Use `source-review-validator` for omission-focused challenge. It must independently inspect source and reproduce every High/Critical result. Record primary and validator models; matching models require an explicit operator diversity waiver before reporting.
-- Do not mark the controller goal or engagement complete merely because agents returned. Hard gates must pass, and Stage 8 must pause for explicit operator confirmation before the normal writer -> validator -> writer report sequence.
+- Do not mark the controller goal or engagement complete merely because agents returned. Hard analysis gates must pass. Retry recoverable static-review and validator failures automatically; do not ask the operator for permission merely to continue the review.
+- Once analysis gates pass, deliver the validated security-review results and mark the analysis goal complete. Operator approval is required only before live/target-facing validation or before the normal writer -> validator -> writer formal report sequence and publication.
 
 - For every new investigation, keep artifacts in a target-specific directory
   that follows this shape:

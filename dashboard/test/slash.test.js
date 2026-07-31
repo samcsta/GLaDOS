@@ -36,11 +36,14 @@ test('local path detection works for security-review routing', () => {
 });
 
 test('security-review context modes default to blind and are mutually exclusive', () => {
-  const fsStub = { existsSync: value => value === '/tmp/repo' };
+  const fsStub = { existsSync: value => value === '/tmp/repo' || value === '/tmp/repo with spaces' };
   assert.deepEqual(slash.parseSecurityReviewArg('/tmp/repo', fsStub), {
     ok: true, mode: 'blind', target: '/tmp/repo', isLocalPath: true, isUrlOrDomain: false,
   });
   assert.equal(slash.parseSecurityReviewArg('--informed /tmp/repo', fsStub).mode, 'informed');
   assert.equal(slash.parseSecurityReviewArg('/tmp/repo --regression', fsStub).mode, 'regression');
   assert.equal(slash.parseSecurityReviewArg('--blind --informed /tmp/repo', fsStub).ok, false);
+  assert.deepEqual(slash.parseSecurityReviewArg('--blind "/tmp/repo with spaces"', fsStub), {
+    ok: true, mode: 'blind', target: '/tmp/repo with spaces', isLocalPath: true, isUrlOrDomain: false,
+  });
 });

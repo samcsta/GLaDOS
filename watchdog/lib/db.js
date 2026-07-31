@@ -5,6 +5,7 @@ const { WATCHDOG_DB } = require('./config');
 
 fs.mkdirSync(path.dirname(WATCHDOG_DB), { recursive: true });
 const db = new Database(WATCHDOG_DB);
+db.pragma('busy_timeout = 5000');
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
