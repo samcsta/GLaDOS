@@ -56,6 +56,9 @@ summary, and full technical writeup.
 8. Put tested-negative, informational, rejected, deferred, and untested leads
    in the `RT/Writeup.md` coverage ledger. Do not invent an Informational
    severity directory or mislabel them Low.
+   Consolidate duplicate track findings by root cause and affected control;
+   do not create multiple actionable CWE files for the same weakness merely
+   because different tracks assigned different IDs.
 9. Write `RT/Timeline.md` as the complete chronological agent/action audit
    trail, including failures, retries, pivots, approvals, validation, and
    reporting.
@@ -89,6 +92,13 @@ summary, and full technical writeup.
 - Never reconstruct or invent a command. If an action was browser-only, record
   the exact browser/tool operation and the proxied HTTP request when captured.
 - Recalculate every CVSS 3.1 score from the vector.
+- Score each finding on its standalone demonstrated preconditions. Describe
+  exploit chains separately; do not change AV, PR, scope, or impact metrics
+  merely because another finding could be chained with it.
+- Static source or IaC evidence proves code/configuration presence, not current
+  deployment or successful exploitation. Use conditional language unless a
+  runtime observation, deployment record, or executed validation directly
+  proves the stronger claim.
 - Never print passwords, cookies, tokens, or unredacted sensitive values.
 - Do not touch the target, replay requests, browse the app, or execute PoCs
   while reporting.

@@ -96,3 +96,19 @@ test('reconciles stale running jobs on startup', () => {
   assert.equal(controller.getJob(job.id).status, 'failed');
   controller.close();
 });
+
+test('security-review jobs cannot succeed when deterministic completion gates fail', () => {
+  const { dir, dbPath } = tempEnv();
+  const repo = path.join(dir, 'repo');
+  fs.mkdirSync(repo);
+  initRepo(repo);
+  const controller = new ControllerLite({ dbPath });
+  const job = controller.enqueueSecurityReviewPath(repo);
+  controller._finishJob(job, 'succeeded', { result: 'model claimed completion' }, null);
+  const finished = controller.getJob(job.id);
+  assert.equal(finished.status, 'failed');
+  assert.match(finished.error, /security-review hard gates failed/);
+  assert.equal(finished.result.securityReviewGate.passed, false);
+  assert.equal(controller.getGoal(job.goal_id).status, 'failed');
+  controller.close();
+});

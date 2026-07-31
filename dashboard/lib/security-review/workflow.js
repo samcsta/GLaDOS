@@ -10,6 +10,45 @@ const SPECIALIST_TRACKS = [
   'iac-config-manifests',
   'cryptography-suppressions',
 ];
+const SEMANTIC_REVIEW_CHECKS = [
+  {
+    id: 'request-binding-mass-assignment',
+    requirement: 'Compare every externally bound object with every field and association persisted or passed to privileged services; typed binding is not proof of allowlisting.',
+  },
+  {
+    id: 'directory-query-filter-injection',
+    requirement: 'Trace user-controlled values into OData, Microsoft Graph, LDAP, and directory filter/search builders and prove escaping or parameterization.',
+  },
+  {
+    id: 'graphql-abuse-controls',
+    requirement: 'Disposition introspection, depth, complexity, aliases, batching, variable size, and execution timeout controls separately from SQL injection.',
+  },
+  {
+    id: 'bearer-token-replay',
+    requirement: 'Trace jti/uti/nonce or equivalent token identifiers to replay detection, revocation, and one-time-use enforcement; signature and expiry validation alone are insufficient.',
+  },
+  {
+    id: 'oauth-operation-scope-enforcement',
+    requirement: 'Compare every operation-declared OAuth scope with token scope claims and the middleware code that enforces the required values.',
+  },
+  {
+    id: 'authorization-policy-constant-consistency',
+    requirement: 'Compare route intent and operation names with the exact permission/role constant enforced at every handler and service boundary.',
+  },
+  {
+    id: 'orm-mutation-ordering',
+    requirement: 'Verify ownership and authorization predicates are applied before Create, Save, Update, and Delete execute; fluent calls after a terminal mutation do not constrain it.',
+  },
+  {
+    id: 'deployment-reachability-claims',
+    requirement: 'Separate static configuration presence from observed deployment state and exploitation; every active-production claim needs runtime evidence or must be phrased conditionally.',
+  },
+  {
+    id: 'cross-track-referral-closure',
+    requirement: 'Give every concern referred by one specialist to another a final finding, tested-negative, not-applicable, or blocker disposition; no concern may disappear between tracks.',
+  },
+];
+const TERMINAL_SEMANTIC_STATUSES = new Set(['FINDING', 'TESTED_NEGATIVE', 'NOT_APPLICABLE']);
 
 function securityReviewArtifactRoot(runtimeDir, engagementId) {
   return path.join(runtimeDir, 'investigations', engagementId, 'security-review');
@@ -53,7 +92,7 @@ function securityReviewCoordinatorPrompt({ repositoryPath, engagementId, goalId,
       : '- Resolve prior context only as allowed by the context-mode contract and repository identity, never by basename alone.',
     '',
     'Stage 2 — Deterministic inventory:',
-    '- Require a complete sorted file manifest, route inventory, linter suppression inventory, crypto-operation inventory, HTTP-client inventory, HEAD secrets-scan receipt, and git-history secrets-scan receipt.',
+    '- Require a complete sorted file manifest, route inventory, linter suppression inventory, crypto-operation inventory, HTTP-client inventory, security-sensitive semantic candidate inventory, HEAD secrets-scan receipt, and git-history secrets-scan receipt.',
     '- Every manifest, deployment overlay, Terraform module, CI task, configuration, and script must be enumerated. Sampling is prohibited.',
     '- A directory snapshot without .git metadata is valid. Use its deterministic snapshot hash as the immutable revision and record Git-history scanning as unavailable with the exact blocker; do not reject the review.',
     '',
@@ -69,13 +108,22 @@ function securityReviewCoordinatorPrompt({ repositoryPath, engagementId, goalId,
     '- Resilience must inspect every HTTP client timeout/retry and every swallowed operational error.',
     '- Crypto must resolve every nosec/nolint/gosec-equivalent suppression.',
     '',
+    'Machine-checked semantic closure contract:',
+    '- Write validation/semantic-coverage.json with top-level arrays checks, candidate_dispositions, and referrals.',
+    '- checks must contain exactly the following IDs, each with terminal status FINDING, TESTED_NEGATIVE, or NOT_APPLICABLE; analysis; and at least one evidence object containing exact file, line_range, rule, observed_evidence, and result:',
+    ...SEMANTIC_REVIEW_CHECKS.map(check => `  - ${check.id}: ${check.requirement}`),
+    '- A FINDING check must include finding_ids. A NOT_APPLICABLE check must include a concrete reason and evidence of the applicability search. BLOCKED and REFERRED are nonterminal and cannot pass completion.',
+    '- candidate_dispositions must have exact key equality with inventory/security-sensitive.jsonl using inventory_key. Each row must retain the inventory check_id and rule, cite that candidate file and exact line range, and end as FINDING, TESTED_NEGATIVE, or NOT_APPLICABLE.',
+    '- referrals must include every issue one track hands to another and give it a terminal status plus evidence or finding_ids. An empty referrals array asserts that no track made a referral; verify that assertion against all track notes.',
+    '- Any file in inventory/security-sensitive.jsonl requires deep file-specific coverage. reviewed-as-class, reviewed-class-level, and equivalent generic dispositions cannot close it.',
+    '',
     'Stage 5 — Historical regression (mode-controlled):',
     mode === 'blind'
       ? '- SKIP. Write regression/delta.json with status NOT_REQUESTED_BLIND_MODE and no prior-finding content.'
       : '- Provide permitted prior context to a dedicated source-code task. Every historical finding must be CONFIRMED, CONFIRMED_FIXED, CONFIRMED_PARTIAL_FIX, NOT_IN_CURRENT_TREE, or BLOCKED with exact evidence.',
     '',
     'Stage 6 — Omission-focused independent validation:',
-    '- Dispatch source-review-validator. It must inventory independently, inspect source rather than trust the primary coverage ledger, search for omitted vulnerability classes, and produce validation/challenge-matrix.json.',
+    '- Dispatch source-review-validator. It must inventory independently, inspect source rather than trust the primary coverage ledger, challenge every semantic check and candidate disposition, search for omitted vulnerability classes, and produce validation/challenge-matrix.json plus the final validation/semantic-coverage.json.',
     '- High/Critical findings require independent reproduction from source. Record primary and validator model aliases. If models match, record a model-diversity blocker for operator review.',
     '',
     'Stage 7 — Safe dynamic validation:',
@@ -89,40 +137,339 @@ function securityReviewCoordinatorPrompt({ repositoryPath, engagementId, goalId,
     'Hard completion gates:',
     '1. File manifest and coverage ledger have exact set equality.',
     '2. Route inventory and authorization matrix have exact set equality.',
-    '3. Injection/exposure findings and negative claims include complete source-to-sink evidence.',
-    mode === 'blind' ? '4. Historical regression records NOT_REQUESTED_BLIND_MODE without reading prior content.' : '4. Every supplied prior finding is dispositioned.',
-    '5. Tested-negative rows cite exact files, line ranges, rule, observed evidence, and result.',
-    '6. Every suppression is ACCEPTED with justification or mapped to a finding.',
-    '7. CVSS >=7 documents metric preconditions; CVSS >=9 names a reachable unauthenticated network path or is blocked for downgrade review.',
-    '8. Every High/Critical finding has validator confirmation.',
-    '9. HEAD and history secret-scan receipts exist for the recorded HEAD.',
-    '10. No unexplained file, route, prior-finding, suppression, track, or validation gap remains.',
+    '3. Security-sensitive candidate inventory and semantic candidate dispositions have exact set equality; every candidate file received deep file-specific review.',
+    '4. All required semantic checks are terminal with exact evidence, and all cross-track referrals are closed.',
+    '5. Injection/exposure findings and negative claims include complete source-to-sink evidence.',
+    mode === 'blind' ? '6. Historical regression records NOT_REQUESTED_BLIND_MODE without reading prior content.' : '6. Every supplied prior finding is dispositioned.',
+    '7. Tested-negative rows cite exact files, line ranges, rule, observed evidence, and result.',
+    '8. Every suppression is ACCEPTED with justification or mapped to a finding.',
+    '9. CVSS >=7 documents metric preconditions; CVSS >=9 names a reachable unauthenticated network path or is blocked for downgrade review.',
+    '10. Every High/Critical finding has validator confirmation.',
+    '11. HEAD and history secret-scan receipts exist for the recorded HEAD.',
+    '12. No unexplained file, route, prior-finding, suppression, track, referral, or validation gap remains.',
     '',
     'Create one blackboard task per stage/track and include engagement_id in every blackboard_task_update. A returned model answer is not proof that a gate passed. Mark the analysis goal complete and deliver validated results once analysis gates pass; wait for operator approval only before live actions or formal report generation/publication.',
   ].join('\n');
 }
 
+const REQUIRED_REVIEW_ARTIFACTS = [
+  'run.json',
+  'intake/scope.json',
+  'inventory/files.jsonl',
+  'inventory/routes.jsonl',
+  'inventory/suppressions.jsonl',
+  'inventory/http-clients.jsonl',
+  'inventory/crypto-operations.jsonl',
+  'inventory/security-sensitive.jsonl',
+  'inventory/secrets-head.json',
+  'inventory/secrets-history.json',
+  'discovery/findings.jsonl',
+  'discovery/coverage-ledger.jsonl',
+  ...SPECIALIST_TRACKS.map(track => `tracks/${track}/findings.jsonl`),
+  'tracks/authorization-access-control/route-authz-matrix.jsonl',
+  'tracks/data-flow-injection/source-sink-matrix.jsonl',
+  'tracks/secrets-history/history-receipt.json',
+  'tracks/resilience-error-handling/http-client-matrix.jsonl',
+  'tracks/iac-config-manifests/disposition-matrix.jsonl',
+  'tracks/cryptography-suppressions/crypto-matrix.jsonl',
+  'tracks/cryptography-suppressions/suppression-dispositions.jsonl',
+  'regression/delta.json',
+  'dynamic-validation/matrix.jsonl',
+  'validation/challenge-matrix.json',
+  'validation/semantic-coverage.json',
+];
+
+function readJsonArtifact(artifactRoot, relative, invalid) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(artifactRoot, relative), 'utf8'));
+  } catch (error) {
+    invalid.push(`${relative}: invalid JSON (${error.message})`);
+    return null;
+  }
+}
+
+function readJsonLinesArtifact(artifactRoot, relative, invalid) {
+  const rows = [];
+  let text;
+  try {
+    text = fs.readFileSync(path.join(artifactRoot, relative), 'utf8');
+  } catch (error) {
+    invalid.push(`${relative}: unreadable (${error.message})`);
+    return rows;
+  }
+  for (const [index, line] of text.split(/\r?\n/).entries()) {
+    if (!line.trim()) continue;
+    try {
+      const row = JSON.parse(line);
+      if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error('row is not an object');
+      rows.push(row);
+    } catch (error) {
+      invalid.push(`${relative}:${index + 1}: invalid JSONL (${error.message})`);
+    }
+  }
+  return rows;
+}
+
+function keyedRows(rows, fields, label, invalid, { allowEmpty = true } = {}) {
+  const out = new Map();
+  for (const [index, row] of rows.entries()) {
+    const key = fields.map(field => row[field]).find(value => typeof value === 'string' && value.trim());
+    if (!key) {
+      invalid.push(`${label}:${index + 1}: missing ${fields.join(' or ')}`);
+      continue;
+    }
+    if (out.has(key)) invalid.push(`${label}: duplicate key ${key}`);
+    out.set(key, row);
+  }
+  if (!allowEmpty && out.size === 0) invalid.push(`${label}: must contain at least one row`);
+  return out;
+}
+
+function requireExactKeys(left, right, label, invalid) {
+  const missing = [...left.keys()].filter(key => !right.has(key));
+  const extra = [...right.keys()].filter(key => !left.has(key));
+  if (missing.length || extra.length) {
+    invalid.push(`${label}: key mismatch (missing ${missing.length}, extra ${extra.length})`
+      + `${missing.length ? `; first missing: ${missing.slice(0, 3).join(', ')}` : ''}`
+      + `${extra.length ? `; first extra: ${extra.slice(0, 3).join(', ')}` : ''}`);
+  }
+}
+
+function requireText(value, label, invalid) {
+  if (typeof value !== 'string' || !value.trim()) invalid.push(`${label}: required non-empty string`);
+}
+
+function validateEvidence(evidence, label, invalid, { expectedFile = null, expectedRule = null } = {}) {
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
+    invalid.push(`${label}: evidence must be an object`);
+    return;
+  }
+  for (const field of ['file', 'line_range', 'rule', 'observed_evidence', 'result']) {
+    requireText(evidence[field], `${label}.${field}`, invalid);
+  }
+  if (typeof evidence.line_range === 'string' && !/\d/.test(evidence.line_range)) {
+    invalid.push(`${label}.line_range: must contain exact line numbers`);
+  }
+  if (expectedFile && evidence.file !== expectedFile) {
+    invalid.push(`${label}.file: expected ${expectedFile}`);
+  }
+  if (expectedRule && evidence.rule !== expectedRule) {
+    invalid.push(`${label}.rule: expected ${expectedRule}`);
+  }
+}
+
 function sourceReviewGateStatus(artifactRoot) {
-  const required = [
-    'intake/scope.json',
-    'inventory/files.jsonl',
-    'inventory/routes.jsonl',
-    'inventory/suppressions.jsonl',
-    'inventory/secrets-head.json',
-    'inventory/secrets-history.json',
-    'discovery/findings.jsonl',
-    'discovery/coverage-ledger.jsonl',
-    ...SPECIALIST_TRACKS.map(track => `tracks/${track}.json`),
-    'regression/delta.json',
-    'validation/challenge-matrix.json',
+  const missing = REQUIRED_REVIEW_ARTIFACTS.filter(relative => !fs.existsSync(path.join(artifactRoot, relative)));
+  const invalid = [];
+  const available = relative => !missing.includes(relative);
+
+  const jsonl = relative => available(relative) ? readJsonLinesArtifact(artifactRoot, relative, invalid) : [];
+  const json = relative => available(relative) ? readJsonArtifact(artifactRoot, relative, invalid) : null;
+
+  const manifest = keyedRows(jsonl('inventory/files.jsonl'), ['key', 'path'], 'inventory/files.jsonl', invalid, { allowEmpty: false });
+  const coverage = keyedRows(jsonl('discovery/coverage-ledger.jsonl'), ['key', 'path'], 'discovery/coverage-ledger.jsonl', invalid);
+  if (available('inventory/files.jsonl') && available('discovery/coverage-ledger.jsonl')) {
+    requireExactKeys(manifest, coverage, 'file manifest vs coverage ledger', invalid);
+  }
+
+  const routes = keyedRows(jsonl('inventory/routes.jsonl'), ['key'], 'inventory/routes.jsonl', invalid);
+  const routeMatrix = keyedRows(jsonl('tracks/authorization-access-control/route-authz-matrix.jsonl'), ['inventory_key'], 'route authorization matrix', invalid);
+  if (available('inventory/routes.jsonl') && available('tracks/authorization-access-control/route-authz-matrix.jsonl')) {
+    requireExactKeys(routes, routeMatrix, 'route inventory vs authorization matrix', invalid);
+    for (const [key, row] of routeMatrix) {
+      for (const field of ['authn', 'scope_role', 'ownership', 'repository_filter', 'trace', 'disposition']) {
+        if (row[field] === undefined || row[field] === null || row[field] === '') {
+          invalid.push(`route authorization matrix ${key}: missing ${field}`);
+        }
+      }
+      const mutation = /^(?:POST|PUT|PATCH|DELETE)$/i.test(String(row.method || ''));
+      const clean = /CLEAN/.test(String(row.disposition || '').toUpperCase());
+      const unenforced = value => /^(?:N\/A|NONE|UNKNOWN|UNVERIFIED)$/i.test(String(value || '').trim());
+      const intentionallyPublic = /INTENTIONAL|PUBLIC|LOGIN|CALLBACK/.test(String(row.disposition || '').toUpperCase());
+      if (mutation && clean && !intentionallyPublic && (unenforced(row.authn) || unenforced(row.scope_role))) {
+        invalid.push(`route authorization matrix ${key}: clean mutation lacks concrete authn/scope enforcement`);
+      }
+    }
+  }
+
+  const candidates = keyedRows(jsonl('inventory/security-sensitive.jsonl'), ['key'], 'inventory/security-sensitive.jsonl', invalid);
+  for (const candidate of candidates.values()) {
+    const fileCoverage = coverage.get(candidate.file);
+    if (!fileCoverage) continue;
+    const method = `${fileCoverage.review_method || ''} ${fileCoverage.disposition || ''}`;
+    if (!fileCoverage.review_method || /reviewed[-_ ]?as[-_ ]?class|class[-_ ]?level/i.test(method)) {
+      invalid.push(`coverage ledger ${candidate.file}: security-sensitive candidate requires deep file-specific review`);
+    }
+  }
+
+  const semantic = json('validation/semantic-coverage.json');
+  if (semantic) {
+    if (!Array.isArray(semantic.checks)) invalid.push('validation/semantic-coverage.json: checks must be an array');
+    if (!Array.isArray(semantic.candidate_dispositions)) invalid.push('validation/semantic-coverage.json: candidate_dispositions must be an array');
+    if (!Array.isArray(semantic.referrals)) invalid.push('validation/semantic-coverage.json: referrals must be an array');
+
+    const checks = keyedRows(Array.isArray(semantic.checks) ? semantic.checks : [], ['id'], 'semantic checks', invalid);
+    const requiredChecks = new Map(SEMANTIC_REVIEW_CHECKS.map(check => [check.id, check]));
+    requireExactKeys(requiredChecks, checks, 'required semantic checks', invalid);
+    for (const [id, check] of checks) {
+      const status = String(check.status || '').toUpperCase();
+      if (!TERMINAL_SEMANTIC_STATUSES.has(status)) {
+        invalid.push(`semantic check ${id}: status ${status || '(missing)'} is not terminal`);
+      }
+      requireText(check.analysis, `semantic check ${id}.analysis`, invalid);
+      if (!Array.isArray(check.evidence) || check.evidence.length === 0) {
+        invalid.push(`semantic check ${id}: evidence must contain at least one exact evidence object`);
+      } else {
+        check.evidence.forEach((item, index) => validateEvidence(item, `semantic check ${id}.evidence[${index}]`, invalid));
+      }
+      if (status === 'FINDING' && (!Array.isArray(check.finding_ids) || check.finding_ids.length === 0)) {
+        invalid.push(`semantic check ${id}: FINDING requires finding_ids`);
+      }
+      if (status === 'NOT_APPLICABLE') requireText(check.reason, `semantic check ${id}.reason`, invalid);
+    }
+
+    const dispositions = keyedRows(
+      Array.isArray(semantic.candidate_dispositions) ? semantic.candidate_dispositions : [],
+      ['inventory_key'],
+      'semantic candidate dispositions',
+      invalid
+    );
+    requireExactKeys(candidates, dispositions, 'security-sensitive inventory vs semantic candidate dispositions', invalid);
+    for (const [key, disposition] of dispositions) {
+      const candidate = candidates.get(key);
+      const status = String(disposition.status || '').toUpperCase();
+      if (!TERMINAL_SEMANTIC_STATUSES.has(status)) {
+        invalid.push(`semantic candidate ${key}: status ${status || '(missing)'} is not terminal`);
+      }
+      if (candidate && disposition.check_id !== candidate.check_id) {
+        invalid.push(`semantic candidate ${key}: expected check_id ${candidate.check_id}`);
+      }
+      validateEvidence(disposition.evidence, `semantic candidate ${key}.evidence`, invalid, {
+        expectedFile: candidate?.file || null,
+        expectedRule: candidate?.rule || null,
+      });
+      if (status === 'FINDING' && (!Array.isArray(disposition.finding_ids) || disposition.finding_ids.length === 0)) {
+        invalid.push(`semantic candidate ${key}: FINDING requires finding_ids`);
+      }
+      if (status === 'NOT_APPLICABLE') requireText(disposition.reason, `semantic candidate ${key}.reason`, invalid);
+    }
+
+    for (const [index, referral] of (Array.isArray(semantic.referrals) ? semantic.referrals : []).entries()) {
+      requireText(referral?.id, `semantic referral[${index}].id`, invalid);
+      const status = String(referral?.status || '').toUpperCase();
+      if (!TERMINAL_SEMANTIC_STATUSES.has(status)) {
+        invalid.push(`semantic referral ${referral?.id || index}: status ${status || '(missing)'} is not terminal`);
+      }
+      const hasFinding = Array.isArray(referral?.finding_ids) && referral.finding_ids.length > 0;
+      if (!hasFinding && !referral?.evidence) invalid.push(`semantic referral ${referral?.id || index}: requires evidence or finding_ids`);
+      if (referral?.evidence) validateEvidence(referral.evidence, `semantic referral ${referral?.id || index}.evidence`, invalid);
+    }
+  }
+
+  const suppressions = keyedRows(jsonl('inventory/suppressions.jsonl'), ['key'], 'inventory/suppressions.jsonl', invalid);
+  const suppressionDispositions = keyedRows(jsonl('tracks/cryptography-suppressions/suppression-dispositions.jsonl'), ['inventory_key'], 'suppression dispositions', invalid);
+  if (available('inventory/suppressions.jsonl') && available('tracks/cryptography-suppressions/suppression-dispositions.jsonl')) {
+    requireExactKeys(suppressions, suppressionDispositions, 'suppression inventory vs dispositions', invalid);
+    for (const [key, row] of suppressionDispositions) {
+      const accepted = /^ACCEPTED(?:_|$)/i.test(String(row.disposition || ''));
+      if (!accepted && !row.finding_id && !(Array.isArray(row.finding_ids) && row.finding_ids.length)) {
+        invalid.push(`suppression disposition ${key}: must be accepted with rationale or mapped to a finding`);
+      }
+      requireText(row.rationale || row.notes, `suppression disposition ${key}.rationale`, invalid);
+    }
+  }
+
+  const crypto = keyedRows(jsonl('inventory/crypto-operations.jsonl'), ['key'], 'inventory/crypto-operations.jsonl', invalid);
+  const cryptoMatrix = keyedRows(jsonl('tracks/cryptography-suppressions/crypto-matrix.jsonl'), ['inventory_key'], 'crypto matrix', invalid);
+  if (available('inventory/crypto-operations.jsonl') && available('tracks/cryptography-suppressions/crypto-matrix.jsonl')) {
+    requireExactKeys(crypto, cryptoMatrix, 'crypto inventory vs crypto matrix', invalid);
+  }
+
+  const httpClients = keyedRows(jsonl('inventory/http-clients.jsonl'), ['key'], 'inventory/http-clients.jsonl', invalid);
+  const httpMatrix = keyedRows(jsonl('tracks/resilience-error-handling/http-client-matrix.jsonl'), ['inventory_key'], 'HTTP client matrix', invalid);
+  if (available('inventory/http-clients.jsonl') && available('tracks/resilience-error-handling/http-client-matrix.jsonl')) {
+    requireExactKeys(httpClients, httpMatrix, 'HTTP client inventory vs resilience matrix', invalid);
+  }
+
+  const run = json('run.json');
+  const scope = json('intake/scope.json');
+  if (run) {
+    requireText(run.head, 'run.json.head', invalid);
+    if (Number(run.fileCount) !== manifest.size) {
+      invalid.push(`run.json.fileCount: expected ${manifest.size}, received ${run.fileCount}`);
+    }
+    if (scope?.repository?.head && scope.repository.head !== run.head) {
+      invalid.push('intake/scope.json: repository head does not match run.json');
+    }
+  }
+
+  const headReceipt = json('inventory/secrets-head.json');
+  if (headReceipt && headReceipt.completed !== true) invalid.push('inventory/secrets-head.json: scan must be completed');
+  if (run?.head && headReceipt?.head && headReceipt.head !== run.head) {
+    invalid.push('inventory/secrets-head.json: head does not match run.json');
+  }
+  const historyReceipt = json('inventory/secrets-history.json');
+  if (historyReceipt && historyReceipt.completed !== true) {
+    if (historyReceipt.unavailable !== true || typeof historyReceipt.reason !== 'string' || !historyReceipt.reason.trim()) {
+      invalid.push('inventory/secrets-history.json: incomplete scan requires unavailable=true and an exact reason');
+    }
+  }
+  if (run?.head && historyReceipt?.head && historyReceipt.head !== run.head) {
+    invalid.push('inventory/secrets-history.json: head does not match run.json');
+  }
+
+  const trackHistoryReceipt = json('tracks/secrets-history/history-receipt.json');
+  if (run?.head && trackHistoryReceipt?.snapshot_head && trackHistoryReceipt.snapshot_head !== run.head) {
+    invalid.push('tracks/secrets-history/history-receipt.json: snapshot_head does not match run.json');
+  }
+
+  const challengeMatrix = json('validation/challenge-matrix.json');
+  const findingRows = [
+    ...jsonl('discovery/findings.jsonl'),
+    ...SPECIALIST_TRACKS.flatMap(track => jsonl(`tracks/${track}/findings.jsonl`)),
   ];
-  const missing = required.filter(relative => !fs.existsSync(path.join(artifactRoot, relative)));
-  return { workflowVersion: WORKFLOW_VERSION, passed: missing.length === 0, missing };
+  if (challengeMatrix) {
+    if (!Array.isArray(challengeMatrix.outcomes)) {
+      invalid.push('validation/challenge-matrix.json: outcomes must be an array');
+    } else {
+      const outcomes = challengeMatrix.outcomes;
+      for (const [index, finding] of findingRows.entries()) {
+        if (!/^(?:high|critical)$/i.test(String(finding.severity || ''))) continue;
+        const findingId = finding.id || finding.finding_id;
+        if (!findingId) {
+          invalid.push(`high/critical finding row ${index + 1}: missing id or finding_id`);
+          continue;
+        }
+        const validation = outcomes.find(row => row?.id === findingId || row?.primary_id === findingId);
+        if (!validation || !/^CONFIRMED(?:_|$)/i.test(String(validation.outcome || ''))) {
+          invalid.push(`high/critical finding ${findingId}: missing validator confirmation`);
+        }
+      }
+    }
+  }
+
+  for (const relative of [
+    'regression/delta.json',
+  ]) json(relative);
+  for (const relative of [
+    'tracks/data-flow-injection/source-sink-matrix.jsonl',
+    'tracks/iac-config-manifests/disposition-matrix.jsonl',
+    'dynamic-validation/matrix.jsonl',
+  ]) jsonl(relative);
+
+  return {
+    workflowVersion: WORKFLOW_VERSION,
+    passed: missing.length === 0 && invalid.length === 0,
+    missing,
+    invalid,
+  };
 }
 
 module.exports = {
   WORKFLOW_VERSION,
   SPECIALIST_TRACKS,
+  SEMANTIC_REVIEW_CHECKS,
+  REQUIRED_REVIEW_ARTIFACTS,
   securityReviewArtifactRoot,
   securityReviewCoordinatorPrompt,
   sourceReviewGateStatus,

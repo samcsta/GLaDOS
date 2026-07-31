@@ -14,6 +14,10 @@ const { createOrReuseEngagement } = require("../lib/engagement-create");
 const { createOrReusePlan } = require("../lib/plan-create");
 const { upsertBaseline } = require("../lib/baseline-upsert");
 const { compactBaselineSummary } = require("../lib/baseline-summary");
+const {
+  securityReviewArtifactRoot,
+  sourceReviewGateStatus,
+} = require("../../dashboard/lib/security-review/workflow");
 
 const GLADOS_RUNTIME_DIR = process.env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), ".glados");
 
@@ -431,6 +435,25 @@ function handleEngagementUpdate(args) {
   const engagement = updateEngagement(db, {
     engagementId: args.engagement_id,
     status: args.status,
+    completionGuard: ({ engagementId }) => {
+      let securityReviewGoal;
+      try {
+        securityReviewGoal = db.prepare(`
+          SELECT id FROM controller_goals
+          WHERE engagement_id = ? AND type = 'security_review'
+          ORDER BY created_at DESC LIMIT 1
+        `).get(engagementId);
+      } catch (error) {
+        if (/no such table/i.test(error.message)) return;
+        throw error;
+      }
+      if (!securityReviewGoal) return;
+      const gate = sourceReviewGateStatus(securityReviewArtifactRoot(GLADOS_RUNTIME_DIR, engagementId));
+      if (!gate.passed) {
+        const failures = [...gate.missing.map(item => `missing ${item}`), ...gate.invalid].slice(0, 8);
+        throw new Error(`cannot complete security-review engagement: hard gates failed (${failures.join('; ')})`);
+      }
+    },
   });
   return { content: [{ type: "text", text: JSON.stringify({ ok: true, engagement }, null, 2) }] };
 }

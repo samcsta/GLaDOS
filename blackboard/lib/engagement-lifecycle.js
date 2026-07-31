@@ -1,7 +1,7 @@
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const ENGAGEMENT_STATUSES = new Set(['active', 'complete', 'cancelled']);
 
-function updateEngagement(db, { engagementId, status }) {
+function updateEngagement(db, { engagementId, status, completionGuard = null }) {
   if (!engagementId) throw new Error('engagement_id is required');
   if (!ENGAGEMENT_STATUSES.has(status)) {
     throw new Error(`invalid engagement status: ${status}`);
@@ -21,6 +21,7 @@ function updateEngagement(db, { engagementId, status }) {
       const summary = nonterminal.map(task => `#${task.id}:${task.assigned_to}:${task.status}`).join(', ');
       throw new Error(`cannot complete engagement while tasks are nonterminal (${summary})`);
     }
+    if (completionGuard) completionGuard({ engagementId });
   }
 
   db.prepare(`

@@ -2,7 +2,11 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const Database = require('better-sqlite3');
-const { securityReviewArtifactRoot, securityReviewCoordinatorPrompt } = require('./security-review/workflow');
+const {
+  securityReviewArtifactRoot,
+  securityReviewCoordinatorPrompt,
+  sourceReviewGateStatus,
+} = require('./security-review/workflow');
 const { generateSecurityReviewInventory } = require('./security-review/inventory');
 
 const RUNNING_STATUSES = ['running', 'cancelling'];
@@ -348,9 +352,33 @@ class ControllerLite {
       clearInterval(rec.heartbeat);
       this.running.delete(job.id);
     }
+    let finalStatus = status;
+    let finalError = error || null;
+    let finalResult = result;
+    let gate = null;
+    if (status === 'succeeded' && job.job_type === 'security_review_workflow_v2') {
+      const runtimeDir = path.dirname(path.dirname(this.db.name));
+      const artifactRoot = securityReviewArtifactRoot(runtimeDir, job.engagement_id);
+      gate = sourceReviewGateStatus(artifactRoot);
+      finalResult = result && typeof result === 'object'
+        ? { ...result, securityReviewGate: gate }
+        : { result: result || null, securityReviewGate: gate };
+      if (!gate.passed) {
+        finalStatus = 'failed';
+        const failures = [...gate.missing.map(item => `missing ${item}`), ...gate.invalid].slice(0, 8);
+        finalError = `security-review hard gates failed: ${failures.join('; ')}`;
+      }
+    }
     const stamp = nowIso();
-    this.markDone.run(status, result ? JSON.stringify(result) : null, error || null, stamp, stamp, job.id);
-    this.logEvent(job.goal_id, job.id, `job_${status}`, `${job.agent_id} job ${job.id} ${status}.`, { error: error || null });
+    this.markDone.run(finalStatus, finalResult ? JSON.stringify(finalResult) : null, finalError, stamp, stamp, job.id);
+    if (job.goal_id) {
+      const goalStatus = finalStatus === 'succeeded' ? 'complete' : finalStatus === 'cancelled' ? 'cancelled' : 'failed';
+      this.updateGoalStatus(job.goal_id, goalStatus);
+    }
+    this.logEvent(job.goal_id, job.id, `job_${finalStatus}`, `${job.agent_id} job ${job.id} ${finalStatus}.`, {
+      error: finalError,
+      security_review_gate: gate,
+    });
   }
 
   close() {

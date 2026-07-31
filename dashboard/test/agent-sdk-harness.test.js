@@ -540,17 +540,44 @@ test('browser form input normalization repairs missing names and ref-prefixed ta
   });
 });
 
-test('task input normalization strips unsupported local-runtime isolation', () => {
+test('task input normalization preserves AgentDefinition model ownership and strips unsupported isolation', () => {
   for (const [toolName, isolation] of [['Task', 'worktree'], ['Agent', 'remote']]) {
     assert.deepEqual(normalizeToolInput(toolName, {
       subagent_type: 'webapp-recon',
       isolation,
+      model: 'sonnet',
       prompt: 'Perform the assigned work.',
     }, { agentId: 'glados' }), {
       subagent_type: 'webapp-recon',
       prompt: 'Perform the assigned work.',
     });
   }
+  assert.deepEqual(normalizeToolInput('Agent', {
+    subagent_type: 'source-code',
+    model: 'sonnet',
+    prompt: 'Perform the assigned source review.',
+  }, { agentId: 'glados' }), {
+    subagent_type: 'source-code',
+    prompt: 'Perform the assigned source review.',
+  });
+});
+
+test('runtime model overrides become the named specialist AgentDefinition models', () => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-model-ownership-'));
+  fs.writeFileSync(path.join(runtimeDir, 'model-overrides.json'), JSON.stringify({
+    glados: 'gpt-5.6-sol',
+    'source-code': 'gpt-5.6-luna',
+    'report-writer': 'gpt-5.6-luna',
+  }));
+  const env = baseTestEnv({ GLADOS_RUNTIME_DIR: runtimeDir });
+  const definitions = buildAgentDefinitions(loadPolicy(), { env });
+  assert.equal(loadRegistry({ env }).find(row => row.id === 'glados').model, 'gpt-5.6-sol');
+  assert.equal(definitions['source-code'].model, 'gpt-5.6-luna');
+  assert.equal(definitions['report-writer'].model, 'gpt-5.6-luna');
+  assert.equal(normalizeToolInput('Agent', {
+    subagent_type: 'source-code',
+    model: 'sonnet',
+  }, { agentId: 'glados' }).model, undefined);
 });
 
 test('reporting tool normalization paginates reads and requests compact baseline data', () => {
@@ -750,7 +777,7 @@ test('operator workspace edits change assembled prompts and expose skills', () =
 
   const opts = buildAgentSdkOptions('glados', {
     workspaceRoot,
-    env: { ...process.env, ANTHROPIC_AUTH_TOKEN: 'test-token' },
+    env: { ...process.env, GLADOS_RUNTIME_DIR: workspaceRoot, ANTHROPIC_AUTH_TOKEN: 'test-token' },
   });
   assert.ok(opts.systemPrompt.includes('edited by operator'));
   assert.match(opts.systemPrompt, new RegExp(`Persistent writable workspace: ${agentDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
@@ -833,7 +860,7 @@ test('runtime context overrides stale workspace model tables', () => {
   }
   const opts = buildAgentSdkOptions('glados', {
     workspaceRoot,
-    env: { ...process.env, ANTHROPIC_AUTH_TOKEN: 'test-token' },
+    env: { ...process.env, GLADOS_RUNTIME_DIR: workspaceRoot, ANTHROPIC_AUTH_TOKEN: 'test-token' },
   });
   assert.equal(opts.model, 'claude-sonnet-5');
   assert.ok(opts.systemPrompt.includes('claude-sonnet-4-6'), 'stale prompt content is still visible for auditability');

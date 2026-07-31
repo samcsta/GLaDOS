@@ -51,3 +51,18 @@ test('engagement completion records completion only after every task is terminal
   assert.equal(reopened.completed_at, null);
   db.close();
 });
+
+test('engagement completion honors an external workflow completion guard', () => {
+  const db = testDb();
+  db.prepare('INSERT INTO engagements (id, target_name) VALUES (?, ?)').run('eng-3', 'source-tree');
+  assert.throws(
+    () => updateEngagement(db, {
+      engagementId: 'eng-3',
+      status: 'complete',
+      completionGuard: () => { throw new Error('semantic coverage incomplete'); },
+    }),
+    /semantic coverage incomplete/
+  );
+  assert.equal(db.prepare('SELECT status FROM engagements WHERE id = ?').get('eng-3').status, 'active');
+  db.close();
+});

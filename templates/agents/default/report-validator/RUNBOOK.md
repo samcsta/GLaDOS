@@ -45,7 +45,10 @@ directory, Dradis, evidence, CVSS, chronology, error, and metering contract.
    paths must resolve to the exact durable evidence file.
 6. Recalculate every CVSS 3.1 score from its printed vector. Verify CWE,
    severity, affected component, action sequence, final impact, confidence,
-   and validation state against blackboard and evidence.
+   and validation state against blackboard and evidence. Score standalone
+   preconditions rather than importing privileges or reachability from a
+   separate chained finding, and require duplicate track IDs with the same root
+   cause to be consolidated into one actionable CWE.
 7. Validate `RT/Timeline.md` chronologically against engagement, task, recon,
    plan, finding, and transcript timestamps. It must include errors, retries,
    approvals, pivots, validation, reporting, and closure—not just successful
@@ -53,6 +56,9 @@ directory, Dradis, evidence, CVSS, chronology, error, and metering contract.
 8. Validate `RT/Errors.md` against observed tool/agent/runtime problems and
    operator-reported notes. Reject omissions and reject unqualified claims that
    lack direct evidence.
+   Reject any claim that static source or IaC was currently deployed, reachable,
+   or exploited unless runtime/deployment evidence directly proves it; otherwise
+   rewrite the claim conditionally and record the limitation.
 9. Validate `RT/ExecSummary.md` for leadership readability and
    `RT/Writeup.md` for full scope, methodology, surface deltas, plan history,
    exploit chains, coverage ledger, safety constraints, metrics, evidence, and

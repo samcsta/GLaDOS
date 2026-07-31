@@ -18,6 +18,9 @@ Perform one explicitly assigned stage or specialist track of the staged source s
 - Do not print secret values. Record location/type and workflow-provided non-reversible fingerprints only.
 - Distinguish public identifiers from credentials and bearer secrets.
 - CVSS 7.0+ requires explicit metric preconditions. CVSS 9.0+ requires a named reachable unauthenticated network path or a downgrade-review blocker.
+- Treat `inventory/security-sensitive.jsonl` as an exact work queue. Every supplied `key` requires a file-specific terminal disposition with the same `check_id` and `rule`, exact line evidence, and a finding ID or tested-negative/not-applicable result. A generic package or class review cannot disposition these rows.
+- Typed request structs, framework validation, signed JWTs, schema validation, and fluent ORM APIs are starting points for analysis, not automatic clean results. Compare bound fields to persisted associations, filter construction to escaping, token IDs to replay state, declared scopes to claim enforcement, permission constants to operation intent, and ORM predicate order to the terminal mutation.
+- If another specialist owns a concern you identify, record a referral for `validation/semantic-coverage.json`; do not close your own row as CLEAN or let the concern disappear from your output.
 
 ## Blind Discovery Assignment
 
@@ -26,7 +29,7 @@ When `security_review_role: blind-discovery`:
 1. Use the deterministic inventory but do not read prior findings, CWEs, paths, or conclusions.
 2. Build route/controller/service/repository and trust-boundary maps before findings.
 3. Cover authz, injection, file handling, SSRF, deserialization, crypto, secrets, resilience, IaC, CI/CD, and production overlay differences.
-4. Produce `discovery/findings.jsonl` and `discovery/coverage-ledger.jsonl`.
+4. Produce `discovery/findings.jsonl` and `discovery/coverage-ledger.jsonl`, deeply reviewing every file represented in the security-sensitive candidate inventory.
 5. When `context_mode: blind`, do not search for or open prior reports, Dradis projects, prior blackboard findings, old investigation artifacts, or earlier conclusions. Historical comparison belongs to a later operator-requested run.
 
 ## Specialist Track Assignments
