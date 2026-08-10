@@ -1,13 +1,16 @@
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled']);
-const ENGAGEMENT_STATUSES = new Set(['active', 'complete', 'cancelled']);
+const ENGAGEMENT_STATUSES = new Set(['active', 'complete', 'cancelled', 'failed', 'capped']);
 
 function updateEngagement(db, { engagementId, status, completionGuard = null }) {
   if (!engagementId) throw new Error('engagement_id is required');
   if (!ENGAGEMENT_STATUSES.has(status)) {
     throw new Error(`invalid engagement status: ${status}`);
   }
-  const engagement = db.prepare('SELECT id FROM engagements WHERE id = ?').get(engagementId);
+  const engagement = db.prepare('SELECT id, status FROM engagements WHERE id = ?').get(engagementId);
   if (!engagement) throw new Error(`engagement '${engagementId}' not found`);
+  if (engagement.status !== 'active' && status === 'active') {
+    throw new Error(`cannot reopen terminal engagement '${engagementId}' from ${engagement.status}`);
+  }
 
   if (status === 'complete') {
     const nonterminal = db.prepare(`
@@ -27,7 +30,7 @@ function updateEngagement(db, { engagementId, status, completionGuard = null }) 
   db.prepare(`
     UPDATE engagements
     SET status = ?,
-        completed_at = CASE WHEN ? = 'complete' THEN datetime('now') ELSE NULL END
+        completed_at = CASE WHEN ? = 'active' THEN NULL ELSE COALESCE(completed_at, datetime('now')) END
     WHERE id = ?
   `).run(status, status, engagementId);
   return db.prepare('SELECT * FROM engagements WHERE id = ?').get(engagementId);

@@ -7,6 +7,13 @@ const { loadLlmAuthToken } = require('../secrets/llm-secrets');
 const { bareModelAlias, DEFAULT_BARE_MODEL } = require('../../../scripts/lib/model-aliases');
 const { agentStatus, listHaltedAgents } = require('glados-watchdog/lib/halt');
 const { evaluateToolUse, extractTargets } = require('glados-watchdog/lib/safety-gate');
+const {
+  discoveryDispatchCheckpoint,
+  discoverySaturationCheckpoint,
+  discoveryWorkerIdFromPrompt,
+  claimDiscoveryWorker,
+  markDeepScanCapped,
+} = require('../security-review/deep-scan');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const POLICY_PATH = path.join(REPO_ROOT, 'config', 'glados-policy.json');
@@ -14,6 +21,14 @@ const REGISTRY_PATH = path.join(REPO_ROOT, 'templates', 'agent-registry.json');
 const TEMPLATE_AGENT_ROOT = path.join(REPO_ROOT, 'templates', 'agents', 'default');
 const PROMPT_FILE_ORDER = ['IDENTITY.md', 'SOUL.md', 'RUNBOOK.md', 'TOOLS.md', 'USER.md', 'AGENTS.md'];
 const TASK_TOOL_NAMES = new Set(['Task', 'Agent']);
+const SECURITY_REVIEW_SPECIALIST_ROLES = new Set([
+  'authorization-access-control',
+  'data-flow-injection',
+  'secrets-history',
+  'resilience-error-handling',
+  'iac-config-manifests',
+  'cryptography-suppressions',
+]);
 const MCP_SERVER_TOOLS = {
   mcp__blackboard: [
     'blackboard_read',
@@ -313,7 +328,7 @@ function decideToolUse({ agentId, toolName, input = {}, policy = loadPolicy(), w
     const allowedAgents = taskAllowlist(policy, { workspaceRoot });
     if (!allowedAgents.has(target)) return { allowed: false, reason: `${toolName} dispatch to ${target} is not allowed` };
     if (!agentEnabled(target, { policy, workspaceRoot })) return { allowed: false, reason: `${toolName} dispatch target ${target} is disabled` };
-    const contractReason = investigationDispatchContractViolation(target, input);
+    const contractReason = investigationDispatchContractViolation(target, input, env);
     if (contractReason) return { allowed: false, reason: contractReason };
   }
 
@@ -326,7 +341,7 @@ function decideToolUse({ agentId, toolName, input = {}, policy = loadPolicy(), w
   return evaluateToolUse({ agentId, toolName, input, turnTargets });
 }
 
-function investigationDispatchContractViolation(targetAgent, input = {}) {
+function investigationDispatchContractViolation(targetAgent, input = {}, env = process.env) {
   const prompt = String(input.prompt || input.description || '');
   if (targetAgent === 'net-recon' && (
     !/\boperator_requested_net_recon\s*:\s*true\b/i.test(prompt)
@@ -349,6 +364,44 @@ function investigationDispatchContractViolation(targetAgent, input = {}) {
   }
   if (targetAgent === 'report-validator' && !/\breport_pass\s*:\s*review-and-edit\b/i.test(prompt)) {
     return 'report-validator is a single review-and-edit pass; include report_pass: review-and-edit';
+  }
+  const hasSecurityReviewRole = /security_review_role\s*:/i.test(prompt);
+  const roleLines = [...prompt.matchAll(/^security_review_role:\s*([a-z0-9-]+)\s*$/gim)];
+  if (hasSecurityReviewRole && roleLines.length !== 1) {
+    return 'security-review dispatch requires exactly one standalone security_review_role line';
+  }
+  const securityReviewRole = roleLines[0]?.[1]?.toLowerCase() || null;
+  const artifactRoot = prompt.match(/^artifact_root:\s*(.+)\s*$/im)?.[1]?.trim();
+  if (targetAgent === 'source-code' && artifactRoot && !securityReviewRole) {
+    return 'security-review source-code dispatch requires exactly one standalone security_review_role line';
+  }
+  if (securityReviewRole === 'blind-discovery') {
+    if (targetAgent !== 'source-code') return 'blind discovery must dispatch the source-code agent';
+    const workerId = discoveryWorkerIdFromPrompt(prompt);
+    const retryOf = prompt.match(/^retry_of:\s*(worker-\d+)\s*$/im)?.[1] || null;
+    if (!artifactRoot || !workerId) return 'blind discovery dispatch requires exact artifact_root and worker_id fields';
+    const investigationsRoot = path.resolve(env.GLADOS_INVESTIGATIONS_DIR || path.join(env.GLADOS_RUNTIME_DIR || GLADOS_RUNTIME_DIR, 'investigations'));
+    const resolvedArtifactRoot = path.resolve(artifactRoot);
+    if (!resolvedArtifactRoot.startsWith(`${investigationsRoot}${path.sep}`)) return 'blind discovery artifact_root must be inside the configured GLaDOS investigations directory';
+    const checkpoint = discoveryDispatchCheckpoint(resolvedArtifactRoot, { nextWorkerId: workerId, retryOf });
+    const capReason = checkpoint.invalid.find(reason => /deadline has elapsed|maximum of \d+ attempts/.test(reason));
+    if (capReason) {
+      try { markDeepScanCapped(resolvedArtifactRoot, capReason); } catch {}
+    }
+    if (!checkpoint.passed) return `blind discovery dispatch checkpoint failed: ${checkpoint.invalid.slice(0, 4).join('; ')}`;
+  }
+  const postDiscoveryRole = SECURITY_REVIEW_SPECIALIST_ROLES.has(securityReviewRole)
+    || securityReviewRole === 'source-review-validator'
+    || securityReviewRole === 'historical-regression';
+  if (postDiscoveryRole) {
+    if (securityReviewRole === 'source-review-validator' && targetAgent !== 'source-review-validator') return 'source-review-validator role must dispatch the source-review-validator agent';
+    if (securityReviewRole !== 'source-review-validator' && targetAgent !== 'source-code') return `${securityReviewRole} must dispatch the source-code agent`;
+      if (!artifactRoot) return 'security-review specialist dispatch requires an exact artifact_root field';
+      const investigationsRoot = path.resolve(env.GLADOS_INVESTIGATIONS_DIR || path.join(env.GLADOS_RUNTIME_DIR || GLADOS_RUNTIME_DIR, 'investigations'));
+      const resolvedArtifactRoot = path.resolve(artifactRoot);
+      if (!resolvedArtifactRoot.startsWith(`${investigationsRoot}${path.sep}`)) return 'security-review specialist artifact_root must be inside the configured GLaDOS investigations directory';
+      const saturation = discoverySaturationCheckpoint(resolvedArtifactRoot);
+      if (!saturation.passed) return `security-review specialist dispatch requires discovery saturation: ${saturation.invalid.slice(0, 4).join('; ')}`;
   }
   return null;
 }
@@ -482,6 +535,48 @@ function buildPreToolUseHook(agentId, policy = loadPolicy(), options = {}) {
       env: options.env || process.env,
       turnTargets: toolTargetsForAgent(callerAgentId, options),
     });
+    if (decision.allowed && callerAgentId === 'glados' && isTaskDispatchTool(input.tool_name)) {
+      const prompt = String(normalizedInput.prompt || normalizedInput.description || '');
+      const workerId = discoveryWorkerIdFromPrompt(prompt);
+      const artifactRoot = prompt.match(/^artifact_root:\s*(.+)\s*$/im)?.[1]?.trim();
+      if (workerId && artifactRoot) {
+        const engagementId = path.basename(path.dirname(path.resolve(artifactRoot)));
+        const claim = claimDiscoveryWorker({
+          dbPath: (options.env || process.env).BLACKBOARD_DB || BLACKBOARD_DB,
+          artifactRoot, engagementId,
+          workerId,
+          toolCallId: input.tool_use_id,
+        });
+        if (!claim.claimed) {
+          if (/maximum of \d+ attempts/.test(claim.reason)) {
+            try { markDeepScanCapped(artifactRoot, claim.reason); } catch {}
+          }
+          decision.allowed = false;
+          decision.reason = claim.reason;
+        }
+      }
+      if (decision.allowed && options.reviewReservations && input.tool_use_id) {
+        if (!options.reviewReservations.has(input.tool_use_id)
+            && options.reviewReservations.size >= options.reviewConcurrencyLimit) {
+          decision.allowed = false;
+          decision.reason = `security-review concurrency limit ${options.reviewConcurrencyLimit} reached; retry after the current foreground batch completes`;
+          const prompt = String(normalizedInput.prompt || normalizedInput.description || '');
+          const workerId = discoveryWorkerIdFromPrompt(prompt);
+          const artifactRoot = prompt.match(/^artifact_root:\s*(.+)\s*$/im)?.[1]?.trim();
+          if (workerId && artifactRoot) {
+            try {
+              const engagementId = path.basename(path.dirname(path.resolve(artifactRoot)));
+              const db = new (require('better-sqlite3'))((options.env || process.env).BLACKBOARD_DB || BLACKBOARD_DB);
+              db.prepare(`DELETE FROM security_review_worker_attempts WHERE engagement_id=? AND worker_id=? AND tool_call_id=? AND status='STARTED'`).run(engagementId, workerId, input.tool_use_id);
+              db.prepare(`DELETE FROM security_review_worker_runs WHERE engagement_id=? AND worker_id=? AND tool_call_id=? AND status='STARTED'`).run(engagementId, workerId, input.tool_use_id);
+              db.close();
+            } catch {}
+          }
+        } else {
+          options.reviewReservations.add(input.tool_use_id);
+        }
+      }
+    }
     rememberToolTargets(callerAgentId, input.tool_name, normalizedInput, decision, options);
     const hookSpecificOutput = {
       hookEventName: 'PreToolUse',
@@ -501,6 +596,22 @@ function buildPreToolUseHook(agentId, policy = loadPolicy(), options = {}) {
       };
     }
     return { hookSpecificOutput };
+  };
+}
+
+function buildReviewReleaseHook(eventName, reservations) {
+  return async input => {
+    if (input.tool_use_id) reservations?.delete(input.tool_use_id);
+    return { hookSpecificOutput: { hookEventName: eventName } };
+  };
+}
+
+function buildReviewBatchHook(reservations) {
+  return async input => {
+    for (const call of input.tool_calls || []) {
+      if (isTaskDispatchTool(call?.tool_name) && call.tool_use_id) reservations?.delete(call.tool_use_id);
+    }
+    return { hookSpecificOutput: { hookEventName: 'PostToolBatch' } };
   };
 }
 
@@ -859,7 +970,7 @@ function buildAgentDefinitions(policy = loadPolicy(), options = {}) {
   for (const row of registryRows) {
     if (!row?.id || row.id === 'glados' || !allowedAgents.has(row.id)) continue;
     const assembled = assembleAgentPrompt(row.id, options);
-    const model = bareModelAlias(row.model, { fallback: policy.harness?.defaultModel || DEFAULT_BARE_MODEL });
+    const model = bareModelAlias(options.modelOverride || row.model, { fallback: policy.harness?.defaultModel || DEFAULT_BARE_MODEL });
     const tools = mountedToolsForAgent(row.id, policy, { env: options.env || process.env });
     out[row.id] = {
       description: row.description || row.name || row.id,
@@ -926,7 +1037,12 @@ function buildAgentSdkOptions(agentId, options = {}) {
   const agentTypesById = new Map();
   const browserTargetsByAgent = new Map();
   const workspaceRoot = options.workspaceRoot || agentWorkspaceRoot(options.env || process.env);
-  const definitions = buildAgentDefinitions(policy, { workspaceRoot, templateRoot: options.templateRoot, env: options.env });
+  const definitions = buildAgentDefinitions(policy, {
+    workspaceRoot,
+    templateRoot: options.templateRoot,
+    env: options.env,
+    modelOverride: options.modelOverride,
+  });
   const tools = processToolsForAgent(agentId, policy, {
     workspaceRoot,
     templateRoot: options.templateRoot,
@@ -939,12 +1055,19 @@ function buildAgentSdkOptions(agentId, options = {}) {
   const model = bareModelAlias(options.model || row.model || policy.harness?.defaultModel, {
     fallback: policy.harness?.defaultModel || DEFAULT_BARE_MODEL,
   });
+  const configuredReviewConcurrency = Number(options.reviewConcurrencyLimit || policy.harness?.securityReviewMaxExecutions || 3);
+  const reviewConcurrencyLimit = Number.isInteger(configuredReviewConcurrency) && configuredReviewConcurrency > 0
+    ? Math.min(8, configuredReviewConcurrency)
+    : 3;
+  const reviewReservations = options.reviewKey ? new Set() : null;
   const preToolUse = buildPreToolUseHook(agentId, policy, {
     workspaceRoot,
     env: options.env || process.env,
     agentTypesById,
     browserTargetsByAgent,
     turnTargets: options.turnTargets || [],
+    reviewConcurrencyLimit,
+    reviewReservations,
   });
   const subagentStart = async input => {
     if (input.agent_id && input.agent_type) agentTypesById.set(input.agent_id, input.agent_type);
@@ -994,6 +1117,11 @@ function buildAgentSdkOptions(agentId, options = {}) {
     }),
     hooks: {
       PreToolUse: [{ hooks: [preToolUse] }],
+      ...(reviewReservations ? {
+        PostToolUse: [{ matcher: 'Agent|Task', hooks: [buildReviewReleaseHook('PostToolUse', reviewReservations)] }],
+        PostToolUseFailure: [{ matcher: 'Agent|Task', hooks: [buildReviewReleaseHook('PostToolUseFailure', reviewReservations)] }],
+        PostToolBatch: [{ hooks: [buildReviewBatchHook(reviewReservations)] }],
+      } : {}),
       SubagentStart: [{ hooks: [subagentStart] }],
       SubagentStop: [{ hooks: [subagentStop] }],
     },
@@ -1005,6 +1133,7 @@ function buildAgentSdkOptions(agentId, options = {}) {
       : (policy.harness?.specialistMaxTurns ?? 100)),
   };
   if (options.resumeSessionId) sdkOptions.resume = options.resumeSessionId;
+  if (reviewReservations) sdkOptions.gladosReviewReservations = reviewReservations;
   return sdkOptions;
 }
 
@@ -1095,6 +1224,7 @@ function mapSdkMessageToEvents(agentId, message, context = {}) {
     sdkType: message?.type,
     sessionId: message?.session_id,
     sdkUuid: message?.uuid,
+    requestId: message?.request_id || null,
     parentToolUseId,
     subagentType: message?.subagent_type || null,
   };
@@ -1293,6 +1423,7 @@ function mapSdkMessageToEvents(agentId, message, context = {}) {
         ...base,
         kind: 'harness-init',
         text: `Agent SDK initialized ${message.model || ''}`.trim(),
+        model: message.model || null,
         tools: message.tools || [],
         mcpServers: message.mcp_servers || [],
         permissionMode: message.permissionMode,
@@ -1490,12 +1621,14 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
       if (shouldPersistSdkSession(message) && typeof options.onSessionId === 'function') {
         options.onSessionId(message.session_id, message);
       }
-      // A halt poll can interrupt while the iterator is waiting. The value that
-      // unblocks that wait belongs to the cancelled turn and must not be shown.
-      if (interrupted) break;
+      // Preserve terminal SDK usage/cost after interruption. Other late output
+      // belongs to the cancelled turn and must not be shown.
+      if (interrupted && message?.type !== 'result') break;
+      if (interrupted && message?.type === 'result' && !message?.usage && !message?.modelUsage && !message?.model_usage && message?.total_cost_usd == null) break;
       if (options.abortSignal?.aborted) {
         await interrupt(options.abortSignal.reason || 'operator stop');
-        break;
+        if (message?.type !== 'result') break;
+        if (!message?.usage && !message?.modelUsage && !message?.model_usage && message?.total_cost_usd == null) break;
       }
       const haltedAgent = haltedInTurn();
       if (!interrupted && haltedAgent && typeof iterable.interrupt === 'function') {
@@ -1511,13 +1644,18 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
         // durable transcript record.
         const isStreamDelta = ev.kind === 'text-stream' || ev.kind === 'thinking-stream';
         const recorded = transcriptStore && !isStreamDelta
-          ? transcriptStore.record(options.investigationSessionId || options.env?.GLADOS_SESSION_ID || 'legacy', ev.agentId || agentId, ev)
+          ? transcriptStore.record(options.investigationSessionId || options.env?.GLADOS_SESSION_ID || 'legacy', ev.agentId || agentId, {
+              ...ev,
+              engagementId: options.engagementId || null,
+              controllerJobId: options.controllerJobId || null,
+            })
           : ev;
         events.push(recorded);
         if (onEvent) onEvent(recorded, message);
       }
     }
   } finally {
+    sdkOptions.gladosReviewReservations?.clear();
     if (haltTimer) clearInterval(haltTimer);
     if (options.abortSignal?.removeEventListener) {
       options.abortSignal.removeEventListener('abort', abortHandler);
@@ -1569,6 +1707,8 @@ module.exports = {
   rememberToolTargets,
   isTaskDispatchTool,
   buildPreToolUseHook,
+  buildReviewReleaseHook,
+  buildReviewBatchHook,
   buildCanUseTool,
   buildMcpEnv,
   buildMcpServers,

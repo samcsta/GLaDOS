@@ -4,7 +4,7 @@ const SLASH_COMMANDS = [
   { cmd: '/help', desc: 'List dashboard slash commands' },
   { cmd: '/goal <target>', desc: 'Start an approval-gated webapp investigation goal' },
   { cmd: '/investigate <target>', desc: 'Alias for /goal <target>' },
-  { cmd: '/security-review <url|domain|path>', desc: 'Start a source review; use --blind (default), --regression, or --informed' },
+  { cmd: '/security-review <url|domain|path>', desc: 'Start a deep source review; supports context mode, an optional --time-limit, and an approved --single-model alias' },
   { cmd: '/status', desc: 'Show active goals, jobs, agents, plans, and target health' },
   { cmd: '/agents', desc: 'Show live subagents (curl /api/agents)' },
   { cmd: '/halt <agent>', desc: 'Halt one agent and interrupt its owning SDK turn' },
@@ -65,11 +65,32 @@ function parseSecurityReviewArg(value, fs = require('node:fs')) {
   const modeMatches = [...raw.matchAll(/(?:^|\s)--(blind|regression|informed)(?=\s|$)/gi)];
   if (modeMatches.length > 1) return { ok: false, error: 'choose only one security-review mode: --blind, --regression, or --informed' };
   const mode = modeMatches[0]?.[1]?.toLowerCase() || 'blind';
-  let target = raw.replace(/(?:^|\s)--(?:blind|regression|informed)(?=\s|$)/ig, ' ').replace(/\s+/g, ' ').trim();
+  const timeMatches = [...raw.matchAll(/(?:^|\s)--time-limit(?:=|\s+)(\d+)(m|h)(?=\s|$)/gi)];
+  if (timeMatches.length > 1) return { ok: false, error: 'choose only one security-review time limit' };
+  const duration = timeMatches[0] ? Number(timeMatches[0][1]) * (timeMatches[0][2].toLowerCase() === 'h' ? 60 : 1) : null;
+  if (duration != null && (!Number.isInteger(duration) || duration < 1 || duration > 24 * 60)) return { ok: false, error: 'security-review time limit must be between 1m and 24h' };
+  const modelMatches = [...raw.matchAll(/(?:^|\s)--single-model(?:=|\s+)([a-zA-Z0-9._-]+)(?=\s|$)/g)];
+  if (modelMatches.length > 1) return { ok: false, error: 'choose only one approved single model' };
+  const singleModel = modelMatches[0]?.[1] || null;
+  let target = raw
+    .replace(/(?:^|\s)--(?:blind|regression|informed)(?=\s|$)/ig, ' ')
+    .replace(/(?:^|\s)--time-limit(?:=|\s+)\d+(?:m|h)(?=\s|$)/ig, ' ')
+    .replace(/(?:^|\s)--single-model(?:=|\s+)[a-zA-Z0-9._-]+(?=\s|$)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (/(?:^|\s)--[a-z0-9-]+/i.test(target)) return { ok: false, error: 'unknown security-review option' };
   const quote = target[0];
   if ((quote === '"' || quote === "'") && target.endsWith(quote)) target = target.slice(1, -1).trim();
   if (!target) return { ok: false, error: 'security-review target required' };
-  return { ok: true, mode, target, isLocalPath: isExistingLocalPath(target, fs), isUrlOrDomain: isUrlOrDomain(target) };
+  return {
+    ok: true,
+    mode,
+    maxDurationMinutes: duration,
+    singleModel,
+    target,
+    isLocalPath: isExistingLocalPath(target, fs),
+    isUrlOrDomain: isUrlOrDomain(target),
+  };
 }
 
 function formatStatus(status) {

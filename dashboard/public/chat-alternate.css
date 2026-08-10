@@ -1,7 +1,4 @@
-/*
- * Permanent GLaDOS chat layout. It remains scoped to the chat pane so agent
- * transcript views keep their compact operational presentation.
- */
+/* Shared operator chat layout for GLaDOS and every named agent. */
 .chat-visual-chamber {
   --chamber-grid: rgba(255,255,255,.025);
   --chamber-shadow: rgba(0,0,0,.22);
@@ -81,7 +78,7 @@
   background: var(--bg-alt);
 }
 .chat-visual-chamber .entry.assistant-text::before {
-  content: "GLADOS / CHAMBER FEED";
+  content: var(--agent-feed-label, "AGENT / CHAMBER FEED");
   position: absolute;
   top: -7px;
   left: 13px;

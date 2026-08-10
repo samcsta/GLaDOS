@@ -26,6 +26,8 @@ const {
   rememberToolTargets,
   resolveSdkWorkingDirectory,
   investigationDispatchContractViolation,
+  buildReviewReleaseHook,
+  buildReviewBatchHook,
 } = require('../lib/harness/agent-sdk');
 const { SdkSessionRegistry } = require('../lib/harness/session-registry');
 const { ResumeCoordinator } = require('../lib/harness/resume-coordinator');
@@ -100,6 +102,79 @@ test('enforces operator-only net recon and operator-controlled report wrap dispa
   assert.match(investigationDispatchContractViolation('report-validator', {
     prompt: 'operator_wrap_approved: true\noperator_approval_reference: chat-message-73',
   }), /review-and-edit/);
+});
+
+test('blind discovery dispatches are runtime-gated on durable prior-worker reconciliation', () => {
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-dispatch-checkpoint-'));
+  const investigationsRoot = path.join(runtimeRoot, 'investigations');
+  const artifactRoot = path.join(investigationsRoot, 'engagement-1', 'security-review');
+  fs.mkdirSync(path.join(artifactRoot, 'discovery', 'deep'), { recursive: true });
+  const deadlineAt = new Date(Date.now() + 60_000).toISOString();
+  fs.writeFileSync(path.join(artifactRoot, 'run.json'), `${JSON.stringify({
+    deepScan: {
+      minDiscoveryRuns: 3, stopAfterNoNew: 6, maxDiscoveryRuns: 60, maxDurationMinutes: 120,
+      discoveryConcurrency: 3, specialistConcurrency: 3,
+      terminalState: 'RUNNING', deadlineAt,
+    },
+  })}\n`);
+  fs.writeFileSync(path.join(artifactRoot, 'discovery', 'deep', 'manifest.json'), `${JSON.stringify({
+    schema_version: 1, status: 'RUNNING', config: { minDiscoveryRuns: 3, stopAfterNoNew: 6, maxDiscoveryRuns: 60, maxDurationMinutes: 120, discoveryConcurrency: 3, specialistConcurrency: 3 },
+    started_at: '2026-07-31T12:00:00.000Z', deadline_at: deadlineAt, omitted_workers: [],
+  })}\n`);
+  const env = baseTestEnv({ GLADOS_RUNTIME_DIR: runtimeRoot, GLADOS_INVESTIGATIONS_DIR: investigationsRoot });
+  const prompt = workerId => `security_review_role: blind-discovery\nworker_id: ${workerId}\nartifact_root: ${artifactRoot}`;
+  assert.equal(investigationDispatchContractViolation('source-code', { prompt: prompt('worker-001') }, env), null);
+  assert.match(investigationDispatchContractViolation('source-code', {
+    prompt: `Run worker-001. Artifact root: ${artifactRoot}. security_review_role: blind-discovery.`,
+  }, env), /standalone security_review_role|requires exact artifact_root and worker_id fields/);
+  assert.equal(investigationDispatchContractViolation('source-code', { prompt: prompt('worker-002') }, env), null);
+  assert.equal(investigationDispatchContractViolation('source-code', { prompt: prompt('worker-003') }, env), null);
+  assert.match(investigationDispatchContractViolation('source-code', { prompt: prompt('worker-004') }, env), /next ordered discovery batch/);
+  assert.match(investigationDispatchContractViolation('source-code', {
+    prompt: `security_review_role: authorization-access-control\nartifact_root: ${artifactRoot}`,
+  }, env), /requires discovery saturation/);
+});
+
+test('security-review foreground reservations release by tool-use id', async () => {
+  const reservations = new Set(['tool-1', 'tool-2', 'tool-3']);
+  const releaseSuccess = buildReviewReleaseHook('PostToolUse', reservations);
+  const releaseFailure = buildReviewReleaseHook('PostToolUseFailure', reservations);
+  assert.deepEqual(await releaseSuccess({ tool_use_id: 'tool-2' }), {
+    hookSpecificOutput: { hookEventName: 'PostToolUse' },
+  });
+  assert.deepEqual([...reservations], ['tool-1', 'tool-3']);
+  await releaseFailure({ tool_use_id: 'tool-1' });
+  assert.deepEqual([...reservations], ['tool-3']);
+  reservations.add('tool-4');
+  await buildReviewBatchHook(reservations)({ tool_calls: [
+    { tool_name: 'Agent', tool_use_id: 'tool-3' },
+    { tool_name: 'Task', tool_use_id: 'tool-4' },
+    { tool_name: 'Bash', tool_use_id: 'bash-1' },
+  ] });
+  assert.deepEqual([...reservations], []);
+});
+
+test('security-review pre-tool hook admits at most three foreground tasks', async () => {
+  const reservations = new Set();
+  const policy = loadPolicy();
+  const hook = require('../lib/harness/agent-sdk').buildPreToolUseHook('glados', policy, {
+    workspaceRoot: path.join(os.homedir(), '.glados', 'workspaces', 'agents'),
+    env: baseTestEnv(),
+    agentTypesById: new Map(),
+    browserTargetsByAgent: new Map(),
+    turnTargets: [],
+    reviewConcurrencyLimit: 3,
+    reviewReservations: reservations,
+  });
+  const call = toolUseId => hook({
+    tool_name: 'Agent',
+    tool_input: { subagent_type: 'webapp-recon', prompt: 'Review the assigned source partition.' },
+    tool_use_id: toolUseId,
+  });
+  const decisions = await Promise.all(['tool-1', 'tool-2', 'tool-3', 'tool-4'].map(call));
+  assert.deepEqual(decisions.map(row => row.hookSpecificOutput.permissionDecision), ['allow', 'allow', 'allow', 'deny']);
+  assert.match(decisions[3].hookSpecificOutput.permissionDecisionReason, /concurrency limit 3/);
+  assert.equal(reservations.size, 3);
 });
 
 test('every registered agent has exactly one watchdog dispatch classification', () => {

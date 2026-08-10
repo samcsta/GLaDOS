@@ -17,8 +17,8 @@ class DashboardTranscriptStore {
     this.db = openTranscriptDb(dbPath);
     this.insert = this.db.prepare(`
       INSERT INTO dashboard_transcript_events
-        (session_id, agent_id, client_event_id, kind, text, event_json, ts)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+        (session_id, engagement_id, controller_job_id, agent_id, client_event_id, kind, text, event_json, ts)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     this.updateJson = this.db.prepare(`
       UPDATE dashboard_transcript_events SET event_json = ? WHERE id = ?
@@ -59,6 +59,8 @@ class DashboardTranscriptStore {
     const ev = normalizeEvent(agentId, { ...(event || {}), sessionId: sessionId || 'legacy' });
     const info = this.insert.run(
       sessionId || 'legacy',
+      ev.engagementId || ev.engagement_id || null,
+      ev.controllerJobId || ev.controller_job_id || null,
       agentId,
       ev.id || null,
       ev.kind || 'meta',

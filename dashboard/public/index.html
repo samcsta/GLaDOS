@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>GLaDOS Ops Dashboard</title>
   <link rel="stylesheet" href="/styles.css?v=20260730-permanent-chat-bulk-models" />
-  <link rel="stylesheet" href="/chat-alternate.css?v=20260730-permanent-chat" />
+  <link rel="stylesheet" href="/chat-alternate.css?v=20260810-agent-chamber" />
 </head>
 <body>
   <header class="topbar">
@@ -49,6 +49,10 @@
         <span class="collapsible-chevron">▾</span> Agents
       </h2>
       <div id="agents-section">
+        <section id="security-reviews" class="security-reviews hidden" aria-label="Active security reviews">
+          <div class="security-reviews-heading"><span>Security reviews</span><span id="security-review-count">0</span></div>
+          <div id="security-review-list"></div>
+        </section>
         <div class="agent-list-controls">
           <input id="agent-search" type="search" placeholder="Find agent…" aria-label="Find agent" />
           <div class="segmented agent-filter" role="group" aria-label="Filter agents">

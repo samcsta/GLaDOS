@@ -167,17 +167,17 @@ function semanticReviewCandidates(repositoryPath, files) {
     lines.forEach((line, index) => {
       for (const pattern of patterns) {
         if (!pattern.regex.test(line)) continue;
-        const key = `${relative}:${pattern.id}`;
-        const existing = grouped.get(key) || {
-          key,
+        const inventoryKey = `${relative}:${pattern.id}`;
+        const existing = grouped.get(inventoryKey) || {
+          inventory_key: inventoryKey,
           category: 'semantic-review-candidate',
           check_id: pattern.checkId,
           rule: pattern.id,
           file: relative,
-          lines: [],
+          line_ranges: [],
         };
-        existing.lines.push(index + 1);
-        grouped.set(key, existing);
+        existing.line_ranges.push({ start_line: index + 1, end_line: index + 1 });
+        grouped.set(inventoryKey, existing);
       }
     });
   }
@@ -260,7 +260,7 @@ function generateSecurityReviewInventory({ repositoryPath, artifactRoot }) {
     { id: 'crypto-operation', regex: /\b(?:Encrypt|Decrypt|Sign|Verify|NewCipher|createHash|MessageDigest)\b/ },
   ];
   const run = {
-    workflowVersion: 2,
+    workflowVersion: 3,
     repositoryPath: root,
     sourceType: gitAvailable ? 'git-work-tree' : 'directory-snapshot',
     gitHistoryAvailable: gitAvailable,

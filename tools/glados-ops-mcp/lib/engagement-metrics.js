@@ -43,11 +43,25 @@ function engagementMetrics(db, engagementId, options = {}) {
   const rows = db.prepare(`
     SELECT agent_id, event_json, ts
     FROM dashboard_transcript_events
-    WHERE kind = 'result'
-      AND datetime(ts) >= datetime(?)
-      AND datetime(ts) <= datetime(?)
+    WHERE engagement_id = ?
+      AND (kind = 'result' OR (kind = 'prompt-error' AND json_extract(event_json, '$.sdkType') = 'result'))
     ORDER BY id
-  `).all(started.toISOString(), ended.toISOString());
+  `).all(engagementId);
+  let gatewayRows = [];
+  let unresolvedGatewayRequests = 0;
+  try {
+    gatewayRows = db.prepare(`
+      SELECT o.review_role, o.worker_id, o.requested_model, o.actual_model, o.billed_model_name,
+             o.cost_usd, o.request_id
+      FROM security_review_model_observations AS o
+      WHERE o.engagement_id=? AND o.source='litellm:spend-log'
+      ORDER BY o.observed_at, o.observation_id
+    `).all(engagementId);
+    unresolvedGatewayRequests = db.prepare(`
+      SELECT COUNT(*) AS n FROM security_review_llm_requests
+      WHERE engagement_id=? AND status!='SETTLED'
+    `).get(engagementId).n;
+  } catch {}
 
   const totals = {
     inputTokens: 0,
@@ -80,8 +94,25 @@ function engagementMetrics(db, engagementId, options = {}) {
       meteredCostEvents += 1;
     }
 
+    const modelUsage = event.modelUsage && typeof event.modelUsage === 'object'
+      ? event.modelUsage
+      : null;
     const usage = event.usage && typeof event.usage === 'object' ? event.usage : null;
-    if (usage) {
+    if (modelUsage && Object.keys(modelUsage).length) {
+      const aggregate = Object.values(modelUsage).reduce((sum, metrics) => ({
+        input: sum.input + firstMetric(metrics, ['inputTokens', 'input_tokens']),
+        output: sum.output + firstMetric(metrics, ['outputTokens', 'output_tokens']),
+        cacheRead: sum.cacheRead + firstMetric(metrics, ['cacheReadInputTokens', 'cache_read_input_tokens']),
+        cacheCreation: sum.cacheCreation + firstMetric(metrics, ['cacheCreationInputTokens', 'cache_creation_input_tokens']),
+      }), { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 });
+      totals.inputTokens += aggregate.input;
+      totals.outputTokens += aggregate.output;
+      totals.cacheReadTokens += aggregate.cacheRead;
+      totals.cacheCreationTokens += aggregate.cacheCreation;
+      agent.inputTokens += aggregate.input + aggregate.cacheRead + aggregate.cacheCreation;
+      agent.outputTokens += aggregate.output;
+      tokenEvents += 1;
+    } else if (usage) {
       const input = firstMetric(usage, ['input_tokens', 'inputTokens']);
       const output = firstMetric(usage, ['output_tokens', 'outputTokens']);
       const cacheRead = firstMetric(usage, ['cache_read_input_tokens', 'cacheReadInputTokens']);
@@ -95,9 +126,6 @@ function engagementMetrics(db, engagementId, options = {}) {
       tokenEvents += 1;
     }
 
-    const modelUsage = event.modelUsage && typeof event.modelUsage === 'object'
-      ? event.modelUsage
-      : null;
     for (const [modelId, modelMetrics] of Object.entries(modelUsage || {})) {
       if (!modelMetrics || typeof modelMetrics !== 'object') continue;
       const model = byModel.get(modelId) || {
@@ -127,6 +155,7 @@ function engagementMetrics(db, engagementId, options = {}) {
   const tasks = Object.fromEntries(taskRows.map(row => [row.status, row.count]));
   const elapsedSeconds = Math.max(0, (ended.getTime() - started.getTime()) / 1000);
   const totalTokens = totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheCreationTokens;
+  const gatewayCost = gatewayRows.reduce((sum, row) => sum + (Number.isFinite(Number(row.cost_usd)) ? Number(row.cost_usd) : 0), 0);
 
   return {
     engagement: {
@@ -142,12 +171,16 @@ function engagementMetrics(db, engagementId, options = {}) {
       elapsedHuman: formatElapsed(elapsedSeconds),
     },
     metering: {
-      source: 'Claude Agent SDK result events in dashboard_transcript_events',
-      attribution: 'result events inside the engagement UTC time window',
+      source: gatewayRows.length ? 'LiteLLM request spend logs' : 'Claude Agent SDK result events in dashboard_transcript_events',
+      attribution: 'result events carrying this engagement_id through the terminal metering cutoff',
       resultEvents: rows.length,
       meteredCostEvents,
-      costAvailable: meteredCostEvents > 0,
-      costUsd: meteredCostEvents > 0 ? Number(costUsd.toFixed(6)) : null,
+      costAvailable: gatewayRows.length > 0 || meteredCostEvents > 0,
+      costUsd: gatewayRows.length ? Number(gatewayCost.toFixed(6)) : meteredCostEvents > 0 ? Number(costUsd.toFixed(6)) : null,
+      costSettled: gatewayRows.length > 0 && unresolvedGatewayRequests === 0,
+      unresolvedGatewayRequests,
+      provisionalSdkCostUsd: meteredCostEvents > 0 ? Number(costUsd.toFixed(6)) : null,
+      gatewayRequests: gatewayRows.length,
       tokensAvailable: tokenEvents > 0,
       tokenEvents,
       tokens: tokenEvents > 0 ? { ...totals, totalTokens } : null,

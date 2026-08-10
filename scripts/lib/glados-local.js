@@ -427,6 +427,66 @@ CREATE TABLE IF NOT EXISTS dashboard_transcript_events (
   ts TEXT NOT NULL DEFAULT (datetime('now')),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS security_review_worker_runs (
+  engagement_id TEXT NOT NULL REFERENCES engagements(id),
+  worker_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  tool_call_id TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK (status IN ('STARTED','SUCCEEDED','FAILED','CANCELED')),
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  error TEXT,
+  PRIMARY KEY (engagement_id, worker_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_security_review_worker_sequence
+  ON security_review_worker_runs(engagement_id, sequence);
+CREATE TABLE IF NOT EXISTS security_review_worker_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  engagement_id TEXT NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+  worker_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  attempt INTEGER NOT NULL,
+  tool_call_id TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK (status IN ('STARTED','SUCCEEDED','FAILED','CANCELED')),
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  error TEXT,
+  UNIQUE (engagement_id, worker_id, attempt)
+);
+CREATE INDEX IF NOT EXISTS idx_security_review_attempts_active
+  ON security_review_worker_attempts(engagement_id, status, sequence);
+CREATE TABLE IF NOT EXISTS security_review_model_observations (
+  observation_id TEXT PRIMARY KEY,
+  engagement_id TEXT NOT NULL REFERENCES engagements(id),
+  controller_job_id TEXT,
+  agent_id TEXT NOT NULL,
+  review_role TEXT,
+  worker_id TEXT,
+  requested_model TEXT,
+  actual_model TEXT NOT NULL,
+  billed_model_name TEXT,
+  source TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  gateway_model_id TEXT NOT NULL,
+  cost_usd REAL,
+  observed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS security_review_llm_requests (
+  request_id TEXT PRIMARY KEY,
+  engagement_id TEXT NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+  controller_job_id TEXT,
+  agent_id TEXT NOT NULL,
+  review_role TEXT,
+  worker_id TEXT,
+  requested_model TEXT,
+  status TEXT NOT NULL CHECK (status IN ('PENDING','SETTLED','UNRESOLVED','CONFLICT')) DEFAULT 'PENDING',
+  lookup_attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  observed_at TEXT NOT NULL,
+  settled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_security_review_llm_pending
+  ON security_review_llm_requests(engagement_id, status, observed_at);
 CREATE TABLE IF NOT EXISTS findings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   engagement_id TEXT NOT NULL,
@@ -566,6 +626,12 @@ CREATE INDEX IF NOT EXISTS idx_replan_state ON replan_proposals(state);
   if (!transcriptCols.has('session_id')) {
     runSql(paths.blackboardDb, `ALTER TABLE dashboard_transcript_events ADD COLUMN session_id TEXT NOT NULL DEFAULT 'legacy' REFERENCES investigation_sessions(id);`);
   }
+  if (!transcriptCols.has('engagement_id')) {
+    runSql(paths.blackboardDb, 'ALTER TABLE dashboard_transcript_events ADD COLUMN engagement_id TEXT REFERENCES engagements(id);');
+  }
+  if (!transcriptCols.has('controller_job_id')) {
+    runSql(paths.blackboardDb, 'ALTER TABLE dashboard_transcript_events ADD COLUMN controller_job_id TEXT REFERENCES controller_jobs(id);');
+  }
   const approvalCols = sqliteTableColumns(paths.blackboardDb, 'operator_action_approvals');
   if (!approvalCols.has('session_id')) {
     runSql(paths.blackboardDb, `ALTER TABLE operator_action_approvals ADD COLUMN session_id TEXT NOT NULL DEFAULT 'legacy' REFERENCES investigation_sessions(id);`);
@@ -577,6 +643,8 @@ CREATE INDEX IF NOT EXISTS idx_replan_state ON replan_proposals(state);
       ON dashboard_transcript_events(session_id, client_event_id) WHERE client_event_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_dashboard_transcript_session_agent_id
       ON dashboard_transcript_events(session_id, agent_id, id);
+    CREATE INDEX IF NOT EXISTS idx_dashboard_transcript_engagement_id
+      ON dashboard_transcript_events(engagement_id, id);
     CREATE INDEX IF NOT EXISTS idx_engagements_session_started
       ON engagements(session_id, started_at DESC);
   `);
@@ -585,6 +653,8 @@ CREATE INDEX IF NOT EXISTS idx_replan_state ON replan_proposals(state);
   if (!cols.has('confidence_score')) runSql(paths.blackboardDb, 'ALTER TABLE findings ADD COLUMN confidence_score REAL;', { ignoreError: true });
   const jobCols = sqliteTableColumns(paths.blackboardDb, 'controller_jobs');
   if (!jobCols.has('sdk_session_id')) runSql(paths.blackboardDb, 'ALTER TABLE controller_jobs ADD COLUMN sdk_session_id TEXT;', { ignoreError: true });
+  const observationCols = sqliteTableColumns(paths.blackboardDb, 'security_review_model_observations');
+  if (!observationCols.has('billed_model_name')) runSql(paths.blackboardDb, 'ALTER TABLE security_review_model_observations ADD COLUMN billed_model_name TEXT;', { ignoreError: true });
 }
 
 function ensureWatchdogDb(paths) {

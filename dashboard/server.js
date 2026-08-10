@@ -2,6 +2,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const express = require('express');
+const Database = require('better-sqlite3');
 const { PORT, BLACKBOARD_DB, WATCHDOG_DB, GLADOS_AGENT_WORKSPACES, GLADOS_INVESTIGATIONS_DIR, GLADOS_RUNTIME_DIR } = require('./lib/config');
 const reports = require('./lib/reports');
 const agentDetails = require('./lib/agent-details');
@@ -14,6 +15,12 @@ const {
   sseFrame,
 } = require('./lib/transcript-store');
 const { ControllerLite } = require('./lib/controller');
+const {
+  appendRuntimeModelObservation,
+  discoveryWorkerIdFromPrompt,
+  finalizeDiscoveryWorker,
+} = require('./lib/security-review/deep-scan');
+const { fetchLiteLlmAttestation, observationId } = require('./lib/litellm-attestation');
 const { activeTurnConflict } = require('./lib/chat-turn-admission');
 const { isKickoffApproval, isKickoffCancel, isNetReconRequested, resolveKickoffResources } = require('./lib/kickoff-intent');
 const { getLiteLlmUsage } = require('./lib/litellm-usage');
@@ -176,13 +183,15 @@ app.get('/api/investigation-sessions', (req, res) => {
 
 app.post('/api/investigation-sessions', (req, res) => {
   if (activeChatTurns.size || activeSubagentTurns.size) return res.status(409).json({ ok: false, error: 'stop active agent turns before creating a new investigation' });
+  const agentStatusReset = resetMutableAgentStatus(GLADOS_AGENT_WORKSPACES);
+  if (agentStatusReset.errors.length) return res.status(500).json({ ok: false, error: `could not isolate mutable agent status: ${agentStatusReset.errors.join('; ')}` });
   const session = investigationSessions.create({ name: req.body?.name, metadata: req.body?.metadata, activate: req.body?.activate !== false });
   pendingGladosKickoff = null;
   resumeContinuationQueue.length = 0;
   approvedPlanQueue.length = 0;
   approvedPlanQueueIds.clear();
   broadcastLobby('investigation-session-changed', { activeId: session.id, session });
-  res.status(201).json({ ok: true, session, sessions: investigationSessions.list() });
+  res.status(201).json({ ok: true, session, sessions: investigationSessions.list(), agentStatusReset });
 });
 
 app.post('/api/investigation-sessions/:id/archive', (req, res) => {
@@ -238,10 +247,12 @@ app.delete('/api/investigation-sessions/:id', (req, res) => {
 app.post('/api/investigation-sessions/:id/activate', (req, res) => {
   if (activeChatTurns.size || activeSubagentTurns.size) return res.status(409).json({ ok: false, error: 'stop active agent turns before switching investigations' });
   try {
+    const agentStatusReset = resetMutableAgentStatus(GLADOS_AGENT_WORKSPACES);
+    if (agentStatusReset.errors.length) return res.status(500).json({ ok: false, error: `could not isolate mutable agent status: ${agentStatusReset.errors.join('; ')}` });
     const session = investigationSessions.activate(req.params.id);
     pendingGladosKickoff = null;
     broadcastLobby('investigation-session-changed', { activeId: session.id, session });
-    res.json({ ok: true, session, sessions: investigationSessions.list() });
+    res.json({ ok: true, session, sessions: investigationSessions.list(), agentStatusReset });
   } catch (error) {
     res.status(404).json({ ok: false, error: error.message });
   }
@@ -253,7 +264,7 @@ const buffers = new Map(); // agentId -> array of events (newest last)
 const sseClients = new Map(); // agentId -> Set<{ res, includeStream }>
 const lobbyClients = new Set(); // /api/agents SSE subscribers
 const activeChatTurns = new Map(); // agentId -> { turnId, startedAt, messagePreview, message, abortController, interrupt }
-const activeSubagentTurns = new Map(); // agentId -> { sessionId, startedAt, parentAgentId, parentTurnId, toolCallId, taskPrompt }
+const activeSubagentTurns = new Map(); // session/tool-call -> { agentId, sessionId, startedAt, parentAgentId, parentTurnId, toolCallId, taskPrompt }
 const activeTaskToolIds = new Map(); // toolCallId -> agentId
 const resumeCoordinator = new ResumeCoordinator({
   filePath: path.join(GLADOS_RUNTIME_DIR, 'state', 'paused-agent-work.json'),
@@ -323,7 +334,7 @@ function listAgentIds() {
 
 function currentSessionForAgent(agentId, sessionId = activeInvestigationSession().id) {
   const turn = activeChatTurns.get(runtimeKey(sessionId, agentId));
-  const subagent = activeSubagentTurns.get(runtimeKey(sessionId, agentId));
+  const subagent = [...activeSubagentTurns.values()].find(row => row.investigationSessionId === sessionId && row.agentId === agentId);
   if (!turn && !subagent) return null;
   if (subagent && !turn) {
     return {
@@ -372,7 +383,7 @@ function isAllowedSubagentDispatch(parentAgentId, targetAgentId) {
 
 function startSubagentTurn(sessionId, parentAgentId, targetAgent, { toolCallId = null, parentTurnId = null, messagePreview = '', taskPrompt = '' } = {}) {
   if (!targetAgent || targetAgent === parentAgentId) return;
-  const key = runtimeKey(sessionId, targetAgent);
+  const key = runtimeKey(sessionId, toolCallId || targetAgent);
   const existing = activeSubagentTurns.get(key);
   if (toolCallId) activeTaskToolIds.set(toolCallId, { sessionId, agentId: targetAgent });
   if (existing?.live) {
@@ -388,6 +399,8 @@ function startSubagentTurn(sessionId, parentAgentId, targetAgent, { toolCallId =
   const startedAt = Date.now();
   activeSubagentTurns.set(key, {
     live: true,
+    agentId: targetAgent,
+    investigationSessionId: sessionId,
     sessionId: subagentSessionId,
     startedAt,
     parentAgentId,
@@ -401,8 +414,10 @@ function startSubagentTurn(sessionId, parentAgentId, targetAgent, { toolCallId =
 
 function finishSubagentTurn(sessionId, targetAgent, { toolCallId = null, reason = null } = {}) {
   if (!targetAgent) return;
-  const key = runtimeKey(sessionId, targetAgent);
-  const turn = activeSubagentTurns.get(key);
+  const key = toolCallId
+    ? runtimeKey(sessionId, toolCallId)
+    : [...activeSubagentTurns.entries()].find(([, row]) => row.investigationSessionId === sessionId && row.agentId === targetAgent)?.[0];
+  const turn = key ? activeSubagentTurns.get(key) : null;
   if (!turn) {
     if (toolCallId) activeTaskToolIds.delete(toolCallId);
     return;
@@ -416,15 +431,59 @@ function finishSubagentTurn(sessionId, targetAgent, { toolCallId = null, reason 
 function finishSubagentsForTurn(sessionId, parentAgentId, parentTurnId, reason = 'parent turn ended') {
   for (const [, turn] of [...activeSubagentTurns.entries()]) {
     if (turn.parentAgentId === parentAgentId && (!parentTurnId || turn.parentTurnId === parentTurnId)) {
-      finishSubagentTurn(sessionId, activeTaskToolIds.get(turn.toolCallId)?.agentId, { toolCallId: turn.toolCallId, reason });
+      finishSubagentTurn(sessionId, turn.agentId || activeTaskToolIds.get(turn.toolCallId)?.agentId, { toolCallId: turn.toolCallId, reason });
     }
   }
 }
 
-function sendMessageToAgentTrackedRuntime(agentId, message, sessionId = activeInvestigationSession().id) {
+function securityReviewArtifactRootFromPrompt(message) {
+  const value = String(message || '').match(/^artifact_root:\s*(.+)$/m)?.[1]?.trim();
+  if (!value || !path.isAbsolute(value)) return null;
+  const resolved = path.resolve(value);
+  const investigations = path.resolve(GLADOS_INVESTIGATIONS_DIR);
+  return resolved.startsWith(`${investigations}${path.sep}`) ? resolved : null;
+}
+
+const SECURITY_REVIEW_TRACK_ROLES = [
+  'authorization-access-control',
+  'data-flow-injection',
+  'secrets-history',
+  'resilience-error-handling',
+  'iac-config-manifests',
+  'cryptography-suppressions',
+];
+
+function securityReviewRoleFromDispatch(agentId, prompt = '') {
+  if (agentId === 'glados') return 'coordinator';
+  if (agentId === 'source-review-validator') return 'source-review-validator';
+  if (agentId !== 'source-code') return null;
+  const text = String(prompt || '');
+  const explicit = text.match(/security_review_role:\s*([a-z0-9-]+)/i)?.[1]?.toLowerCase();
+  if (SECURITY_REVIEW_TRACK_ROLES.includes(explicit)) return explicit;
+  const namedTrack = SECURITY_REVIEW_TRACK_ROLES.find(role => new RegExp(`(?:track|security_review_role)[:=\\s]+${role}`, 'i').test(text));
+  if (namedTrack) return namedTrack;
+  if (explicit === 'historical-regression') return explicit;
+  return 'source-code-primary';
+}
+
+function sendMessageToAgentTrackedRuntime(agentId, message, sessionId = activeInvestigationSession().id, context = {}) {
+  const turnId = startChatTurn(sessionId, agentId, message);
+  const turn = activeChatTurns.get(runtimeKey(sessionId, agentId));
+  const promise = sendMessageToAgentRuntime(sessionId, agentId, message, {
+    turnId,
+    recordPrompt: true,
+    securityReviewArtifactRoot: securityReviewArtifactRootFromPrompt(message),
+    engagementId: context.engagementId || null,
+    controllerJobId: context.controllerJobId || null,
+    modelOverride: context.modelOverride || null,
+  }).then(result => {
+    const error = harnessResultError(result);
+    if (error) throw new Error(error);
+    return result;
+  }).finally(() => finishChatTurn(sessionId, agentId, turnId));
   return {
-    child: null,
-    promise: sendMessageToAgentRuntime(sessionId, agentId, message),
+    child: { kill: signal => stopChatTurn(sessionId, agentId, signal || 'controller stop') },
+    promise,
   };
 }
 
@@ -477,6 +536,20 @@ function startChatTurn(sessionId, agentId, message) {
   });
   broadcastLobby('chat-turn-started', { investigationSessionId: sessionId, agentId, turnId, startedAt });
   return turnId;
+}
+
+function activeSubagentConflict(sessionId, agentId) {
+  const turn = [...activeSubagentTurns.values()].find(row => row.investigationSessionId === sessionId && row.agentId === agentId);
+  if (!turn) return null;
+  return {
+    ok: false,
+    error: `${agentId} is already running as a GLaDOS-owned subagent`,
+    code: 'GLADOS_SUBAGENT_ALREADY_ACTIVE',
+    agentId,
+    turnId: turn.toolCallId || turn.sessionId,
+    startedAt: turn.startedAt,
+    ageMs: Math.max(0, Date.now() - Number(turn.startedAt || Date.now())),
+  };
 }
 
 function attachChatTurnInterrupt(sessionId, agentId, turnId, interrupt) {
@@ -587,19 +660,127 @@ function admitUserTranscript(sessionId, agentId, text, clientId) {
   return ev;
 }
 
-async function sendMessageToAgentRuntime(sessionId, agentId, message, { turnId = null, recordPrompt = true } = {}) {
-  if (recordPrompt) recordUserTranscript(sessionId, agentId, message, { runtime: 'agent-sdk' });
+async function sendMessageToAgentRuntime(sessionId, agentId, message, {
+  turnId = null,
+  recordPrompt = true,
+  securityReviewArtifactRoot = null,
+  abortSignal = null,
+  engagementId = null,
+  controllerJobId = null,
+  modelOverride = null,
+} = {}) {
+  if (recordPrompt) recordUserTranscript(sessionId, agentId, message, {
+    runtime: 'agent-sdk', engagementId, controllerJobId,
+  });
   const turn = turnId ? activeChatTurns.get(runtimeKey(sessionId, agentId)) : null;
   let events = [];
+  const securityReviewRolesByToolCall = new Map();
+  const securityReviewWorkersByToolCall = new Map();
+  const securityReviewAttestations = new Map();
+  const persistAttestation = request => {
+    if (securityReviewAttestations.has(request.requestId)) return securityReviewAttestations.get(request.requestId);
+    const pending = (async () => {
+      const stamp = new Date().toISOString();
+      const db = new Database(BLACKBOARD_DB);
+      try {
+        db.prepare(`
+          INSERT INTO security_review_llm_requests
+            (request_id, engagement_id, controller_job_id, agent_id, review_role, worker_id, requested_model, status, observed_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+          ON CONFLICT(request_id) DO NOTHING
+        `).run(request.requestId, engagementId, controllerJobId, request.agentId, request.reviewRole,
+          request.workerId, request.requestedModel, stamp);
+        const owner = db.prepare('SELECT engagement_id FROM security_review_llm_requests WHERE request_id=?').get(request.requestId);
+        if (owner?.engagement_id !== engagementId) {
+          db.prepare("UPDATE security_review_llm_requests SET status='CONFLICT', last_error='request ID reused across engagements' WHERE request_id=?").run(request.requestId);
+          return null;
+        }
+      } finally { db.close(); }
+      const evidence = await fetchLiteLlmAttestation(request.requestId, { env: process.env });
+      if (!evidence.available) {
+        const unresolved = new Database(BLACKBOARD_DB);
+        try {
+          unresolved.prepare(`
+            UPDATE security_review_llm_requests
+            SET status='UNRESOLVED', lookup_attempts=?, last_error=?
+            WHERE request_id=? AND engagement_id=?
+          `).run(Number(evidence.attempts || 1), evidence.reason, request.requestId, engagementId);
+        } finally { unresolved.close(); }
+        return null;
+      }
+      const id = observationId({
+        engagementId, requestId: request.requestId, role: request.reviewRole,
+        workerId: request.workerId, gatewayModelId: evidence.gatewayModelId,
+      });
+      const settledAt = new Date().toISOString();
+      const settled = new Database(BLACKBOARD_DB);
+      try {
+        settled.prepare(`
+          INSERT INTO security_review_model_observations
+            (observation_id, engagement_id, controller_job_id, agent_id, review_role, worker_id,
+             requested_model, actual_model, billed_model_name, source, request_id, gateway_model_id, cost_usd, observed_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'litellm:spend-log', ?, ?, ?, ?)
+          ON CONFLICT(observation_id) DO NOTHING
+        `).run(id, engagementId, controllerJobId, request.agentId, request.reviewRole, request.workerId,
+          request.requestedModel, evidence.actualModel, evidence.billedModelName, request.requestId,
+          evidence.gatewayModelId, evidence.costUsd, settledAt);
+        settled.prepare(`
+          UPDATE security_review_llm_requests
+          SET status='SETTLED', lookup_attempts=?, last_error=NULL, settled_at=?
+          WHERE request_id=? AND engagement_id=?
+        `).run(Number(evidence.attempts || 1), settledAt, request.requestId, engagementId);
+      } finally { settled.close(); }
+      appendRuntimeModelObservation(securityReviewArtifactRoot, {
+        observation_id: id,
+        agent_id: request.agentId,
+        review_role: request.reviewRole,
+        worker_id: request.workerId,
+        requested_model: request.requestedModel,
+        model: evidence.actualModel,
+        billed_model_name: evidence.billedModelName,
+        source: 'litellm:spend-log',
+        request_id: request.requestId,
+        gateway_model_id: evidence.gatewayModelId,
+        cost_usd: evidence.costUsd,
+        observed_at: settledAt,
+      });
+      return id;
+    })();
+    securityReviewAttestations.set(request.requestId, pending);
+    return pending;
+  };
   try {
     const sdkCwd = resolveSdkWorkingDirectory({ env: process.env });
     const turnEnv = { ...process.env, GLADOS_SESSION_ID: sessionId };
+    const securityReviewMaxTurns = securityReviewArtifactRoot
+      ? (loadPolicy().harness?.securityReviewCoordinatorMaxTurns ?? 1000)
+      : undefined;
     events = await streamAgentTurn({
       agentId,
       prompt: message,
       store: transcriptStore,
-      onEvent: ev => {
+      onEvent: (ev, sdkMessage) => {
         const targetAgent = ev.agentId || agentId;
+        if (securityReviewArtifactRoot && ev.kind === 'tool-call' && isTaskDispatchToolName(ev.toolName) && ev.toolCallId) {
+          const child = ev.targetAgentId || targetAgentFromToolInput(ev.toolInput);
+          const dispatchPrompt = ev.toolInput?.prompt || ev.toolInput?.description || '';
+          securityReviewRolesByToolCall.set(ev.toolCallId, securityReviewRoleFromDispatch(child, dispatchPrompt));
+          const workerId = discoveryWorkerIdFromPrompt(dispatchPrompt);
+          if (workerId) securityReviewWorkersByToolCall.set(ev.toolCallId, workerId);
+        }
+        if (securityReviewArtifactRoot && sdkMessage?.type === 'assistant' && sdkMessage.request_id) {
+          persistAttestation({
+            requestId: sdkMessage.request_id,
+            agentId: targetAgent,
+            requestedModel: sdkMessage?.message?.model ? bareModelAlias(sdkMessage.message.model, { fallback: null }) : null,
+            workerId: targetAgent === agentId ? null : securityReviewWorkersByToolCall.get(ev.parentToolUseId)
+              || discoveryWorkerIdFromPrompt([...activeSubagentTurns.values()].find(row => row.toolCallId === ev.parentToolUseId)?.taskPrompt || '')
+              || null,
+            reviewRole: targetAgent === agentId
+              ? securityReviewRoleFromDispatch(agentId, message)
+              : securityReviewRolesByToolCall.get(ev.parentToolUseId) || securityReviewRoleFromDispatch(targetAgent, ''),
+          }).catch(error => console.warn('[security-review] LiteLLM attestation failed:', error.message));
+        }
         if (targetAgent !== agentId && !isAllowedSubagentDispatch(agentId, targetAgent)) return;
         if (ev.kind === 'tool-call' && isTaskDispatchToolName(ev.toolName)) {
           const child = ev.targetAgentId || targetAgentFromToolInput(ev.toolInput);
@@ -627,6 +808,15 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, { turnId =
           // liveness transition; ending here creates a false idle/active flicker.
           if (!/^Subagent launched\.?$/i.test(String(ev.text || '').trim())) {
             const task = activeTaskToolIds.get(ev.toolCallId);
+            const workerId = securityReviewWorkersByToolCall.get(ev.toolCallId);
+            if (workerId && engagementId) {
+              try {
+                finalizeDiscoveryWorker({
+                  dbPath: BLACKBOARD_DB, engagementId, toolCallId: ev.toolCallId,
+                  status: ev.isError ? 'FAILED' : 'SUCCEEDED', error: ev.isError ? ev.text : null,
+                });
+              } catch (error) { console.warn('[security-review] could not finalize worker dispatch:', error.message); }
+            }
             finishSubagentTurn(task.sessionId, task.agentId, { toolCallId: ev.toolCallId });
           }
         } else if (isAllowedSubagentDispatch(agentId, targetAgent) && (ev.kind === 'thinking-stream' || ev.kind === 'text-stream' || ev.kind === 'assistant-text' || ev.kind === 'tool-call')) {
@@ -648,7 +838,11 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, { turnId =
       },
       options: {
         cwd: sdkCwd, env: turnEnv, investigationSessionId: sessionId,
-        abortSignal: turn?.turnId === turnId ? turn.abortController?.signal : undefined,
+        engagementId, controllerJobId, model: modelOverride || undefined, modelOverride: modelOverride || undefined,
+        reviewKey: securityReviewArtifactRoot ? `${engagementId || sessionId}:${controllerJobId || securityReviewArtifactRoot}` : null,
+        reviewConcurrencyLimit: loadPolicy().harness?.securityReviewMaxExecutions ?? 3,
+        maxTurns: securityReviewMaxTurns,
+        abortSignal: turn?.turnId === turnId ? turn.abortController?.signal : abortSignal || undefined,
         onInterruptReady: interrupt => attachChatTurnInterrupt(sessionId, agentId, turnId, interrupt),
         resumeSessionId: sdkSessionRegistry.get(sessionId, agentId, sdkCwd),
         onSessionId: sdkId => sdkSessionRegistry.set(sessionId, agentId, sdkId, sdkCwd),
@@ -665,6 +859,14 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, { turnId =
       },
     });
   } finally {
+    if (securityReviewArtifactRoot && engagementId) {
+      await Promise.all([...securityReviewAttestations.values()]);
+      for (const [toolCallId, workerId] of securityReviewWorkersByToolCall) {
+        try {
+          finalizeDiscoveryWorker({ dbPath: BLACKBOARD_DB, engagementId, toolCallId, status: 'CANCELED', error: 'parent turn ended before worker reconciliation' });
+        } catch (error) { console.warn(`[security-review] could not cancel ${workerId}:`, error.message); }
+      }
+    }
     finishSubagentsForTurn(sessionId, agentId, turnId);
   }
   const finalText = events
@@ -978,14 +1180,16 @@ function resetAgentSession(sessionId, agentId) {
     }
   }
   activeChatTurns.delete(key);
-  const subagent = activeSubagentTurns.get(key);
+  const subagent = [...activeSubagentTurns.values()].find(row => row.investigationSessionId === sessionId && row.agentId === agentId);
   if (subagent?.toolCallId) activeTaskToolIds.delete(subagent.toolCallId);
-  activeSubagentTurns.delete(key);
+  for (const [subagentKey, row] of [...activeSubagentTurns.entries()]) {
+    if (row.investigationSessionId === sessionId && row.agentId === agentId) activeSubagentTurns.delete(subagentKey);
+  }
   for (const [childKey, child] of [...activeSubagentTurns.entries()]) {
     if (child.parentAgentId === agentId) {
       activeSubagentTurns.delete(childKey);
       if (child.toolCallId) activeTaskToolIds.delete(child.toolCallId);
-      const childAgentId = activeTaskToolIds.get(child.toolCallId)?.agentId || childKey.split('\0').at(-1);
+      const childAgentId = child.agentId || activeTaskToolIds.get(child.toolCallId)?.agentId || childKey.split('\0').at(-1);
       broadcastLobby('session-ended', { investigationSessionId: sessionId, agentId: childAgentId, sessionId: child.sessionId, toolCallId: child.toolCallId, reason: 'session reset' });
     }
   }
@@ -1022,7 +1226,7 @@ function clearAllRuntimeSessions(reason = 'runtime restart') {
     broadcastLobby('chat-turn-ended', { investigationSessionId: turn.sessionId, agentId: turn.agentId, turnId: turn.turnId, stopped: true, reason });
   }
   for (const [key, turn] of activeSubagentTurns.entries()) {
-    broadcastLobby('session-ended', { investigationSessionId: key.split('\0')[0], agentId: key.split('\0').at(-1), sessionId: turn.sessionId, toolCallId: turn.toolCallId, reason });
+    broadcastLobby('session-ended', { investigationSessionId: turn.investigationSessionId || key.split('\0')[0], agentId: turn.agentId, sessionId: turn.sessionId, toolCallId: turn.toolCallId, reason });
   }
   activeChatTurns.clear();
   activeSubagentTurns.clear();
@@ -1359,6 +1563,8 @@ app.post('/api/chat/:agent', async (req, res) => {
   if (!message.trim()) return res.status(400).json({ error: 'message required' });
   const conflict = activeTurnConflict(activeChatTurns, runtimeKey(session.id, agentId));
   if (conflict) return res.status(409).json(conflict);
+  const subagentConflict = activeSubagentConflict(session.id, agentId);
+  if (subagentConflict) return res.status(409).json(subagentConflict);
   let admittedEvent;
   try {
     admittedEvent = admitUserTranscript(session.id, agentId, message, req.body?.client_id);
@@ -1400,7 +1606,7 @@ async function haltAgent(agentId, reason = 'dashboard halt', initiator = 'dashbo
   let interruptedParent = null;
   const sessionId = activeInvestigationSession().id;
   const direct = activeChatTurns.get(runtimeKey(sessionId, agentId));
-  const subagent = activeSubagentTurns.get(runtimeKey(sessionId, agentId));
+  const subagent = [...activeSubagentTurns.values()].find(row => row.investigationSessionId === sessionId && row.agentId === agentId);
   if (subagent) {
     const parentTurn = activeChatTurns.get(runtimeKey(sessionId, subagent.parentAgentId));
     resumeCoordinator.capture(agentId, {
@@ -1655,7 +1861,7 @@ function planSummary(sessionId = activeInvestigationSession().id) {
   }
 }
 
-function controllerStatusPayload() {
+function controllerStatusPayload(sessionId = activeInvestigationSession().id) {
   return controller.status({
     pendingKickoff: pendingGladosKickoff ? {
       target: pendingGladosKickoff.target,
@@ -1664,7 +1870,8 @@ function controllerStatusPayload() {
     } : null,
     activeAgents: activeAgentStatus(),
     targetHealth: watchdogHealth.listHealth(),
-    plans: planSummary(activeInvestigationSession().id),
+    plans: planSummary(sessionId),
+    sessionId,
   });
 }
 
@@ -1701,7 +1908,7 @@ async function runSlash(raw, sessionId = activeInvestigationSession().id) {
     if (!arg) emit('usage: /probe <url>');
     else emit(JSON.stringify(await probeTarget(arg), null, 2));
   } else if (cmd === '/status') {
-    emit(slash.formatStatus(controllerStatusPayload()));
+    emit(slash.formatStatus(controllerStatusPayload(sessionId)));
   } else if (cmd === '/goal' || cmd === '/investigate') {
     if (!arg) {
       emit(cmd === '/investigate' ? slash.investigateReadyPrompt() : slash.targetUsage(cmd));
@@ -1716,11 +1923,24 @@ async function runSlash(raw, sessionId = activeInvestigationSession().id) {
   } else if (cmd === '/security-review') {
     const review = slash.parseSecurityReviewArg(arg);
     if (!review.ok) {
-      emit(`${review.error}\nusage: /security-review [--blind|--regression|--informed] <url|domain|local-path>`);
+      emit(`${review.error}\nusage: /security-review [--blind|--regression|--informed] [--time-limit 60m] [--single-model alias] <url|domain|local-path>`);
     } else if (review.isLocalPath) {
-      const goal = controller.createSecurityReviewGoal(path.resolve(review.target), { source: cmd, target_kind: 'local_path', context_mode: review.mode });
-      const job = controller.enqueueSecurityReviewPath(review.target, { goalId: goal.id, engagementId: goal.engagement_id, contextMode: review.mode });
-      emit(`Queued staged source-code security review for \`${job.target}\`.\nJob: ${job.id}\nContext mode: ${review.mode}.\nWorkflow: inventory, blind discovery, six specialist tracks, omission-focused validation, and hard completion gates${review.mode === 'blind' ? '; prior-report lookup and regression are prohibited for this run' : '; historical regression follows the selected context policy'}.`);
+      const goal = controller.createSecurityReviewGoal(path.resolve(review.target), {
+        source: cmd, target_kind: 'local_path', context_mode: review.mode,
+        max_duration_minutes: review.maxDurationMinutes, single_model: review.singleModel,
+      });
+      const job = controller.enqueueSecurityReviewPath(review.target, {
+        goalId: goal.id,
+        engagementId: goal.engagement_id,
+        contextMode: review.mode,
+        maxDurationMinutes: review.maxDurationMinutes,
+        discoveryConcurrency: loadPolicy().harness?.securityReviewDiscoveryConcurrency ?? 3,
+        specialistConcurrency: loadPolicy().harness?.securityReviewSpecialistConcurrency ?? 3,
+        allowedModels: review.singleModel ? [review.singleModel] : [],
+        requireModelDiversity: !review.singleModel,
+        modelDiversityWaiver: review.singleModel ? `Operator approved a single-model review using ${review.singleModel} in this slash command.` : null,
+      });
+      emit(`Queued deep source-code security review for \`${job.target}\`.\nJob: ${job.id}\nContext mode: ${review.mode}.\nTime ceiling: ${review.maxDurationMinutes ? `${review.maxDurationMinutes} minutes` : 'none; completion is saturation and gate driven'}.\nConcurrency: up to ${loadPolicy().harness?.securityReviewDiscoveryConcurrency ?? 3} blind workers and ${loadPolicy().harness?.securityReviewSpecialistConcurrency ?? 3} specialists per batch.\nModel policy: ${review.singleModel ? `${review.singleModel} only (operator-approved diversity waiver)` : 'configured review models with diversity required'}.\nWorkflow: threat model, durable repeated discovery workers, centralized deduplication, six specialist tracks, candidate validation, attack-path analysis, omission-focused validation, and sealed hard completion gates${review.mode === 'blind' ? '; prior-report lookup and regression are prohibited for this run' : '; historical regression follows the selected context policy'}.`);
     } else if (review.isUrlOrDomain) {
       const target = normalizeTarget(review.target);
       const goal = controller.createGoal({
@@ -1732,7 +1952,7 @@ async function runSlash(raw, sessionId = activeInvestigationSession().id) {
       const kickoff = createPendingGladosKickoff(target, raw, { goalId: goal.id, source: 'slash-security-review' });
       if (kickoff.event) events.push(kickoff.event);
     } else {
-      emit('usage: /security-review [--blind|--regression|--informed] <url|domain|local-path>');
+      emit('usage: /security-review [--blind|--regression|--informed] [--time-limit 60m] [--single-model alias] <url|domain|local-path>');
     }
   } else if (cmd === '/clear') {
     return { ok: true, events, action: { type: 'clear-local-transcript' } };
@@ -1754,7 +1974,9 @@ app.post('/api/slash/run', async (req, res) => {
 });
 
 app.get('/api/controller/status', (req, res) => {
-  try { res.json({ ok: true, ...controllerStatusPayload() }); }
+  const session = requireSession(req, res);
+  if (!session) return;
+  try { res.json({ ok: true, ...controllerStatusPayload(session.id) }); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 

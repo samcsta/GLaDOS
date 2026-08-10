@@ -46,9 +46,10 @@ test('engagement completion records completion only after every task is terminal
   assert.equal(completed.status, 'complete');
   assert.ok(completed.completed_at);
 
-  const reopened = updateEngagement(db, { engagementId: 'eng-2', status: 'active' });
-  assert.equal(reopened.status, 'active');
-  assert.equal(reopened.completed_at, null);
+  assert.throws(
+    () => updateEngagement(db, { engagementId: 'eng-2', status: 'active' }),
+    /cannot reopen terminal engagement/
+  );
   db.close();
 });
 

@@ -13,6 +13,7 @@ const state = {
   currentSessionId: null,
   sessionGeneration: 0,
   overview: null,
+  securityReviews: [],
   agentFilter: (() => { try { return localStorage.getItem('glados-dash.agent-filter') || 'all'; } catch { return 'all'; } })(),
   agentQuery: (() => { try { return localStorage.getItem('glados-dash.agent-query') || ''; } catch { return ''; } })(),
   notifications: (() => {
@@ -29,6 +30,8 @@ const state = {
 const tabsEl = document.getElementById('tabs');
 const paneEl = document.getElementById('pane');
 const agentListEl = document.getElementById('agent-list');
+const securityReviewsEl = document.getElementById('security-reviews');
+const securityReviewListEl = document.getElementById('security-review-list');
 const eventsEl = document.getElementById('events');
 const errorsOnlyEl = document.getElementById('errors-only');
 const debugModeEl = document.getElementById('debug-mode');
@@ -87,7 +90,7 @@ async function activateInvestigationSession(sessionId) {
   state.investigationSessions = body.sessions || [];
   clearPlanClientState();
   persistWorkspaceState();
-  await loadAgents();
+  await Promise.all([loadAgents(), loadSecurityReviews()]);
   renderPane();
   if (!state._lobbySource) subscribeLobby();
 }
@@ -108,7 +111,7 @@ async function createInvestigationSession() {
   state.investigationSessions = body.sessions || [];
   clearPlanClientState();
   persistWorkspaceState();
-  await loadAgents();
+  await Promise.all([loadAgents(), loadSecurityReviews()]);
   renderPane();
   if (!state._lobbySource) subscribeLobby();
   return body.session;
@@ -133,7 +136,7 @@ async function deleteInvestigationSession(sessionId) {
   state.investigationSessions = body.sessions || [];
   clearPlanClientState();
   persistWorkspaceState();
-  await loadAgents();
+  await Promise.all([loadAgents(), loadSecurityReviews()]);
   renderPane();
   subscribeLobby();
 }
@@ -518,6 +521,68 @@ function renderAgentList() {
     agentListEl.appendChild(empty);
   }
   syncAgentViewToolbars();
+}
+
+function parseUtcTimestamp(value) {
+  if (!value) return null;
+  const text = String(value);
+  const normalized = /(?:Z|[+-]\d\d:\d\d)$/i.test(text) ? text : `${text.replace(' ', 'T')}Z`;
+  const time = Date.parse(normalized);
+  return Number.isFinite(time) ? time : null;
+}
+
+function securityReviewElapsed(job, now = Date.now()) {
+  const started = parseUtcTimestamp(job.started_at);
+  if (!started) return null;
+  const finished = parseUtcTimestamp(job.finished_at);
+  return Math.max(0, (finished || now) - started);
+}
+
+function updateSecurityReviewTimes() {
+  document.querySelectorAll('[data-security-review-started]').forEach(element => {
+    const started = parseUtcTimestamp(element.dataset.securityReviewStarted);
+    if (!started) return;
+    element.textContent = formatElapsed(Date.now() - started);
+  });
+}
+
+function renderSecurityReviews() {
+  if (!securityReviewsEl || !securityReviewListEl) return;
+  const reviews = state.securityReviews || [];
+  securityReviewsEl.classList.toggle('hidden', reviews.length === 0);
+  const count = document.getElementById('security-review-count');
+  if (count) count.textContent = String(reviews.length);
+  securityReviewListEl.innerHTML = reviews.map(job => {
+    const progress = job.progress || {};
+    const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+    const started = job.started_at || '';
+    const elapsed = securityReviewElapsed(job);
+    const target = String(job.target || 'repository').split(/[\\/]/).filter(Boolean).at(-1) || 'repository';
+    return `<article class="security-review-card ${escapeHtml(job.status || 'queued')}" data-security-review-id="${escapeHtml(job.id)}">
+      <div class="security-review-card-head"><strong title="${escapeHtml(job.target || '')}">${escapeHtml(target)}</strong><span>${escapeHtml(job.status || 'queued')}</span></div>
+      <div class="security-review-phase"><span>${escapeHtml(progress.phase || 'Initializing')}</span><time ${started ? `data-security-review-started="${escapeHtml(started)}"` : ''}>${elapsed == null ? 'not started' : formatElapsed(elapsed)}</time></div>
+      <div class="security-review-progress" role="progressbar" aria-label="${escapeHtml(target)} security review progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>
+      <p>${escapeHtml(progress.detail || '')}</p>
+    </article>`;
+  }).join('');
+  securityReviewListEl.querySelectorAll('.security-review-card').forEach(card => {
+    card.addEventListener('click', openGladosChat);
+  });
+  updateSecurityReviewTimes();
+}
+
+let securityReviewLoadPending = false;
+async function loadSecurityReviews() {
+  if (securityReviewLoadPending || !state.currentSessionId) return;
+  securityReviewLoadPending = true;
+  try {
+    const response = await fetch(withSession('/api/controller/status'));
+    const body = await response.json();
+    if (!response.ok || !body.ok) throw new Error(body.error || 'could not load security reviews');
+    state.securityReviews = body.securityReviews || [];
+    renderSecurityReviews();
+  } catch {}
+  finally { securityReviewLoadPending = false; }
 }
 
 function openOverview() {
@@ -1691,7 +1756,10 @@ async function refreshChatTurnStatus(tabId, agentId) {
 }
 
 function refreshVisibleChatTurnStatuses() {
-  if (state.transcripts.has('glados-chat')) refreshChatTurnStatus('glados-chat', 'glados');
+  const tab = state.openTabs.find(item => item.id === state.currentTab);
+  if (!tab || !['chat', 'agent'].includes(tab.kind)) return;
+  const agentId = tab.kind === 'chat' ? 'glados' : tab.id;
+  refreshChatTurnStatus(tab.id, agentId);
 }
 
 function handleStreamDelta(rec, ev) {
@@ -1844,22 +1912,7 @@ function attachScrollTracker(container, rec) {
 }
 
 function renderAgentPane(agentId) {
-  const pane = document.createElement('div');
-  pane.className = 'agent-pane';
-  pane.appendChild(createAgentViewToolbar(agentId));
-  const wrap = document.createElement('div');
-  wrap.className = 'transcript';
-  pane.appendChild(wrap);
-  paneEl.appendChild(pane);
-  syncAgentViewToolbars(agentId);
-
-  const rec = ensureTranscript(agentId, agentId);
-  rec.el = wrap;
-  rec.autoScroll = true;
-  attachScrollTracker(wrap, rec);
-  for (const ev of rec.events) appendEntry(wrap, ev, rec);
-  scrollToBottom(wrap, rec);
-  setTimeout(() => focusTranscriptProvenance(rec), 0);
+  renderAgentChatSurface(agentId, agentId, false);
 }
 
 // v4 — Chat input history + retry.
@@ -1978,7 +2031,7 @@ function installChatRetryContextMenu(entryEl, agentId, msg) {
   });
 }
 
-function renderChatPane() {
+function renderLegacyChatPane() {
   const chat = document.createElement('div');
   chat.className = 'chat-pane chat-visual-chamber';
   const toolbar = createAgentViewToolbar('glados');
@@ -2095,12 +2148,110 @@ function renderChatPane() {
   });
 }
 
+function chatElement(root, selector, tabId) {
+  return root?.querySelector(`${selector}[data-chat-tab="${CSS.escape(tabId)}"]`) || null;
+}
+
+function renderAgentChatSurface(agentId, tabId, coordinator) {
+  const label = agentId === 'glados' ? 'GLaDOS' : agentId;
+  const chat = document.createElement('div');
+  chat.className = 'chat-pane chat-visual-chamber';
+  chat.dataset.agent = agentId;
+  chat.style.setProperty('--agent-feed-label', `"${String(label).toUpperCase()} / CHAMBER FEED"`);
+  chat.appendChild(createAgentViewToolbar(agentId));
+
+  const transcript = document.createElement('div');
+  transcript.className = 'transcript';
+  const sendingEl = document.createElement('div');
+  sendingEl.className = 'sending-indicator';
+  sendingEl.dataset.chatTab = tabId;
+  sendingEl.style.display = 'none';
+  const inputRow = document.createElement('div');
+  inputRow.className = 'chat-input';
+  inputRow.innerHTML = `
+    <textarea data-chat-tab="${escapeHtml(tabId)}" placeholder="Talk to ${escapeHtml(label)} (Enter to send, Shift+Enter for newline)…"></textarea>
+    <button type="button" data-chat-send data-chat-tab="${escapeHtml(tabId)}">Send</button>
+    <button type="button" data-chat-stop data-chat-tab="${escapeHtml(tabId)}" class="secondary" title="Stop the current response" disabled>Stop</button>
+  `;
+  chat.append(transcript, sendingEl, inputRow);
+  paneEl.appendChild(chat);
+  syncAgentViewToolbars(agentId);
+
+  const rec = ensureTranscript(tabId, agentId);
+  rec.el = transcript;
+  rec.autoScroll = true;
+  attachScrollTracker(transcript, rec);
+  for (const ev of rec.events) appendEntry(transcript, ev, rec);
+  setTimeout(() => focusTranscriptProvenance(rec), 0);
+  scrollToBottom(transcript, rec);
+  updateSendingIndicator(tabId);
+  refreshChatTurnStatus(tabId, agentId);
+
+  const ta = chatElement(chat, 'textarea', tabId);
+  const dispatch = override => {
+    const msg = override !== undefined ? override : ta.value.trim();
+    if (!msg) return;
+    if (coordinator && msg.startsWith('/')) {
+      if (override === undefined) { ta.value = ''; ta.focus(); }
+      runSlashCommand(msg, rec);
+      return;
+    }
+    if (override === undefined) {
+      ta.value = '';
+      ta.focus();
+      ta._gladosHistoryReset?.();
+      ta._gladosAutoGrow?.();
+    }
+    pushChatHistory(agentId, msg);
+    const clientId = `user-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const optimistic = { kind: 'user-message', text: msg, ts: Date.now(), _optimistic: true, clientId };
+    rec.events.push(optimistic);
+    rec.pendingUserMessages.push({ clientId, text: msg, ts: optimistic.ts });
+    rec.autoScroll = true;
+    if (rec.el?.isConnected) appendEntry(rec.el, optimistic, rec);
+    rec.sending = true;
+    rec.activity = 'waiting';
+    rec.turnStartedAt = Date.now();
+    rec.turnAgeMs = 0;
+    rec.firstTokenSeenAt = null;
+    rec.completedAt = null;
+    updateSendingIndicator(tabId);
+    fetch(`/api/chat/${encodeURIComponent(agentId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg, client_id: clientId, session_id: state.currentSessionId }),
+    }).then(async response => ({ response, body: await response.json().catch(() => ({})) })).then(({ response, body }) => {
+      if (!response.ok || !body.ok) {
+        pushNotification('error', body.error || `${label} could not start`, { toast: true, label: 'Agent chat' });
+        finishTranscriptTurn(rec, tabId);
+      }
+    }).catch(error => {
+      pushNotification('error', `${label} chat failed: ${error.message}`, { toast: true, label: 'Agent chat' });
+      finishTranscriptTurn(rec, tabId);
+    });
+  };
+  chatRetriers.set(agentId, msg => dispatch(msg));
+  chat.querySelector('[data-chat-send]').addEventListener('click', () => dispatch());
+  chat.querySelector('[data-chat-stop]').addEventListener('click', () => stopChatTurnFromUi(tabId, agentId));
+  attachChatHistoryNav(ta, agentId);
+  attachAutoGrow(ta, {});
+  if (coordinator) attachSlashMenu(ta, inputRow, line => { ta.value = line; dispatch(); });
+  ta.addEventListener('keydown', event => {
+    if (event.defaultPrevented) return;
+    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); dispatch(); }
+  });
+}
+
+function renderChatPane() {
+  renderAgentChatSurface('glados', 'glados-chat', true);
+}
+
 async function stopChatTurnFromUi(tabId, agentId) {
   const rec = state.transcripts.get(tabId);
   if (!rec?.sending) return;
   rec.activity = 'stopping';
   updateSendingIndicator(tabId);
-  const btn = document.getElementById('chat-stop');
+  const btn = document.querySelector(`[data-chat-stop][data-chat-tab="${CSS.escape(tabId)}"]`);
   if (btn) {
     btn.disabled = true;
     btn.textContent = 'Stopping...';
@@ -2123,7 +2274,7 @@ async function stopChatTurnFromUi(tabId, agentId) {
 function updateChatInputControls(tabId) {
   if (state.currentTab !== tabId) return;
   const rec = state.transcripts.get(tabId);
-  const stopBtn = document.getElementById('chat-stop');
+  const stopBtn = document.querySelector(`[data-chat-stop][data-chat-tab="${CSS.escape(tabId)}"]`);
   if (!stopBtn) return;
   const stopping = rec?.activity === 'stopping';
   stopBtn.disabled = !rec?.sending || stopping;
@@ -2132,11 +2283,11 @@ function updateChatInputControls(tabId) {
 
 function updateSendingIndicator(tabId) {
   if (state.currentTab !== tabId) return;
-  const el = document.getElementById('sending-indicator');
+  const el = document.querySelector(`.sending-indicator[data-chat-tab="${CSS.escape(tabId)}"]`);
   if (!el) return;
   const rec = state.transcripts.get(tabId);
   el.style.display = rec?.sending ? 'block' : 'none';
-  if (rec?.sending) el.textContent = transcriptStatusText(rec, 'GLaDOS');
+  if (rec?.sending) el.textContent = transcriptStatusText(rec, rec.agentId === 'glados' ? 'GLaDOS' : rec.agentId);
   updateChatInputControls(tabId);
 }
 
@@ -4392,6 +4543,7 @@ async function runSlashCommand(raw, rec) {
       return;
     }
     for (const ev of j.events || []) renderReturnedEvent(ev);
+    if (/^\/security-review\b/i.test(raw)) loadSecurityReviews();
     if (!r.ok && !(j.events || []).length) {
       renderReturnedEvent({ kind: 'assistant-text', text: 'error: ' + (j.error || r.statusText), ts: Date.now(), _optimistic: true });
     }
@@ -4401,6 +4553,8 @@ async function runSlashCommand(raw, rec) {
 }
 
 setInterval(loadAgents, 15000);
+setInterval(loadSecurityReviews, 5000);
+setInterval(updateSecurityReviewTimes, 1000);
 setInterval(refreshVisibleChatTurnStatuses, 2500);
 
 // v4 — Plan-approval workflow. Pending-plan badge + Plans pane.
@@ -4860,7 +5014,7 @@ function wirePersistentLayout() {
   }
 })();
 
-loadInvestigationSessions().then(loadAgents).then(() => {
+loadInvestigationSessions().then(() => Promise.all([loadAgents(), loadSecurityReviews()])).then(() => {
   const allowedStatic = new Set(['overview', 'glados-chat', 'plans', 'reports', 'settings', 'terminal', 'proxy', 'update']);
   const agentIds = new Set(state.agents.map(agent => agent.id).filter(id => id !== 'glados'));
   const savedTabs = storageGetJson('glados-dash.open-tabs', []);

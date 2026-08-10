@@ -176,9 +176,9 @@ test('source security review uses staged coordinator and independent validator c
   const validatorRunbook = fs.readFileSync(path.join(ROOT, 'templates/agents/default/source-review-validator/RUNBOOK.md'), 'utf8');
   assert.equal(registry.some(agent => agent.id === 'source-review-validator' && agent.enabled), true);
   assert.equal(policy.taskDispatch.allowAgents.includes('source-review-validator'), true);
-  assert.match(controller, /security_review_workflow_v2/);
+  assert.match(controller, /security_review_workflow_v3/);
   assert.match(controller, /securityReviewCoordinatorPrompt/);
-  assert.match(gladosRunbook, /SOURCE SECURITY REVIEW WORKFLOW v2/);
+  assert.match(gladosRunbook, /SOURCE SECURITY REVIEW WORKFLOW v3/);
   assert.match(sourceRunbook, /authorization-access-control/);
   assert.match(sourceRunbook, /historical-regression/);
   assert.match(validatorRunbook, /omitted classes/i);
@@ -259,7 +259,7 @@ test('v4 operator workspace exposes overview, search, provenance, notifications,
   const app = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
   const styles = fs.readFileSync(path.join(ROOT, 'dashboard/public/styles.css'), 'utf8');
   const server = fs.readFileSync(path.join(ROOT, 'dashboard/server.js'), 'utf8');
-  for (const id of ['open-overview', 'agent-search', 'notifications-toggle', 'notification-drawer', 'sidebar-splitter', 'events-splitter']) {
+  for (const id of ['open-overview', 'agent-search', 'security-review-list', 'notifications-toggle', 'notification-drawer', 'sidebar-splitter', 'events-splitter']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.doesNotMatch(html, /investigation-session-select|new-investigation-session|session-picker/);
@@ -275,6 +275,14 @@ test('v4 operator workspace exposes overview, search, provenance, notifications,
   assert.match(app, /function renderOverviewFindings\(/);
   assert.match(app, /function renderOverviewPlan\(/);
   assert.match(app, /function renderOverviewProgress\(/);
+  assert.match(app, /function renderSecurityReviews\(/);
+  assert.match(app, /function renderAgentChatSurface\(/);
+  assert.match(app, /renderAgentChatSurface\(agentId, agentId, false\)/);
+  assert.match(app, /\/api\/chat\/\$\{encodeURIComponent\(agentId\)\}/);
+  assert.match(styles, /\.security-review-progress/);
+  assert.match(fs.readFileSync(path.join(ROOT, 'dashboard/public/chat-alternate.css'), 'utf8'), /--agent-feed-label/);
+  assert.match(app, /\/api\/controller\/status/);
+  assert.match(styles, /\.security-review-progress/);
   assert.match(app, /data-overview-reports/);
   assert.match(server, /topFindings = db\.prepare/);
   assert.match(server, /plan\.objective = planDocument\.terminal_objective/);

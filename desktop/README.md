@@ -1,6 +1,6 @@
 # GLaDOS Desktop
 
-Electron shell for GLaDOS v4.4.3. The bundle is named `GLaDOS.app`.
+Electron shell for GLaDOS v4.4.6. The bundle is named `GLaDOS.app`.
 
 See [DISTRIBUTION_PLAN.md](DISTRIBUTION_PLAN.md) for the Developer ID,
 notarization, Apple-silicon/Ubuntu architecture, first-run dependency, and

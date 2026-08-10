@@ -145,15 +145,15 @@ test('POST /api/slash/run executes workflow and safety commands through server w
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run('overview-test', 'https://example.com', 'header', '/', 'high', 'Test finding', 'webapp-recon', 'pending');
       overviewDb.prepare(`
-        INSERT INTO dashboard_transcript_events (agent_id, kind, event_json, ts)
-        VALUES (?, 'result', ?, datetime('now'))
+        INSERT INTO dashboard_transcript_events (engagement_id, agent_id, kind, event_json, ts)
+        VALUES ('overview-test', ?, 'result', ?, datetime('now'))
       `).run('webapp-recon', JSON.stringify({ costUsd: 0.25, usage: { input_tokens: 100, output_tokens: 25 } }));
     } finally {
       overviewDb.close();
     }
     const overview = await request(srv.port, 'GET', '/api/overview');
     assert.equal(overview.status, 200, overview.raw);
-    assert.equal(overview.json.version, 'v4.4.3');
+    assert.equal(overview.json.version, 'v4.4.6');
     assert.equal(overview.json.engagement.target, 'example.com');
     assert.equal(overview.json.phase, 'Awaiting approval');
     assert.equal(overview.json.pendingApprovals, 1);
@@ -201,6 +201,17 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     assert.equal(removedRps.ok, false);
     assert.match(removedRps.events.at(-1).text, /unknown command: \/rps/);
 
+    const gladosStatus = path.join(srv.runtime, 'workspaces', 'agents', 'glados', 'AGENT-STATUS.md');
+    fs.mkdirSync(path.dirname(gladosStatus), { recursive: true });
+    fs.writeFileSync(gladosStatus, '# AGENT-STATUS.md\n\nPrior engagement report package exists.\n');
+    const isolatedSession = await request(srv.port, 'POST', '/api/investigation-sessions', {
+      name: 'Fresh blind test', metadata: { unassigned: true },
+    });
+    assert.equal(isolatedSession.status, 201);
+    assert.ok(isolatedSession.json.agentStatusReset.reset > 0);
+    assert.doesNotMatch(fs.readFileSync(gladosStatus, 'utf8'), /Prior engagement report package exists/);
+    assert.match(fs.readFileSync(gladosStatus, 'utf8'), /GLaDOS is idle/);
+
     const localRepo = path.join(srv.root, 'repo');
     fs.mkdirSync(localRepo);
     cp.execFileSync('git', ['init', '-q', localRepo]);
@@ -209,7 +220,7 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     cp.execFileSync('git', ['-C', localRepo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
     const review = await slashRun(srv.port, `/security-review ${localRepo}`);
     assert.equal(review.ok, true);
-    assert.match(review.events.at(-1).text, /Queued staged source-code security review/);
+    assert.match(review.events.at(-1).text, /Queued deep source-code security review/);
 
     const status = await slashRun(srv.port, '/status');
     assert.equal(status.ok, true);
@@ -261,8 +272,13 @@ test('POST /api/slash/run executes workflow and safety commands through server w
       assert.equal(goals.some(g => g.type === 'security_review' && g.target === localRepo), true);
       const jobs = db.prepare('SELECT agent_id, job_type, target, status FROM controller_jobs').all();
       assert.deepEqual(jobs.map(j => [j.agent_id, j.job_type, j.target, j.status]), [
-        ['glados', 'security_review_workflow_v2', localRepo, 'queued'],
+        ['glados', 'security_review_workflow_v3', localRepo, 'queued'],
       ]);
+      const controllerStatus = await request(srv.port, 'GET', '/api/controller/status');
+      assert.equal(controllerStatus.status, 200, controllerStatus.raw);
+      assert.equal(controllerStatus.json.securityReviews.length, 1);
+      assert.equal(controllerStatus.json.securityReviews[0].progress.phase, 'Queued');
+      assert.equal(controllerStatus.json.securityReviews[0].progress.percent, 0);
     } finally {
       db.close();
     }

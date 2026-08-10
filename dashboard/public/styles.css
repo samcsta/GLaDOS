@@ -1309,6 +1309,25 @@ body.sidebar-collapsed .sidebar, body.sidebar-collapsed #sidebar-splitter { over
 #workspace-links a:first-child:not(.nav-active) { color: var(--fg); background: transparent; border-color: transparent; }
 
 .agent-list-controls { padding: 2px 2px 6px; }
+.security-reviews { margin: 0 2px 9px; }
+.security-reviews.hidden { display: none; }
+.security-reviews-heading {
+  min-height: 24px; padding: 4px 5px; display: flex; align-items: center; justify-content: space-between;
+  color: #8c96a8; font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em;
+}
+.security-review-card {
+  margin: 3px 0; padding: 8px; border: 1px solid rgba(90,166,255,0.22); border-radius: 6px;
+  background: linear-gradient(145deg, rgba(90,166,255,0.09), rgba(12,15,20,0.72)); cursor: pointer;
+}
+.security-review-card:hover { border-color: rgba(90,166,255,0.5); background: rgba(90,166,255,0.12); }
+.security-review-card-head, .security-review-phase { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.security-review-card-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); font-size: 11px; }
+.security-review-card-head > span { color: var(--accent-hi); font-size: 9px; text-transform: uppercase; }
+.security-review-phase { margin-top: 5px; color: #b7c0cf; font-size: 10px; }
+.security-review-phase time { color: var(--fg-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.security-review-progress { height: 4px; margin-top: 6px; overflow: hidden; border-radius: 3px; background: #080a0e; }
+.security-review-progress > span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #377fca, #73b7ff); transition: width 0.3s ease; }
+.security-review-card p { margin: 5px 0 0; color: var(--fg-dim); font-size: 9px; line-height: 1.35; }
 .agent-list-controls input, .settings-agent-controls input {
   width: 100%; height: 31px; padding: 0 9px; color: var(--fg); background: #0c0f13;
   border: 1px solid var(--control-border); border-radius: 5px; font: inherit; font-size: 11px;

@@ -1,7 +1,12 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const {
+  REQUIRED_DEEP_ARTIFACTS,
+  normalizeDeepScanConfig,
+  validateDeepScanArtifacts,
+} = require('./deep-scan');
 
-const WORKFLOW_VERSION = 2;
+const WORKFLOW_VERSION = 3;
 const SPECIALIST_TRACKS = [
   'authorization-access-control',
   'data-flow-injection',
@@ -54,8 +59,17 @@ function securityReviewArtifactRoot(runtimeDir, engagementId) {
   return path.join(runtimeDir, 'investigations', engagementId, 'security-review');
 }
 
-function securityReviewCoordinatorPrompt({ repositoryPath, engagementId, goalId, artifactRoot, contextMode = 'blind' }) {
+function securityReviewCoordinatorPrompt({
+  repositoryPath,
+  engagementId,
+  goalId,
+  artifactRoot,
+  contextMode = 'blind',
+  deepScan = {},
+  modelPolicy = {},
+}) {
   const mode = ['blind', 'regression', 'informed'].includes(contextMode) ? contextMode : 'blind';
+  const scan = normalizeDeepScanConfig(deepScan);
   const contextContract = mode === 'blind'
     ? [
         'CONTEXT MODE: BLIND',
@@ -74,12 +88,14 @@ function securityReviewCoordinatorPrompt({ repositoryPath, engagementId, goalId,
           '- Run blind discovery first without exposing prior finding details to the blind task, then perform mandatory historical regression with matched prior context.',
         ];
   return [
-    'SOURCE SECURITY REVIEW WORKFLOW v2 — COORDINATOR CONTRACT',
+    'SOURCE SECURITY REVIEW WORKFLOW v3 — DEEP COORDINATOR CONTRACT',
     `repository_path: ${repositoryPath}`,
     `engagement_id: ${engagementId}`,
     `controller_goal_id: ${goalId}`,
     `artifact_root: ${artifactRoot}`,
     `context_mode: ${mode}`,
+    `deadline_at: ${deepScan.deadlineAt || 'none (operator did not set a wall-clock limit)'}`,
+    `model_policy: ${JSON.stringify(modelPolicy)}`,
     ...contextContract,
     '',
     'The assessed repository is read-only. You may write only under artifact_root and the blackboard.',
@@ -96,12 +112,25 @@ function securityReviewCoordinatorPrompt({ repositoryPath, engagementId, goalId,
     '- Every manifest, deployment overlay, Terraform module, CI task, configuration, and script must be enumerated. Sampling is prohibited.',
     '- A directory snapshot without .git metadata is valid. Use its deterministic snapshot hash as the immutable revision and record Git-history scanning as unavailable with the exact blocker; do not reject the review.',
     '',
-    'Stage 3 — Blind discovery:',
-    '- Dispatch source-code without prior-finding titles, CWEs, paths, or conclusions.',
+    'Stage 3 — Threat model and repeated blind discovery:',
+    '- First write context/threat-model.json with summary, trust_boundaries, entry_points, assets, attacker_goals, and priority_hypotheses. Derive it only from this repository and the operator-declared scope.',
+    `- Run at least ${scan.minDiscoveryRuns} successful source-code discovery attempts, stopping early only after ${scan.stopAfterNoNew} consecutive successful attempts add no canonical candidates. Never start more than ${scan.maxDiscoveryRuns} attempts or continue after an operator-set deadline in run.json.`,
+    `- Coordinator dispatch boundary: GLaDOS owns orchestration and aggregation. Dispatch discovery in ordered batches of up to ${scan.discoveryConcurrency} synchronous Agent SDK source-code tasks in one assistant response so the SDK runs that batch concurrently. Never ask one source-code task to run the complete workflow, multiple discovery workers, validation, or multiple specialist tracks. Each worker writes only its own directory. After the full batch returns, reconcile terminal rows and run centralized deduplication strictly by worker ordinal before dispatching the next batch. Never let completion order alter canonical ordering or saturation. Before dispatch, record started_at and the current runtime observation IDs; after return, use only harness-issued observations bound to that worker. Never invent, predict, alias, or use a placeholder observation ID.`,
+    '- Every blind-discovery Agent SDK task prompt must begin with these three standalone machine-readable lines exactly: security_review_role: blind-discovery; worker_id: worker-NNN; artifact_root: <the absolute artifact_root above>. Put each field on its own line with no bullets, backticks, trailing punctuation, aliases such as "Artifact root", or surrounding prose. The runtime denies dispatch when any header is missing or noncanonical.',
+    '- Every attempt is a durable worker. Append exactly one terminal row to discovery/deep/workers.jsonl using {"worker_id":"worker-NNN","sequence":1,"attempt":1,"status":"SUCCEEDED|FAILED|CANCELED","requested_model":"...","actual_model":"...","model_observation_ids":["model-observation-..."],"started_at":"ISO-8601","completed_at":"ISO-8601","retry_of":null,"candidates_artifact":"discovery/deep/worker-NNN/candidates.jsonl","receipt_artifact":"discovery/deep/worker-NNN/receipt.json"}. Use error instead of candidate/receipt paths for a failed or canceled attempt. Do not rename completed_at to finished_at or candidates_artifact to candidate_artifact. model_observation_ids must be exact IDs already present in the harness runtime ledger and bound to the same worker_id.',
+    '- A failed or canceled worker must be retried successfully or listed in discovery/deep/manifest.json omitted_workers with a concrete reason. A missing worker result is a failure, not zero findings.',
+    '- Each successful worker writes its own candidates.jsonl plus receipt.json. The receipt schema is exactly {"worker_id":"worker-NNN","status":"SUCCEEDED","candidate_count":N,"candidates_sha256":"<64 lowercase hex>"}. Empty candidate files are valid successful results. COMPLETED, CLEAN, and prose-only receipts are invalid.',
+    '- Dispatch source-code without prior-finding titles, CWEs, paths, conclusions, or any existing report content. Vary each discovery prompt by threat-model hypothesis, vulnerability class, trust boundary, and previously under-reviewed surface; do not merely repeat identical broad prompts.',
     '- Require findings with file:line, source-to-sink trace, reachability, attack assumptions, confidence, and CVSS preconditions.',
     '- Require tested-negative claims at exact file:line ranges. Package-level or directory-level CLEAN claims are invalid.',
+    '- Every raw and canonical candidate uses this exact shape: {"candidate_id":"worker-NNN-CNNN","cwe_ids":["CWE-N"],"locations":[{"path":"repo/relative/file","start_line":1,"end_line":1,"role":"source|control|sink|evidence"}],"summary":"...","evidence":"...","control":"...","sink":"...","reachability":"...","counterevidence":"...","proof_gaps":[],"confidence":"high|medium|low"}. Raw candidate IDs must match their worker exactly (for example worker-001-C0001). Do not add a category token to the ID or substitute file/line/symbol keys, absolute paths, or prose line ranges.',
+    '- After every successful attempt, run centralized deduplication. Write discovery/deep/dedupe.json using exactly {"input_worker_ids":["worker-001"],"mappings":[{"worker_id":"worker-001","source_candidate_id":"worker-001-C0001","canonical_candidate_id":"worker-001-C0001","rationale":"..."}],"new_candidate_counts":{"worker-001":1},"no_new_streak":0}. input_worker_ids must contain all successful workers in sequence order; every raw candidate must appear in exactly one mapping; new_candidate_counts is the count of canonical candidates first introduced by each worker; no_new_streak is the computed trailing zero count. Do not use successful_input_worker_ids, raw_candidate_id, first_introduction_new_candidate_counts, or trailing_no_new_streak.',
+    '- Preserve the harness-created discovery/deep/manifest.json fields schema_version, status, config, started_at, deadline_at, and omitted_workers. Do not replace that file with a different schema. Add completed_at and set status to SATURATED only after the no-new threshold and every hard gate pass; set status to CAPPED only when the deadline or run ceiling is reached.',
+    '- Write the canonical union to discovery/candidates.jsonl. Location-only or title-only similarity cannot silently merge distinct vulnerability instances. Preserve contrary evidence and proof gaps during merges.',
     '',
-    `Stage 4 — Independent specialist tracks (run as separate tasks, serially if necessary): ${SPECIALIST_TRACKS.join(', ')}.`,
+    `Stage 4 — Independent specialist tracks: ${SPECIALIST_TRACKS.join(', ')}.`,
+    `- After discovery saturation, dispatch specialist tracks in batches of up to ${scan.specialistConcurrency} separate synchronous source-code Agent SDK tasks in one assistant response. The SDK runs each batch concurrently. A returned primary worker cannot satisfy a specialist track, even if its broad pass discussed that class.`,
+    '- Put `security_review_role: <exact-track-name>` in every specialist task prompt. Put `security_review_role: blind-discovery` and the exact worker_id in each discovery prompt, and `security_review_role: source-review-validator` in the validator prompt. Runtime model attribution depends on these durable role labels.',
     '- Authorization must produce a route/method/authn/scope/ownership/repository-filter matrix and trace handler -> service -> repository/ORM operation.',
     '- Secrets must inspect HEAD and git history while redacting values.',
     '- IaC must disposition every base and production overlay file.',
@@ -125,6 +154,9 @@ function securityReviewCoordinatorPrompt({ repositoryPath, engagementId, goalId,
     'Stage 6 — Omission-focused independent validation:',
     '- Dispatch source-review-validator. It must inventory independently, inspect source rather than trust the primary coverage ledger, challenge every semantic check and candidate disposition, search for omitted vulnerability classes, and produce validation/challenge-matrix.json plus the final validation/semantic-coverage.json.',
     '- High/Critical findings require independent reproduction from source. Record primary and validator model aliases. If models match, record a model-diversity blocker for operator review.',
+    '- Centralize every canonical candidate in validation/candidate-closure.jsonl with exactly one terminal disposition: REPORTABLE, SUPPRESSED, NOT_APPLICABLE, or DEFERRED. Preserve validation method, evidence, counterevidence, proof gaps, and finding IDs.',
+    '- Analyze every canonical candidate in validation/attack-paths.jsonl with exactly one REPORTABLE, IGNORE, NOT_APPLICABLE, or DEFERRED decision, plus concrete reachability and rationale. This step ranks and chains candidates but may not delete them.',
+    '- The harness correlates SDK request IDs with LiteLLM spend logs and appends gateway-observed deployment receipts to validation/runtime-model-observations.jsonl. Do not edit or synthesize that ledger. Write validation/model-receipts.jsonl for coordinator, source-code-primary, every specialist track, and source-review-validator; each receipt must cite one or more observation_ids proving the gateway deployment for the correct agent. Enforce run.json modelPolicy; SDK aliases and static roster labels are not proof of deployment.',
     '',
     'Stage 7 — Safe dynamic validation:',
     '- For medium-or-lower-confidence findings, perform only local/isolated safe validation when feasible; otherwise record the precise blocker. Never contact production merely to raise confidence.',
@@ -132,6 +164,8 @@ function securityReviewCoordinatorPrompt({ repositoryPath, engagementId, goalId,
     'Stage 8 — Operator gate and reporting:',
     '- Automatically retry incomplete static-analysis/validation tasks and resolve recoverable registry/tooling errors without asking the operator. Do not pause merely to continue analysis.',
     '- When all analysis gates pass, deliver the validated findings, prior dispositions when applicable, delta table, challenge matrix, and residual blockers directly to the operator. Do not require approval to complete or present a security review.',
+    '- Produce canonical additive artifacts scan-manifest.json, findings.json, coverage.json, and completion-receipt.json. Use producer glados-security-review/v1. Seal SHA-256 digests for run.json, the threat model, worker ledger, dedupe result, canonical candidates, validation closure, attack paths, model receipts, findings, and coverage in both the manifest and completion receipt.',
+    '- SATURATED is the only successful terminal state. If an operator-set deadline or maximum-run ceiling arrives first, write CAPPED with exact residual work and stop; never convert CAPPED into CLEAN, COMPLETE, or SATURATED.',
     '- Explicit operator approval is required only for live/target-facing actions and for generating or publishing the formal report package. Do not dispatch report agents without explicit operator wrap approval.',
     '',
     'Hard completion gates:',
@@ -146,7 +180,11 @@ function securityReviewCoordinatorPrompt({ repositoryPath, engagementId, goalId,
     '9. CVSS >=7 documents metric preconditions; CVSS >=9 names a reachable unauthenticated network path or is blocked for downgrade review.',
     '10. Every High/Critical finding has validator confirmation.',
     '11. HEAD and history secret-scan receipts exist for the recorded HEAD.',
-    '12. No unexplained file, route, prior-finding, suppression, track, referral, or validation gap remains.',
+    '12. Every discovery worker is terminal; failures are successfully retried or explicitly omitted with reason.',
+    `13. Every raw candidate is deduplicated exactly once, every canonical candidate reaches centralized validation and attack-path analysis, and saturation is proven by ${scan.stopAfterNoNew} consecutive no-new successful runs.`,
+    '14. Every required review role has an observed model receipt that satisfies run.json modelPolicy.',
+    '15. Canonical findings and coverage have exact closure with candidate dispositions and deterministic inventory, and all sealed artifact digests verify.',
+    '16. No unexplained file, route, prior-finding, suppression, worker, raw candidate, canonical candidate, track, referral, model, or validation gap remains.',
     '',
     'Create one blackboard task per stage/track and include engagement_id in every blackboard_task_update. A returned model answer is not proof that a gate passed. Mark the analysis goal complete and deliver validated results once analysis gates pass; wait for operator approval only before live actions or formal report generation/publication.',
   ].join('\n');
@@ -177,6 +215,7 @@ const REQUIRED_REVIEW_ARTIFACTS = [
   'dynamic-validation/matrix.jsonl',
   'validation/challenge-matrix.json',
   'validation/semantic-coverage.json',
+  ...REQUIRED_DEEP_ARTIFACTS,
 ];
 
 function readJsonArtifact(artifactRoot, relative, invalid) {
@@ -258,7 +297,7 @@ function validateEvidence(evidence, label, invalid, { expectedFile = null, expec
   }
 }
 
-function sourceReviewGateStatus(artifactRoot) {
+function sourceReviewGateStatus(artifactRoot, options = {}) {
   const missing = REQUIRED_REVIEW_ARTIFACTS.filter(relative => !fs.existsSync(path.join(artifactRoot, relative)));
   const invalid = [];
   const available = relative => !missing.includes(relative);
@@ -292,7 +331,7 @@ function sourceReviewGateStatus(artifactRoot) {
     }
   }
 
-  const candidates = keyedRows(jsonl('inventory/security-sensitive.jsonl'), ['key'], 'inventory/security-sensitive.jsonl', invalid);
+  const candidates = keyedRows(jsonl('inventory/security-sensitive.jsonl'), ['inventory_key'], 'inventory/security-sensitive.jsonl', invalid);
   for (const candidate of candidates.values()) {
     const fileCoverage = coverage.get(candidate.file);
     if (!fileCoverage) continue;
@@ -457,6 +496,9 @@ function sourceReviewGateStatus(artifactRoot) {
     'dynamic-validation/matrix.jsonl',
   ]) jsonl(relative);
 
+  const deep = validateDeepScanArtifacts(artifactRoot, options);
+  for (const relative of deep.missing) if (!missing.includes(relative)) missing.push(relative);
+  invalid.push(...deep.invalid);
   return {
     workflowVersion: WORKFLOW_VERSION,
     passed: missing.length === 0 && invalid.length === 0,

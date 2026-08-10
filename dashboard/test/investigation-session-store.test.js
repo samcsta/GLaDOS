@@ -45,6 +45,7 @@ test('legacy blackboard rows migrate into an imported session', () => {
   const migrated = new Database(dbPath, { readonly: true });
   assert.equal(migrated.prepare("SELECT session_id FROM engagements WHERE id='old-engagement'").get().session_id, 'legacy');
   assert.equal(migrated.prepare("SELECT session_id FROM dashboard_transcript_events LIMIT 1").get().session_id, 'legacy');
+  assert.equal(migrated.prepare("SELECT engagement_id FROM dashboard_transcript_events LIMIT 1").get().engagement_id, null);
   assert.equal(migrated.prepare("SELECT state FROM investigation_sessions WHERE id='legacy'").get().state, 'active');
   migrated.close();
 });

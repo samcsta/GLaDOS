@@ -10,6 +10,10 @@
       "glados-ops"
     ],
     "coordinatorMaxTurns": 40,
+    "securityReviewCoordinatorMaxTurns": 1000,
+    "securityReviewMaxExecutions": 3,
+    "securityReviewDiscoveryConcurrency": 3,
+    "securityReviewSpecialistConcurrency": 3,
     "specialistMaxTurns": 100
   },
   "disabledByDefaultPrefixes": [
