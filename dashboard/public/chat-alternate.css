@@ -295,7 +295,7 @@ html[data-theme="quantum"] .chat-visual-chamber .entry.user-message::before {
 }
 html[data-theme="quantum"] .chat-visual-chamber .entry.assistant-text::before {
   content: "";
-  background: var(--accent-soft) url('/assets/glados-mark.svg') center / cover no-repeat;
+  background: var(--accent-soft) url('/assets/glados-logo.png') center / cover no-repeat;
 }
 html[data-theme="quantum"] .chat-visual-chamber[data-agent]:not([data-agent="glados"]) .entry.assistant-text::before { content: "A"; }
 html[data-theme="quantum"] .chat-visual-chamber[data-agent]:not([data-agent="glados"]) .entry.assistant-text::before { background-image: none; font-size: 10px; }

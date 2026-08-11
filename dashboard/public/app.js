@@ -334,7 +334,7 @@ function createAgentViewToolbar(agentId) {
   const label = agentId === 'glados' ? 'GLaDOS' : agentId;
   const role = agentId === 'glados' ? 'Coordinator' : 'Specialist agent';
   const avatar = agentId === 'glados'
-    ? '<img class="agent-avatar glados-avatar" src="/assets/glados-mark.svg" alt="" />'
+    ? '<img class="agent-avatar glados-avatar" src="/assets/glados-logo.png" alt="" />'
     : `<span class="agent-avatar" aria-hidden="true">${escapeHtml(label.slice(0, 1).toUpperCase())}</span>`;
   toolbar.innerHTML = `
     <div class="agent-view-identity">
