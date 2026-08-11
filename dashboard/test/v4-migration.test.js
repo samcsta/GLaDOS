@@ -263,7 +263,9 @@ test('v4 operator workspace exposes overview, search, provenance, notifications,
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.doesNotMatch(html, /investigation-session-select|new-investigation-session|session-picker/);
-  assert.match(app, /overview-session-host/);
+  assert.match(app, /function renderInvestigationSessionManager\(/);
+  assert.match(app, /sessionHost\.className = 'investigation-session-host'/);
+  assert.doesNotMatch(app, /wrap\.innerHTML = '<div class="overview-session-host/);
   assert.match(app, /data-session-rename/);
   assert.match(app, /data-session-delete/);
   assert.match(app, /function showNameInput\(/);

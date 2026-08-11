@@ -1,4 +1,13 @@
 const ALERT_KINDS = new Set(['error', 'failed', 'offline', 'denied']);
+const DASHBOARD_THEME_KEY = 'glados-dash.theme';
+const DASHBOARD_THEMES = new Set(['quantum', 'classic']);
+
+function savedDashboardTheme() {
+  try {
+    const saved = localStorage.getItem(DASHBOARD_THEME_KEY);
+    return DASHBOARD_THEMES.has(saved) ? saved : 'quantum';
+  } catch { return 'quantum'; }
+}
 
 const state = {
   agents: [],          // from /api/agents
@@ -25,7 +34,25 @@ const state = {
   })(),
   unreadNotifications: 0,
   provenanceFocus: null,
+  theme: savedDashboardTheme(),
 };
+
+function applyDashboardTheme(theme, { persist = true } = {}) {
+  const next = DASHBOARD_THEMES.has(theme) ? theme : 'quantum';
+  document.documentElement.dataset.theme = next;
+  state.theme = next;
+  if (persist) {
+    try { localStorage.setItem(DASHBOARD_THEME_KEY, next); } catch {}
+  }
+  document.querySelectorAll('[data-dashboard-theme]').forEach(button => {
+    const active = button.dataset.dashboardTheme === next;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  return next;
+}
+
+applyDashboardTheme(state.theme, { persist: false });
 
 const tabsEl = document.getElementById('tabs');
 const paneEl = document.getElementById('pane');
@@ -304,9 +331,12 @@ function createAgentViewToolbar(agentId) {
   toolbar.className = 'agent-view-toolbar';
   toolbar.dataset.agentId = agentId;
   const resetLabel = agentId === 'glados' ? 'Reset investigation' : 'Reset session';
+  const label = agentId === 'glados' ? 'GLaDOS' : agentId;
+  const role = agentId === 'glados' ? 'Coordinator' : 'Specialist agent';
   toolbar.innerHTML = `
     <div class="agent-view-identity">
-      <strong>${escapeHtml(agentId === 'glados' ? 'GLaDOS' : agentId)}</strong>
+      <span class="agent-avatar" aria-hidden="true">${escapeHtml(label.slice(0, 1).toUpperCase())}</span>
+      <span class="agent-view-title"><strong>${escapeHtml(label)}</strong><small>${role}</small></span>
       <span class="agent-runtime-status idle">Idle</span>
     </div>
     <details class="agent-actions">
@@ -507,7 +537,7 @@ function renderAgentList() {
     li.dataset.id = a.id;
     li.tabIndex = 0;
     li.className = (state.active.has(a.id) ? 'live ' : '') + (a.halted ? 'halted ' : '') + (state.currentTab === a.id ? 'active' : '');
-    li.innerHTML = `<span class="dot"></span><span class="name">${escapeHtml(a.id)}</span>` +
+    li.innerHTML = `<span class="dot"></span><span class="agent-row-main"><span class="name">${escapeHtml(a.id)}</span><small>${escapeHtml(a.model || a.name || 'Ready')}</small></span>` +
       `<span class="agent-row-state">${a.halted ? 'halted' : (state.active.has(a.id) ? 'live' : '')}</span>`;
     li.addEventListener('click', () => openAgentTab(a.id));
     li.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') openAgentTab(a.id); });
@@ -929,81 +959,79 @@ function renderLiteLlmUsage(usage, metric = 'spend') {
   </section>`;
 }
 
+function renderInvestigationSessionManager(sessionHost) {
+  if (!sessionHost) return;
+  const current = state.investigationSessions.find(session => session.id === state.currentSessionId) || state.investigationSessions[0];
+  const sorted = [...state.investigationSessions].sort((a, b) => (a.state === 'active' ? -1 : b.state === 'active' ? 1 : Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
+  sessionHost.innerHTML = `<div class="overview-session-bar">
+    <div class="overview-session-label"><span>Investigation session</span><small>Conversation, findings, plans, and agent context</small></div>
+    <div class="overview-session-controls">
+      <details class="overview-session-menu">
+        <summary aria-label="Select investigation"><span class="session-state-dot ${current?.state || 'active'}"></span><span><strong>${escapeHtml(current?.name || 'Unassigned session')}</strong><small>${current?.metadata?.unassigned ? 'Waiting for the first GLaDOS prompt' : `${current?.engagementCount || 0} engagement${current?.engagementCount === 1 ? '' : 's'}`}</small></span></summary>
+        <div class="overview-session-popover">
+          <div class="overview-session-popover-head"><span>Investigations</span></div>
+          <div class="overview-session-list">
+            ${sorted.map(session => `<div class="overview-session-row${session.id === state.currentSessionId ? ' selected' : ''}">
+              <button type="button" class="overview-session-option" data-session-select="${escapeHtml(session.id)}">
+                <span class="session-state-dot ${session.state}"></span><span><strong>${escapeHtml(session.name)}</strong><small>${session.state === 'active' ? 'Active' : 'Archived'} · ${new Date(session.updatedAt).toLocaleDateString()} · ${session.engagementCount || 0} engagement${session.engagementCount === 1 ? '' : 's'}</small></span>${session.id === state.currentSessionId ? '<span class="session-current-mark">Current</span>' : ''}
+              </button>
+              ${session.id !== state.currentSessionId ? `<button type="button" class="session-row-delete" data-session-delete-id="${escapeHtml(session.id)}" title="Delete ${escapeHtml(session.name)}" aria-label="Delete ${escapeHtml(session.name)}">×</button>` : ''}
+            </div>`).join('')}
+          </div>
+          <div class="overview-session-popover-actions">
+            <button type="button" data-session-rename>Rename</button><button type="button" class="danger" data-session-delete>Delete current</button>
+          </div>
+        </div>
+      </details>
+      <button type="button" class="overview-new-session" data-session-new>New session</button>
+    </div>
+  </div>`;
+  const details = sessionHost.querySelector('details');
+  sessionHost.querySelectorAll('[data-session-select]').forEach(button => button.addEventListener('click', async () => {
+    details.open = false;
+    try { await activateInvestigationSession(button.dataset.sessionSelect); }
+    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
+  }));
+  sessionHost.querySelector('[data-session-new]')?.addEventListener('click', async () => {
+    details.open = false;
+    try { await createInvestigationSession(); }
+    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
+  });
+  sessionHost.querySelectorAll('[data-session-delete-id]').forEach(button => button.addEventListener('click', async event => {
+    event.stopPropagation();
+    const session = state.investigationSessions.find(item => item.id === button.dataset.sessionDeleteId);
+    if (!session || !await confirmAction({ title: 'Delete investigation session', message: `Permanently delete "${session.name}" and its blackboard records, plans, tasks, findings, and transcripts? Evidence and report files are preserved.`, confirmLabel: 'Delete session', danger: true })) return;
+    try {
+      const response = await fetch(`/api/investigation-sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
+      const body = await response.json();
+      if (!response.ok || !body.ok) throw new Error(body.error || 'could not delete investigation');
+      state.investigationSessions = body.sessions || [];
+      details.open = false;
+      renderInvestigationSessionManager(sessionHost);
+    } catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
+  }));
+  sessionHost.querySelector('[data-session-rename]')?.addEventListener('click', async () => {
+    details.open = false;
+    const name = await showNameInput({ title: 'Rename investigation', value: current?.name || '', confirmLabel: 'Rename' });
+    if (!name || !current) return;
+    try { await renameInvestigationSession(current.id, name); renderInvestigationSessionManager(sessionHost); }
+    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
+  });
+  sessionHost.querySelector('[data-session-delete]')?.addEventListener('click', async () => {
+    details.open = false;
+    if (!current || !await confirmAction({ title: 'Delete investigation session', message: `Permanently delete "${current.name}" and its blackboard records, plans, tasks, findings, and transcripts? Evidence and report files are preserved.`, confirmLabel: 'Delete session', danger: true })) return;
+    try { await deleteInvestigationSession(current.id); }
+    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
+  });
+}
+
 async function renderOverviewPane() {
   const wrap = document.createElement('div');
   wrap.className = 'overview-pane';
-  wrap.innerHTML = '<div class="overview-session-host"></div><div class="overview-content"><div class="overview-loading">Loading operational state…</div></div>';
+  wrap.innerHTML = '<div class="overview-content"><div class="overview-loading">Loading operational state…</div></div>';
   paneEl.appendChild(wrap);
-  const sessionHost = wrap.querySelector('.overview-session-host');
   const content = wrap.querySelector('.overview-content');
   let usageShareMetric = 'spend';
-
-  const renderSessionManager = () => {
-    const current = state.investigationSessions.find(session => session.id === state.currentSessionId) || state.investigationSessions[0];
-    const sorted = [...state.investigationSessions].sort((a, b) => (a.state === 'active' ? -1 : b.state === 'active' ? 1 : Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
-    sessionHost.innerHTML = `<div class="overview-session-bar">
-      <div class="overview-session-label"><span>Investigation workspace</span><small>Transcripts, findings, plans, and agent context</small></div>
-      <div class="overview-session-controls">
-        <details class="overview-session-menu">
-          <summary aria-label="Select investigation"><span class="session-state-dot ${current?.state || 'active'}"></span><span><strong>${escapeHtml(current?.name || 'Unassigned session')}</strong><small>${current?.metadata?.unassigned ? 'Waiting for the first GLaDOS prompt' : `${current?.engagementCount || 0} engagement${current?.engagementCount === 1 ? '' : 's'}`}</small></span></summary>
-          <div class="overview-session-popover">
-            <div class="overview-session-popover-head"><span>Investigations</span></div>
-            <div class="overview-session-list">
-              ${sorted.map(session => `<div class="overview-session-row${session.id === state.currentSessionId ? ' selected' : ''}">
-                <button type="button" class="overview-session-option" data-session-select="${escapeHtml(session.id)}">
-                  <span class="session-state-dot ${session.state}"></span><span><strong>${escapeHtml(session.name)}</strong><small>${session.state === 'active' ? 'Active' : 'Archived'} · ${new Date(session.updatedAt).toLocaleDateString()} · ${session.engagementCount || 0} engagement${session.engagementCount === 1 ? '' : 's'}</small></span>${session.id === state.currentSessionId ? '<span class="session-current-mark">Current</span>' : ''}
-                </button>
-                ${session.id !== state.currentSessionId ? `<button type="button" class="session-row-delete" data-session-delete-id="${escapeHtml(session.id)}" title="Delete ${escapeHtml(session.name)}" aria-label="Delete ${escapeHtml(session.name)}">×</button>` : ''}
-              </div>`).join('')}
-            </div>
-            <div class="overview-session-popover-actions">
-              <button type="button" data-session-rename>Rename</button><button type="button" class="danger" data-session-delete>Delete current</button>
-            </div>
-          </div>
-        </details>
-        <button type="button" class="overview-new-session" data-session-new>New session</button>
-      </div>
-    </div>`;
-    const details = sessionHost.querySelector('details');
-    sessionHost.querySelectorAll('[data-session-select]').forEach(button => button.addEventListener('click', async () => {
-      details.open = false;
-      try { await activateInvestigationSession(button.dataset.sessionSelect); }
-      catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
-    }));
-    sessionHost.querySelector('[data-session-new]')?.addEventListener('click', async () => {
-      details.open = false;
-      try { await createInvestigationSession(); }
-      catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
-    });
-    sessionHost.querySelectorAll('[data-session-delete-id]').forEach(button => button.addEventListener('click', async event => {
-      event.stopPropagation();
-      const session = state.investigationSessions.find(item => item.id === button.dataset.sessionDeleteId);
-      if (!session || !await confirmAction({ title: 'Delete investigation session', message: `Permanently delete "${session.name}" and its blackboard records, plans, tasks, findings, and transcripts? Evidence and report files are preserved.`, confirmLabel: 'Delete session', danger: true })) return;
-      try {
-        const response = await fetch(`/api/investigation-sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
-        const body = await response.json();
-        if (!response.ok || !body.ok) throw new Error(body.error || 'could not delete investigation');
-        state.investigationSessions = body.sessions || [];
-        details.open = false;
-        renderSessionManager();
-      } catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
-    }));
-    sessionHost.querySelector('[data-session-rename]')?.addEventListener('click', async () => {
-      details.open = false;
-      const name = await showNameInput({ title: 'Rename investigation', value: current?.name || '', confirmLabel: 'Rename' });
-      if (!name) return;
-      try { await renameInvestigationSession(current.id, name); renderSessionManager(); }
-      catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
-    });
-    sessionHost.querySelector('[data-session-delete]')?.addEventListener('click', async () => {
-      details.open = false;
-      if (!await confirmAction({ title: 'Delete investigation session', message: `Permanently delete "${current?.name}" and its blackboard records, plans, tasks, findings, and transcripts? Evidence and report files are preserved.`, confirmLabel: 'Delete session', danger: true })) return;
-      try { await deleteInvestigationSession(current.id); }
-      catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
-    });
-  };
-  sessionHost.addEventListener('session-list-updated', renderSessionManager);
-  renderSessionManager();
 
   const load = async ({ forceUsage = false } = {}) => {
     if (load.inFlight) {
@@ -1117,7 +1145,6 @@ async function renderOverviewPane() {
             </article>
           </div>
         </section>`;
-      renderSessionManager();
       content.querySelector('[data-overview-chat]')?.addEventListener('click', openGladosChat);
       content.querySelector('[data-overview-refresh]')?.addEventListener('click', () => load({ forceUsage: true }));
       content.querySelector('[data-overview-end]')?.addEventListener('click', async () => {
@@ -2159,6 +2186,12 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
   chat.dataset.agent = agentId;
   chat.style.setProperty('--agent-feed-label', `"${String(label).toUpperCase()} / CHAMBER FEED"`);
   chat.appendChild(createAgentViewToolbar(agentId));
+  if (coordinator) {
+    const sessionHost = document.createElement('div');
+    sessionHost.className = 'investigation-session-host';
+    chat.appendChild(sessionHost);
+    renderInvestigationSessionManager(sessionHost);
+  }
 
   const transcript = document.createElement('div');
   transcript.className = 'transcript';
@@ -2709,11 +2742,11 @@ function subscribeLobby() {
   es.addEventListener('investigation-session-updated', async () => {
     try {
       await loadInvestigationSessions();
-      document.querySelector('.overview-session-host')?.dispatchEvent(new CustomEvent('session-list-updated'));
+      renderInvestigationSessionManager(document.querySelector('.investigation-session-host'));
     } catch {}
   });
   es.addEventListener('investigation-session-deleted', async () => {
-    try { await loadInvestigationSessions(); if (state.currentTab === 'overview') renderPane(); } catch {}
+    try { await loadInvestigationSessions(); if (state.currentTab === 'glados-chat') renderPane(); } catch {}
   });
   es.addEventListener('snapshot', e => {
     const arr = JSON.parse(e.data);
@@ -4152,6 +4185,20 @@ async function renderSettingsPane() {
   wrap.className = 'settings-pane';
   wrap.innerHTML = `
     <h1>Settings</h1>
+    <section class="settings-section appearance-settings">
+      <h2>Appearance</h2>
+      <p class="settings-section-copy">Choose how GLaDOS and agent workspaces are presented. Both themes keep the current dark blue color palette.</p>
+      <div class="theme-options" role="group" aria-label="Dashboard theme">
+        <button type="button" class="theme-option" data-dashboard-theme="quantum" aria-pressed="false">
+          <span class="theme-preview quantum-preview" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span><strong>Quantum</strong><small>Focused, minimal agent workspace</small></span><b>Default</b>
+        </button>
+        <button type="button" class="theme-option" data-dashboard-theme="classic" aria-pressed="false">
+          <span class="theme-preview classic-preview" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span><strong>Classic</strong><small>Original GLaDOS chamber interface</small></span>
+        </button>
+      </div>
+    </section>
     <section class="settings-section">
       <h2>Operations</h2>
       <div class="settings-actions">
@@ -4180,6 +4227,10 @@ async function renderSettingsPane() {
     </section>`;
   paneEl.appendChild(wrap);
   wireOperationControls(wrap);
+  wrap.querySelectorAll('[data-dashboard-theme]').forEach(button => {
+    button.addEventListener('click', () => applyDashboardTheme(button.dataset.dashboardTheme));
+  });
+  applyDashboardTheme(state.theme, { persist: false });
 
   try {
     const [versionInfo, modelsResp, settingsResp] = await Promise.all([
@@ -4936,7 +4987,8 @@ function applyPersistentLayout() {
   const root = document.documentElement;
   const sidebarWidth = Math.max(190, Math.min(420, Number(localStorage.getItem('glados-dash.sidebar-width')) || 248));
   const eventsHeight = Math.max(34, Math.min(260, Number(localStorage.getItem('glados-dash.events-height')) || 96));
-  const sidebarCollapsed = localStorage.getItem('glados-dash.sidebar-collapsed') === '1';
+  const savedSidebarState = localStorage.getItem('glados-dash.sidebar-collapsed');
+  const sidebarCollapsed = savedSidebarState === '1' || (savedSidebarState === null && window.innerWidth <= 760);
   const eventsCollapsed = localStorage.getItem('glados-dash.events-collapsed') === '1';
   root.style.setProperty('--sidebar-width', `${sidebarWidth}px`);
   root.style.setProperty('--events-height', `${eventsHeight}px`);

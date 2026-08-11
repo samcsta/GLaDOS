@@ -4,8 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>GLaDOS Ops Dashboard</title>
-  <link rel="stylesheet" href="/styles.css?v=20260730-permanent-chat-bulk-models" />
-  <link rel="stylesheet" href="/chat-alternate.css?v=20260810-agent-chamber" />
+  <script>
+    try {
+      const theme = localStorage.getItem('glados-dash.theme');
+      document.documentElement.dataset.theme = theme === 'classic' ? 'classic' : 'quantum';
+    } catch { document.documentElement.dataset.theme = 'quantum'; }
+  </script>
+  <link rel="stylesheet" href="/styles.css?v=20260811-quantum-theme" />
+  <link rel="stylesheet" href="/chat-alternate.css?v=20260811-quantum-theme" />
 </head>
 <body>
   <header class="topbar">
@@ -102,6 +108,6 @@
   <script src="/vendor/dompurify/purify.min.js"></script>
   <script src="/vendor/xterm/lib/xterm.js"></script>
   <script src="/vendor/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
-  <script src="/app.js?v=20260730-permanent-chat-bulk-models"></script>
+  <script src="/app.js?v=20260811-quantum-theme"></script>
 </body>
 </html>
