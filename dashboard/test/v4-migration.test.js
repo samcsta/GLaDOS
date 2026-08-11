@@ -265,11 +265,14 @@ test('v4 operator workspace exposes overview, search, provenance, notifications,
   assert.doesNotMatch(html, /investigation-session-select|new-investigation-session|session-picker/);
   assert.match(app, /function renderInvestigationSessionManager\(/);
   assert.match(app, /sessionHost\.className = 'investigation-session-host'/);
+  assert.match(app, /toolbar\.querySelector\('\.agent-actions'\)\.before\(sessionHost\)/);
   assert.doesNotMatch(app, /wrap\.innerHTML = '<div class="overview-session-host/);
   assert.match(app, /data-session-rename/);
   assert.match(app, /data-session-delete/);
   assert.match(app, /function showNameInput\(/);
   assert.match(styles, /\.overview-session-popover/);
+  assert.match(styles, /body\.debug-off \.entry\.prompt-error/);
+  assert.doesNotMatch(styles, /body\.debug-off \.entry\.tool-result\.error \{ display: block; \}/);
   assert.match(server, /app\.get\('\/api\/overview'/);
   assert.match(server, /getLiteLlmUsage/);
   assert.match(server, /engagementMetrics\(db, engagement\.id\)/);

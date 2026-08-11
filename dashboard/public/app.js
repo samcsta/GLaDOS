@@ -333,9 +333,12 @@ function createAgentViewToolbar(agentId) {
   const resetLabel = agentId === 'glados' ? 'Reset investigation' : 'Reset session';
   const label = agentId === 'glados' ? 'GLaDOS' : agentId;
   const role = agentId === 'glados' ? 'Coordinator' : 'Specialist agent';
+  const avatar = agentId === 'glados'
+    ? '<img class="agent-avatar glados-avatar" src="/assets/glados-mark.svg" alt="" />'
+    : `<span class="agent-avatar" aria-hidden="true">${escapeHtml(label.slice(0, 1).toUpperCase())}</span>`;
   toolbar.innerHTML = `
     <div class="agent-view-identity">
-      <span class="agent-avatar" aria-hidden="true">${escapeHtml(label.slice(0, 1).toUpperCase())}</span>
+      ${avatar}
       <span class="agent-view-title"><strong>${escapeHtml(label)}</strong><small>${role}</small></span>
       <span class="agent-runtime-status idle">Idle</span>
     </div>
@@ -963,9 +966,7 @@ function renderInvestigationSessionManager(sessionHost) {
   if (!sessionHost) return;
   const current = state.investigationSessions.find(session => session.id === state.currentSessionId) || state.investigationSessions[0];
   const sorted = [...state.investigationSessions].sort((a, b) => (a.state === 'active' ? -1 : b.state === 'active' ? 1 : Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
-  sessionHost.innerHTML = `<div class="overview-session-bar">
-    <div class="overview-session-label"><span>Investigation session</span><small>Conversation, findings, plans, and agent context</small></div>
-    <div class="overview-session-controls">
+  sessionHost.innerHTML = `<div class="overview-session-controls">
       <details class="overview-session-menu">
         <summary aria-label="Select investigation"><span class="session-state-dot ${current?.state || 'active'}"></span><span><strong>${escapeHtml(current?.name || 'Unassigned session')}</strong><small>${current?.metadata?.unassigned ? 'Waiting for the first GLaDOS prompt' : `${current?.engagementCount || 0} engagement${current?.engagementCount === 1 ? '' : 's'}`}</small></span></summary>
         <div class="overview-session-popover">
@@ -984,7 +985,6 @@ function renderInvestigationSessionManager(sessionHost) {
         </div>
       </details>
       <button type="button" class="overview-new-session" data-session-new>New session</button>
-    </div>
   </div>`;
   const details = sessionHost.querySelector('details');
   sessionHost.querySelectorAll('[data-session-select]').forEach(button => button.addEventListener('click', async () => {
@@ -2185,13 +2185,14 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
   chat.className = 'chat-pane chat-visual-chamber';
   chat.dataset.agent = agentId;
   chat.style.setProperty('--agent-feed-label', `"${String(label).toUpperCase()} / CHAMBER FEED"`);
-  chat.appendChild(createAgentViewToolbar(agentId));
+  const toolbar = createAgentViewToolbar(agentId);
   if (coordinator) {
     const sessionHost = document.createElement('div');
     sessionHost.className = 'investigation-session-host';
-    chat.appendChild(sessionHost);
+    toolbar.querySelector('.agent-actions').before(sessionHost);
     renderInvestigationSessionManager(sessionHost);
   }
+  chat.appendChild(toolbar);
 
   const transcript = document.createElement('div');
   transcript.className = 'transcript';

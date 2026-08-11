@@ -292,6 +292,7 @@ button.secondary:hover:not(:disabled) { color: var(--fg); border-color: var(--wa
 .agent-view-identity { display: flex; align-items: center; min-width: 0; gap: 9px; }
 .agent-view-identity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .agent-avatar { width: 28px; height: 28px; flex: 0 0 28px; display: grid; place-items: center; border: 1px solid var(--control-border); border-radius: 7px; color: var(--accent-hi); background: var(--accent-soft); font-size: 11px; font-weight: 800; }
+.agent-avatar.glados-avatar { object-fit: cover; padding: 0; }
 .agent-view-title { min-width: 0; }
 .agent-view-title strong, .agent-view-title small { display: block; }
 .agent-view-title small { margin-top: 2px; color: var(--fg-dim); font-size: 9px; font-weight: 500; }
@@ -360,6 +361,8 @@ button.secondary:hover:not(:disabled) { color: var(--fg); border-color: var(--wa
 .agent-actions-menu button.danger:hover:not(:disabled) { background: var(--danger-bg); }
 .agent-actions-menu button:disabled { color: var(--control-disabled-fg); opacity: 1; }
 .agent-actions-separator { height: 1px; margin: 4px 3px; background: var(--border); }
+.investigation-session-host { min-width: 0; flex: 1 1 420px; margin-left: auto; }
+.investigation-session-host .overview-session-controls { width: 100%; max-width: 600px; margin-left: auto; }
 
 .transcript { padding: 12px; font: var(--transcript-font-size)/1.5 ui-monospace, SF Mono, Menlo, monospace; overflow-y: auto; flex: 1; min-height: 0; }
 .sending-indicator {
@@ -426,6 +429,8 @@ button.secondary:hover:not(:disabled) { color: var(--fg); border-color: var(--wa
 }
 .entry.prompt-error .tool-name { color: var(--err); font-weight: 600; }
 .entry.prompt-error pre { color: #ffd0d0; font: 11px/1.4 ui-monospace, Menlo, monospace; }
+.entry.permission-denied { border-color: var(--err); color: var(--danger-fg); background: var(--err-bg); }
+.entry.permission-denied .tool-name { color: var(--err); }
 
 /* Live streaming indicator — blinking cursor trails the growing text as the
  * LLM emits tokens. Removed on *_end when the entry is finalized. */
@@ -452,19 +457,17 @@ button.secondary:hover:not(:disabled) { color: var(--fg); border-color: var(--wa
 
 body.errors-only .entry:not(.tool-result.error):not(.prompt-error):not(.operator-event.halt-event) { display: none; }
 
-/* Debug off: show only operator messages, final assistant output, and errors. */
+/* Debug off: show only operator messages and final assistant output. */
 body.debug-off .entry.thinking,
 body.debug-off .entry.tool-call,
 body.debug-off .entry.tool-result,
+body.debug-off .entry.prompt-error,
 body.debug-off .entry.meta,
 body.debug-off .entry.harness-init,
 body.debug-off .entry.liveness,
 body.debug-off .entry.permission-denied,
 body.debug-off .entry.result,
 body.debug-off .entry.session-start { display: none; }
-/* Errors from tool calls always stay visible, even with debug off, so you
-   can see when a subagent is failing. */
-body.debug-off .entry.tool-result.error { display: block; }
 
 /* --- Proxy tab (native traffic history live view) --- */
 .proxy-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
