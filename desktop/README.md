@@ -1,6 +1,7 @@
 # GLaDOS Desktop
 
-Electron shell for GLaDOS v4.4.7. The bundle is named `GLaDOS.app`.
+Electron shell for GLaDOS v4.4.9. The macOS bundle is named `GLaDOS.app`; the
+Ubuntu package is `GLaDOS-4.4.9-x86_64.AppImage`.
 
 See [DISTRIBUTION_PLAN.md](DISTRIBUTION_PLAN.md) for the Developer ID,
 notarization, Apple-silicon/Ubuntu architecture, first-run dependency, and
@@ -19,8 +20,17 @@ bundle.
 - Packaging is configured for Developer ID, hardened runtime, notarytool, and
   disable-library-validation so native modules such as `node-pty` and
   `better-sqlite3` can be deep-signed.
+- The macOS app includes the official mitmproxy 12.2.3 arm64 app bundle, pinned
+  by SHA-256 and upstream signing team. Packaged smoke tests require this copy
+  and remove Homebrew from `PATH`, so a release cannot pass by using a tool
+  installed only on the build Mac.
 - App updates must never write local operator state; runtime data is not app
   payload.
+- The DMG includes a native **Uninstall GLaDOS.app**, signed and notarized
+  independently before it is placed in the notarized DMG. Its default mode
+  moves only the app to Trash, removes GLaDOS MITM CA trust, and preserves
+  `~/.glados`; its purge option also trashes runtime data and removes the
+  LiteLLM Keychain item.
 - Source checkouts use the SSE git updater and restart the supervised dashboard
   child. Packaged apps use the authenticated generic HTTPS feed documented in
   `services/private-update-feed/README.md`.

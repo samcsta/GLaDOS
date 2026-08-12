@@ -31,6 +31,8 @@ watchdog/watchdog-mcp/node_modules/
 tools/glados-ops-mcp/node_modules/
 desktop/dist/
 desktop/dist-verify/
+desktop/.release-tools/
+desktop/.vendor/
 /artifacts/
 .playwright-mcp/
 .venv/

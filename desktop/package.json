@@ -1,6 +1,6 @@
 {
   "name": "glados",
-  "version": "4.4.7",
+  "version": "4.4.9",
   "private": true,
   "description": "Electron shell for the GLaDOS operator app.",
   "author": {
@@ -9,14 +9,15 @@
   "desktopName": "glados.desktop",
   "main": "main.cjs",
   "scripts": {
+    "prepare:mac:assets": "node scripts/prepare-macos-vendor.cjs && node scripts/prepare-uninstaller-app.cjs",
     "start": "electron .",
-    "pack": "PATH=\"$PWD/scripts/bin:$PATH\" electron-builder --dir",
-    "pack:mac:arm64": "PATH=\"$PWD/scripts/bin:$PATH\" electron-builder --dir --mac --arm64",
+    "pack": "npm run prepare:mac:assets && PATH=\"$PWD/scripts/bin:$PATH\" electron-builder --dir",
+    "pack:mac:arm64": "npm run prepare:mac:assets && PATH=\"$PWD/scripts/bin:$PATH\" electron-builder --dir --mac --arm64",
     "verify:pack": "node scripts/verify-packaged.cjs",
     "verify:native:mac": "node scripts/verify-native-architectures.cjs",
     "verify:native:ubuntu": "node scripts/verify-native-linux.cjs",
-    "dist": "PATH=\"$PWD/scripts/bin:$PATH\" electron-builder",
-    "dist:mac:arm64": "PATH=\"$PWD/scripts/bin:$PATH\" electron-builder --mac --arm64",
+    "dist": "npm run prepare:mac:assets && PATH=\"$PWD/scripts/bin:$PATH\" electron-builder",
+    "dist:mac:arm64": "npm run prepare:mac:assets && PATH=\"$PWD/scripts/bin:$PATH\" electron-builder --mac --arm64",
     "release:mac": "node scripts/release-macos.cjs",
     "pack:ubuntu": "electron-builder --dir --linux --x64 && node scripts/verify-native-linux.cjs",
     "dist:ubuntu": "electron-builder --linux AppImage --x64",
@@ -24,6 +25,9 @@
     "smoke:ubuntu:backend:docker": "docker build --platform linux/amd64 --target backend-smoke -f Dockerfile.ubuntu ..",
     "smoke:ubuntu:gui:docker": "docker build --platform linux/amd64 --target gui-smoke -f Dockerfile.ubuntu ..",
     "test": "node --test test/*.test.cjs"
+  },
+  "allowScripts": {
+    "electron-winstaller": false
   },
   "dependencies": {
     "electron-updater": "^6.8.9"
@@ -101,6 +105,16 @@
     "mac": {
       "icon": "build/icon.icns",
       "category": "public.app-category.developer-tools",
+      "extraResources": [
+        {
+          "from": ".vendor/mitmproxy.app",
+          "to": "vendor/mitmproxy.app"
+        },
+        {
+          "from": "../third_party/mitmproxy-LICENSE.txt",
+          "to": "vendor/mitmproxy-LICENSE.txt"
+        }
+      ],
       "target": [
         "dmg",
         "zip"
@@ -109,6 +123,33 @@
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "dmg": {
+      "sign": true,
+      "writeUpdateInfo": false,
+      "window": {
+        "width": 540,
+        "height": 380
+      },
+      "contents": [
+        {
+          "x": 130,
+          "y": 190,
+          "type": "file"
+        },
+        {
+          "x": 410,
+          "y": 190,
+          "type": "link",
+          "path": "/Applications"
+        },
+        {
+          "x": 270,
+          "y": 310,
+          "type": "file",
+          "path": ".release-tools/Uninstall GLaDOS.app"
+        }
+      ]
     },
     "linux": {
       "icon": "build/icon-source.png",

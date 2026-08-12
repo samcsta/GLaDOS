@@ -4,6 +4,7 @@ const path = require('node:path');
 const { GLADOS_RUNTIME_DIR, GLADOS_AGENT_WORKSPACES, BLACKBOARD_DB, WATCHDOG_DB, MODEL_OVERRIDES_JSON } = require('../config');
 const { DashboardTranscriptStore } = require('../transcript-store');
 const { loadLlmAuthToken } = require('../secrets/llm-secrets');
+const { fetchLiteLlmModels } = require('../litellm-models');
 const { bareModelAlias, DEFAULT_BARE_MODEL } = require('../../../scripts/lib/model-aliases');
 const { agentStatus, listHaltedAgents } = require('glados-watchdog/lib/halt');
 const { evaluateToolUse, extractTargets } = require('glados-watchdog/lib/safety-gate');
@@ -1483,7 +1484,7 @@ function isFirstActivityTimeoutError(value) {
   return value?.code === 'GLADOS_FIRST_ACTIVITY_TIMEOUT';
 }
 
-async function nextWithFirstActivityDeadline(iterator, timeoutMs, onTimeout) {
+async function nextWithFirstActivityDeadline(iterator, timeoutMs, onTimeout, reportedTimeoutMs = timeoutMs) {
   if (!(timeoutMs > 0)) return iterator.next();
   let timer;
   const pending = Promise.resolve().then(() => iterator.next());
@@ -1493,7 +1494,7 @@ async function nextWithFirstActivityDeadline(iterator, timeoutMs, onTimeout) {
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
       try { onTimeout?.(); } catch {}
-      reject(firstActivityTimeoutError(timeoutMs));
+      reject(firstActivityTimeoutError(reportedTimeoutMs));
     }, timeoutMs);
   });
   try {
@@ -1501,6 +1502,36 @@ async function nextWithFirstActivityDeadline(iterator, timeoutMs, onTimeout) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function enhanceFirstActivityTimeoutError(error, options = {}) {
+  if (!isFirstActivityTimeoutError(error) || options.firstActivityDiagnostic === false) return error;
+  const fetchModels = options.modelCatalogFetcher || fetchLiteLlmModels;
+  let catalog;
+  try {
+    catalog = await fetchModels({ env: options.env, timeoutMs: options.modelCatalogTimeoutMs || 5000 });
+  } catch {
+    catalog = { available: false, reason: 'diagnostic-error', message: 'LiteLLM diagnostics could not run.' };
+  }
+
+  const model = bareModelAlias(error.model || options.sdkOptions?.model || options.modelOverride, { fallback: null });
+  let detail;
+  if (!catalog?.available) {
+    detail = catalog?.message || 'LiteLLM authentication and connectivity could not be verified.';
+  } else if (model && !catalog.models?.includes(model)) {
+    detail = `LiteLLM is reachable, but model ${model} is not available to this key.`;
+  } else {
+    detail = 'LiteLLM authentication, connectivity, and model discovery succeeded; the Agent SDK subprocess stalled before model or tool activity.';
+  }
+  error.message = `${error.message}. ${detail}`;
+  error.liteLlmDiagnostic = {
+    available: Boolean(catalog?.available),
+    reason: catalog?.reason || null,
+    status: catalog?.status || null,
+    model: model || null,
+    modelAvailable: catalog?.available && model ? catalog.models?.includes(model) : null,
+  };
+  return error;
 }
 
 function isMeaningfulTurnActivity(events) {
@@ -1610,7 +1641,7 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
         ? await iterator.next()
         : await nextWithFirstActivityDeadline(iterator, remainingMs, () => {
           interrupt('first model activity timeout').catch(() => {});
-        });
+        }, firstActivityTimeoutMs);
       if (next.done) break;
       const message = next.value;
       if (sdkOptions.resume && isMissingSdkConversationError(message)) {
@@ -1654,6 +1685,9 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
         if (onEvent) onEvent(recorded, message);
       }
     }
+  } catch (error) {
+    if (isFirstActivityTimeoutError(error) && !error.model) error.model = sdkOptions.model || null;
+    throw error;
   } finally {
     sdkOptions.gladosReviewReservations?.clear();
     if (haltTimer) clearInterval(haltTimer);
@@ -1673,7 +1707,9 @@ async function streamAgentTurn(args) {
   } catch (error) {
     const recoverableResumeFailure = isMissingSdkConversationError(error)
       || isFirstActivityTimeoutError(error);
-    if (!resumeSessionId || !recoverableResumeFailure) throw error;
+    if (!resumeSessionId || !recoverableResumeFailure) {
+      throw await enhanceFirstActivityTimeoutError(error, options);
+    }
     if (typeof options.onInvalidSession === 'function') {
       await options.onInvalidSession(resumeSessionId, error);
     }
@@ -1682,7 +1718,11 @@ async function streamAgentTurn(args) {
       retryOptions.sdkOptions = { ...options.sdkOptions };
       delete retryOptions.sdkOptions.resume;
     }
-    return streamAgentTurnOnce({ ...args, options: retryOptions });
+    try {
+      return await streamAgentTurnOnce({ ...args, options: retryOptions });
+    } catch (retryError) {
+      throw await enhanceFirstActivityTimeoutError(retryError, retryOptions);
+    }
   }
 }
 
@@ -1726,6 +1766,7 @@ module.exports = {
   shouldPersistSdkSession,
   waitForCoreMcpServers,
   isFirstActivityTimeoutError,
+  enhanceFirstActivityTimeoutError,
   streamAgentTurn,
   bareModelAlias,
 };

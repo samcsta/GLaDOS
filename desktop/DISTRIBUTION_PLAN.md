@@ -36,10 +36,11 @@ References:
      target architecture before publishing.
 
 3. **First-run prerequisites**
-   - The current app expects machine-level tools, most notably `mitmdump`, and
-     the broader assessment toolchain. A release must either bundle licensed
-     versions of those tools or provide a first-run prerequisite wizard that
-     runs the existing doctor/bootstrap flow with explicit operator consent.
+   - The macOS package bundles the official signed mitmproxy arm64 app and
+     launches its `mitmdump`, so proxy startup does not depend on Homebrew.
+     Broader assessment tools remain machine-level prerequisites and should be
+     handled by the existing doctor/bootstrap flow with explicit operator
+     consent.
    - First launch must stop with a clear actionable diagnostic when a required
      dependency is missing. It must not present a healthy proxy or assessment
      state when the dependency failed.

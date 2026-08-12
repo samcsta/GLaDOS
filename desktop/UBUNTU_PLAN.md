@@ -25,11 +25,15 @@ npm run dist:ubuntu:docker --prefix desktop
 
 ```bash
 scripts/bootstrap-ubuntu.sh
-npm ci --prefix dashboard
-npm ci --prefix desktop
-npm run pack:ubuntu --prefix desktop
-npm run dist:ubuntu --prefix desktop
+scripts/install-desktop-app-ubuntu.sh
 ```
+
+The bootstrap installs Node 22, Ubuntu/AppImage prerequisites, the required
+core command-line tools, mitmproxy, application dependencies, and initializes
+the per-user runtime. The installer builds and audits the current release, installs it under
+`~/.local/opt/glados/`, and registers `glados.desktop` for the current user.
+Set `GLADOS_APPIMAGE=/path/to/GLaDOS-4.4.9-x86_64.AppImage` to install an
+already-built artifact instead.
 
 `pack:ubuntu` creates `artifacts/desktop/linux-unpacked` and audits every ELF
 helper and native Node module as x86-64 before a distributable is accepted.

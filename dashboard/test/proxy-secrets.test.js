@@ -58,6 +58,29 @@ test('mitmproxy runner builds supervised shadow backend arguments', () => {
   assert.equal('burpExtApi' in config, false);
 });
 
+test('packaged proxy prefers the bundled mitmdump and can require it for clean-machine verification', () => {
+  const resources = tempRuntime();
+  const bundled = path.join(resources, 'vendor', 'mitmproxy.app', 'Contents', 'MacOS', 'mitmdump');
+  fs.mkdirSync(path.dirname(bundled), { recursive: true });
+  fs.writeFileSync(bundled, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  fs.chmodSync(bundled, 0o755);
+  const config = proxyBackendConfig({
+    GLADOS_RUNTIME_DIR: tempRuntime(),
+    GLADOS_DESKTOP_RESOURCES: resources,
+    GLADOS_PROXY_REQUIRE_BUNDLED: '1',
+  });
+  assert.equal(config.mitmproxyBin, bundled);
+  assert.equal(config.mitmproxyBundled, true);
+});
+
+test('clean-machine verification fails when the packaged mitmdump is absent', () => {
+  assert.throws(() => proxyBackendConfig({
+    GLADOS_RUNTIME_DIR: tempRuntime(),
+    GLADOS_DESKTOP_RESOURCES: tempRuntime(),
+    GLADOS_PROXY_REQUIRE_BUNDLED: '1',
+  }), /bundled mitmdump is missing or not executable/);
+});
+
 test('mitmproxy ownership detection only matches the GLaDOS listener and CA directory', () => {
   const config = proxyBackendConfig({ GLADOS_RUNTIME_DIR: tempRuntime(), GLADOS_MITM_LISTEN_PORT: '19090' });
   const command = `/opt/homebrew/bin/mitmdump --listen-host 127.0.0.1 --listen-port 19090 --set confdir=${config.mitmproxyConfDir} -s /Applications/GLaDOS.app/addon.py`;

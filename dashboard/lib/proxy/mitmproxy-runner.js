@@ -6,12 +6,22 @@ const { mitmCaPaths, checkMitmCaPermissions } = require('./mitm-ca');
 
 function proxyBackendConfig(env = process.env) {
   const ca = mitmCaPaths(env);
+  const bundledBin = env.GLADOS_DESKTOP_RESOURCES
+    ? path.join(env.GLADOS_DESKTOP_RESOURCES, 'vendor', 'mitmproxy.app', 'Contents', 'MacOS', 'mitmdump')
+    : null;
+  const bundledReady = bundledBin && (() => {
+    try { fs.accessSync(bundledBin, fs.constants.X_OK); return true; } catch { return false; }
+  })();
+  if (!bundledReady && /^(1|true|yes)$/i.test(String(env.GLADOS_PROXY_REQUIRE_BUNDLED || ''))) {
+    throw new Error(`bundled mitmdump is missing or not executable: ${bundledBin || 'GLADOS_DESKTOP_RESOURCES is unset'}`);
+  }
   const defaultBin = [
+    bundledReady ? bundledBin : null,
     '/opt/homebrew/bin/mitmdump',
     '/usr/local/bin/mitmdump',
     path.join(os.homedir(), '.local', 'bin', 'mitmdump'),
     '/usr/bin/mitmdump',
-  ].find(candidate => {
+  ].filter(Boolean).find(candidate => {
     try { fs.accessSync(candidate, fs.constants.X_OK); return true; } catch { return false; }
   }) || 'mitmdump';
   return {
@@ -28,6 +38,7 @@ function proxyBackendConfig(env = process.env) {
     retentionMaxBytes: Math.max(1024 * 1024, Number(env.GLADOS_PROXY_RETENTION_MAX_BYTES || 1024 * 1024 * 1024)),
     rawFlows: /^(1|true|yes)$/i.test(String(env.GLADOS_PROXY_RAW_FLOWS || '')),
     mitmproxyBin: env.GLADOS_MITMPROXY_BIN || defaultBin,
+    mitmproxyBundled: Boolean(bundledReady && (env.GLADOS_MITMPROXY_BIN || defaultBin) === bundledBin),
     mitmproxyAddon: env.GLADOS_MITMPROXY_ADDON || path.join(__dirname, 'mitmproxy-glados-addon.py'),
     mitmproxyConfDir: path.join(ca.secretsDir, 'mitmproxy'),
   };

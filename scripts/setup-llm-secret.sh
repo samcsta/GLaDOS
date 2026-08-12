@@ -27,6 +27,8 @@ else
     exit 1
   fi
   umask 077
-  LLM_KEY="$LLM_KEY" node -e 'const fs=require("fs"); const f=process.argv[1]; const token=process.env.LLM_KEY; fs.writeFileSync(f, JSON.stringify({version:1, token, updated_at:new Date().toISOString()}, null, 2)+"\n", {mode:0o600}); fs.chmodSync(f,0o600);' "$FALLBACK_FILE"
+  LLM_KEY="$LLM_KEY" node -e 'const fs=require("fs"); const f=process.argv[1]; let token=String(process.env.LLM_KEY || "").trim().replace(/^Bearer\s+/i, "").trim(); if ((token.startsWith("\"") && token.endsWith("\"")) || (token.startsWith("'\''") && token.endsWith("'\''"))) token=token.slice(1,-1).trim(); if (!token) throw new Error("key is empty after normalization"); fs.writeFileSync(f, JSON.stringify({version:1, token, updated_at:new Date().toISOString()}, null, 2)+"\n", {mode:0o600}); fs.chmodSync(f,0o600);' "$FALLBACK_FILE"
   echo "Stored fallback LLM key at $FALLBACK_FILE with chmod 600."
 fi
+
+echo "Verify the stored key and both LiteLLM routes with: scripts/check-llm.sh"

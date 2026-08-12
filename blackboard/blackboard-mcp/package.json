@@ -10,6 +10,9 @@
     "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",

@@ -9,6 +9,9 @@
   "scripts": {
     "start": "node index.js"
   },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true
+  },
   "type": "commonjs",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

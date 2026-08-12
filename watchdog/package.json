@@ -4,6 +4,9 @@
   "private": true,
   "description": "Shared target health, manual halt/resume, and plan-gate primitives for GLaDOS. Backs both the dashboard and the watchdog-mcp server.",
   "main": "lib/index.js",
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true
+  },
   "dependencies": {
     "better-sqlite3": "^12.11.1"
   },

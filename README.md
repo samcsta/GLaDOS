@@ -1,8 +1,8 @@
 # GLaDOS
 
-GLaDOS v4.4.7 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
+GLaDOS v4.4.9 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
 
-The application has no OpenClaw or Burp Suite runtime dependency. HTTP capture, replay, history, metrics, and per-agent attribution are provided by a supervised local mitmproxy process behind `/api/proxy/*`.
+The application has no OpenClaw or Burp Suite runtime dependency. HTTP capture, replay, history, metrics, and per-agent attribution are provided by a supervised local mitmproxy process behind `/api/proxy/*`. Signed macOS packages include the pinned official Apple-silicon mitmproxy runtime; source installations continue to use the bootstrap-managed Homebrew installation.
 
 ## Operator Data
 
@@ -42,10 +42,10 @@ overwriting operator edits.
 
 ## Install
 
-Internal operators should follow the full
+Internal macOS operators should follow the full
 [Gitea macOS installation guide](docs/install-macos-from-gitea.md). The
-supported production target is an Apple Silicon Mac. Prerequisites are Apple
-Command Line Tools, Homebrew, and Node 20 or 22.
+supported production targets are Apple Silicon macOS and Ubuntu 24.04 x86-64.
+macOS prerequisites are Apple Command Line Tools, Homebrew, and Node 20 or 22.
 
 ```bash
 xcode-select --install
@@ -61,6 +61,30 @@ scripts/glados-ca.sh trust
 scripts/glados-doctor.sh
 scripts/install-desktop-app.sh
 open /Applications/GLaDOS.app
+```
+
+To remove the application while preserving operator data for a reinstall:
+
+```bash
+scripts/uninstall-desktop-app.sh
+```
+
+Use `scripts/uninstall-desktop-app.sh --purge-data` only when the local
+workspaces, reports, investigations, credentials, proxy history, and databases
+should also be removed. Filesystem data is moved to Trash; the LiteLLM
+Keychain item and GLaDOS MITM CA trust are deleted. The macOS DMG also includes
+a separately signed and notarized **Uninstall GLaDOS.app**.
+
+On Ubuntu 24.04 x86-64, bootstrap and install the AppImage for the current
+user:
+
+```bash
+scripts/bootstrap-ubuntu.sh
+scripts/setup-llm-secret.sh
+scripts/glados-ca.sh trust
+scripts/glados-doctor.sh
+scripts/install-desktop-app-ubuntu.sh
+~/.local/opt/glados/GLaDOS.AppImage
 ```
 
 Bootstrap installs the app/MCP dependencies, the required core CLI set, seeds missing agent workspaces without overwriting operator edits, creates the runtime databases, and generates a unique local MITM CA. `scripts/setup-redteam-tools.sh --all --install` installs the wider specialist tool set.
@@ -116,6 +140,6 @@ npm run pack --prefix desktop
 npm run verify:pack --prefix desktop
 ```
 
-The release marker is `v4.4.7`. Build artifacts are written under
+The release marker is `v4.4.9`. Build artifacts are written under
 `artifacts/desktop/` and use the product name `GLaDOS`, so the bundle remains
 `GLaDOS.app`.

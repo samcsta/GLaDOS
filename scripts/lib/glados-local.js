@@ -324,14 +324,19 @@ function brewPrefix() {
 }
 
 function sqlite() {
-  return which('sqlite3') || '/usr/bin/sqlite3';
+  const executable = which('sqlite3');
+  if (!executable) {
+    throw new Error('sqlite3 CLI is required but was not found in PATH');
+  }
+  return executable;
 }
 
 function runSql(dbPath, sql, { ignoreError = false } = {}) {
   ensureDir(path.dirname(dbPath));
   const result = cp.spawnSync(sqlite(), [dbPath], { input: sql, encoding: 'utf8' });
   if (result.status !== 0 && !ignoreError) {
-    throw new Error(`sqlite failed for ${dbPath}: ${result.stderr || result.stdout}`);
+    const detail = result.stderr || result.stdout || result.error?.message || `exit status ${result.status}`;
+    throw new Error(`sqlite failed for ${dbPath}: ${detail}`);
   }
   return result;
 }
@@ -693,6 +698,17 @@ function assertSupportedNodeForInstall() {
   }
 }
 
+function verifyNativeDependency(dir, moduleName, probe, env) {
+  const result = cp.spawnSync(process.execPath, ['-e', probe], {
+    cwd: dir,
+    encoding: 'utf8',
+    env,
+  });
+  if (result.status === 0) return;
+  const detail = result.stderr || result.stdout || result.error?.message || `exit status ${result.status}`;
+  fail(`native dependency ${moduleName} failed to load in ${path.relative(REPO_ROOT, dir)}:\n${detail}`);
+}
+
 function installDeps() {
   assertSupportedNodeForInstall();
   const dirs = [
@@ -717,6 +733,18 @@ function installDeps() {
     log(`npm install --prefix ${rel}`);
     const r = cp.spawnSync('npm', ['install', '--prefix', dir], { stdio: 'inherit', env: npmEnv });
     if (r.status !== 0) fail(`npm install failed in ${rel}`);
+    const dependencies = readJson(path.join(dir, 'package.json'), {}).dependencies || {};
+    if (dependencies['better-sqlite3']) {
+      verifyNativeDependency(
+        dir,
+        'better-sqlite3',
+        "const Database = require('better-sqlite3'); const db = new Database(':memory:'); db.close();",
+        npmEnv,
+      );
+    }
+    if (dependencies['node-pty']) {
+      verifyNativeDependency(dir, 'node-pty', "require('node-pty');", npmEnv);
+    }
   }
 }
 
@@ -761,7 +789,12 @@ function doctor({ json = false } = {}) {
   checks.agent_sdk = !!sdkVersion;
   if (!sdkVersion) issues.push('@anthropic-ai/claude-agent-sdk is not installed under dashboard');
   const secretResult = secretScan({ quiet: true });
-  if (!secretResult.ok) issues.push(`secret scan found ${secretResult.issues.length} issue(s)`);
+  if (!secretResult.ok) {
+    issues.push(`secret scan found ${secretResult.issues.length} issue(s)`);
+    for (const issue of secretResult.issues) {
+      warnings.push(`secret scan match: ${issue.file} (${issue.reason})`);
+    }
+  }
   const mitmCa = checkMitmCaPermissions(process.env);
   checks.mitm_ca_permissions = mitmCa.ok;
   if (!mitmCa.ok) issues.push(...mitmCa.issues);
@@ -923,8 +956,68 @@ function bootstrap() {
   log(`bootstrap complete`);
   log(`installed agents: ${agentResult.installed.length}`);
   log(`existing agents left untouched: ${agentResult.skipped.length}`);
-  if (!fs.existsSync(DOTENV_PATH)) warn('no .env found; copy .env.example to .env and configure non-secret runtime paths');
+  if (!fs.existsSync(DOTENV_PATH) && process.env.GLADOS_DESKTOP !== '1') {
+    warn('no .env found; copy .env.example to .env and configure non-secret runtime paths');
+  }
   return { paths, agentResult };
+}
+
+async function llmCheck() {
+  loadDotenv();
+  const { loadLlmAuthToken } = require('../../dashboard/lib/secrets/llm-secrets');
+  const { fetchLiteLlmModels, gatewayBaseUrl } = require('../../dashboard/lib/litellm-models');
+  const token = loadLlmAuthToken(process.env);
+  if (!token) throw new Error('No stored LiteLLM key was found. Run scripts/setup-llm-secret.sh first.');
+
+  const model = primaryModel();
+  const baseUrl = gatewayBaseUrl(process.env);
+  const catalog = await fetchLiteLlmModels({ token, env: process.env, timeoutMs: 10_000 });
+  if (catalog.available) {
+    const modelPresent = catalog.models.includes(model);
+    log(`LiteLLM model catalog: OK (${catalog.models.length} model(s); ${model} ${modelPresent ? 'available' : 'missing'})`);
+  } else {
+    warn(`LiteLLM model catalog: ${catalog.message}`);
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+  const startedAt = Date.now();
+  let response;
+  try {
+    response = await fetch(`${baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 4,
+        messages: [{ role: 'user', content: 'Reply with OK.' }],
+      }),
+      signal: controller.signal,
+    });
+    await response.text();
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error('LiteLLM Anthropic Messages check timed out after 30 seconds.');
+    throw new Error('LiteLLM Anthropic Messages route is unreachable.');
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error('LiteLLM Anthropic Messages check failed with HTTP 401: the stored key is not recognized. Re-run scripts/setup-llm-secret.sh with the current key.');
+    }
+    if (response.status === 403) {
+      throw new Error(`LiteLLM Anthropic Messages check failed with HTTP 403: the key lacks AI API or ${model} access.`);
+    }
+    throw new Error(`LiteLLM Anthropic Messages check failed with HTTP ${response.status}.`);
+  }
+  log(`LiteLLM Anthropic Messages: OK (HTTP ${response.status}, model ${model}, ${Date.now() - startedAt}ms)`);
+  if (!catalog.available) warn('Chat is authorized, but Settings model discovery will remain unavailable until /v1/models access is granted.');
+  return { catalog, model };
 }
 
 function update() {
@@ -942,7 +1035,7 @@ function update() {
   log(`status file: ${paths.upstreamStatusPath}`);
 }
 
-function main() {
+async function main() {
   const cmd = process.argv[2];
   try {
     switch (cmd) {
@@ -957,9 +1050,10 @@ function main() {
         const result = secretScan();
         process.exit(result.ok ? 0 : 1);
       }
+      case 'llm-check': return await llmCheck();
       case 'export-report': return exportReport(process.argv[3]);
       default:
-        fail(`usage: ${path.relative(REPO_ROOT, __filename)} <bootstrap|update|doctor|install-deps|secret-scan|export-report>`);
+        fail(`usage: ${path.relative(REPO_ROOT, __filename)} <bootstrap|update|doctor|install-deps|secret-scan|llm-check|export-report>`);
     }
   } catch (e) {
     fail(e.stack || e.message);
@@ -976,6 +1070,7 @@ module.exports = {
   ensureBlackboardDb,
   ensureWatchdogDb,
   doctor,
+  llmCheck,
   secretScan,
   bareModelAlias,
 };

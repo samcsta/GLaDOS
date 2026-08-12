@@ -44,7 +44,7 @@ test('fetches the live catalog with server-side authorization and no credential 
   assert.equal(JSON.stringify(result).includes(fixtureCredential), false);
 });
 
-test('returns an empty sanitized catalog when LiteLLM rejects discovery', async () => {
+test('returns an empty sanitized catalog and distinguishes LiteLLM route denial', async () => {
   const result = await fetchLiteLlmModels({
     token: ['model', 'catalog', 'fixture'].join('-'),
     fetchImpl: async () => ({
@@ -56,5 +56,6 @@ test('returns an empty sanitized catalog when LiteLLM rejects discovery', async 
   assert.equal(result.available, false);
   assert.deepEqual(result.models, []);
   assert.equal(result.status, 403);
+  assert.match(result.message, /not authorized to list models \(HTTP 403\)/);
   assert.equal(JSON.stringify(result).includes('sensitive gateway detail'), false);
 });

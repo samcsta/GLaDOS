@@ -11,6 +11,21 @@
 Replace `updates.redteam.example` with the private update hostname. Keep the app ID
 `com.glados.ops`, signing identity, feed paths, and architecture stable.
 
+## v4.4.8 clean-Mac correction
+
+Do not overwrite the published v4.4.8 artifacts. That build could use a
+Homebrew `mitmdump` from the release Mac during smoke testing even though it
+was not present in the app, and its loose `.command` uninstaller could be
+blocked by Gatekeeper. Upgrade affected Macs manually to v4.4.9. The corrected
+release bundles pinned mitmproxy arm64, forces the packaged test to use it with
+a system-only `PATH`, and replaces the script launcher with a separately
+signed, notarized, and stapled uninstaller app.
+
+As a temporary v4.4.8 repair before installing v4.4.9, run
+`brew install --cask mitmproxy`, then fully quit and reopen GLaDOS. To uninstall
+v4.4.8 without bypassing Gatekeeper, run
+`bash "/Applications/GLaDOS.app/Contents/Resources/scripts/uninstall-desktop-app.sh"`.
+
 ## One-time bootstrap before v4.0.1
 
 The originally installed v4.0.0 macOS app predates the private updater. It
@@ -24,11 +39,13 @@ requires a Developer ID Application certificate and Apple notarization
 credentials:
 
 ```bash
-export CSC_NAME='Developer ID Application: ...'
-export APPLE_API_KEY='/secure/AuthKey_....p8'
-export APPLE_API_ISSUER='...'
+export CSC_NAME='Your Name or Company (TEAMID)'
+export APPLE_KEYCHAIN_PROFILE='glados-notary'
 npm run release:mac --prefix desktop
 ```
+
+For CI without a Keychain profile, provide `APPLE_API_KEY`,
+`APPLE_API_KEY_ID`, and `APPLE_API_ISSUER` instead.
 
 The release command fails closed when signing or notarization credentials are
 missing. Back up `~/.glados`, quit GLaDOS, and install the resulting DMG on each

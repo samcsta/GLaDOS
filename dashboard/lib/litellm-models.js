@@ -55,9 +55,11 @@ async function fetchLiteLlmModels(options = {}) {
     let payload = null;
     try { payload = JSON.parse(await response.text()); } catch {}
     if (!response.ok) {
-      const message = response.status === 401 || response.status === 403
-        ? 'The LiteLLM key was rejected for model discovery.'
-        : `LiteLLM model discovery failed with HTTP ${response.status}.`;
+      const message = response.status === 401
+        ? 'The stored LiteLLM key was not recognized (HTTP 401). Re-enter the current key.'
+        : response.status === 403
+          ? 'The LiteLLM key reached the gateway but is not authorized to list models (HTTP 403). Check management-route, team, and model permissions.'
+          : `LiteLLM model discovery failed with HTTP ${response.status}.`;
       return unavailable('gateway-error', message, { status: response.status });
     }
     return {

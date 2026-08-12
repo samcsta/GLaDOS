@@ -81,7 +81,13 @@ function startDashboard() {
     const child = fork(server, [], {
       cwd: root,
       execPath: dashboardNodeExecPath(),
-      env: { ...process.env, PORT: '0', GLADOS_DESKTOP: '1', GLADOS_BROWSER_MCP: process.env.GLADOS_BROWSER_MCP || '1' },
+      env: {
+        ...process.env,
+        PORT: '0',
+        GLADOS_DESKTOP: '1',
+        GLADOS_DESKTOP_RESOURCES: root,
+        GLADOS_BROWSER_MCP: process.env.GLADOS_BROWSER_MCP || '1',
+      },
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
     dashboard = child;

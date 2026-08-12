@@ -19,6 +19,7 @@ const {
   autoApprovedToolsForAgent,
   mapSdkMessageToEvents,
   waitForCoreMcpServers,
+  enhanceFirstActivityTimeoutError,
   streamAgentTurn,
   browserServerName,
   normalizeToolInput,
@@ -1413,11 +1414,72 @@ test('streamAgentTurn interrupts a turn that produces no first model activity', 
       prompt: 'continue the approved action',
       store: false,
       queryImpl,
-      options: { firstActivityTimeoutMs: 25, haltPollMs: 0 },
+      options: {
+        firstActivityTimeoutMs: 25,
+        haltPollMs: 0,
+        sdkOptions: { model: 'claude-sonnet-5' },
+        modelCatalogFetcher: async () => ({
+          available: false,
+          reason: 'gateway-error',
+          status: 401,
+          message: 'The LiteLLM key was rejected for model discovery.',
+        }),
+      },
     }),
-    error => error.code === 'GLADOS_FIRST_ACTIVITY_TIMEOUT'
+    error => {
+      assert.equal(error.code, 'GLADOS_FIRST_ACTIVITY_TIMEOUT');
+      assert.equal(error.timeoutMs, 25);
+      assert.match(error.message, /25ms/);
+      assert.match(error.message, /LiteLLM key was rejected/);
+      assert.deepEqual(error.liteLlmDiagnostic, {
+        available: false,
+        reason: 'gateway-error',
+        status: 401,
+        model: 'claude-sonnet-5',
+        modelAvailable: null,
+      });
+      return true;
+    }
   );
   assert.equal(interrupted, true);
+});
+
+test('streamAgentTurn reports the configured first-activity deadline after non-model SDK initialization', async () => {
+  let calls = 0;
+  const queryImpl = () => ({
+    interrupt: async () => {},
+    [Symbol.asyncIterator]() { return this; },
+    next() {
+      calls += 1;
+      if (calls === 1) return Promise.resolve({ done: false, value: { type: 'system', subtype: 'init' } });
+      return new Promise(() => {});
+    },
+  });
+
+  await assert.rejects(
+    streamAgentTurn({
+      agentId: 'glados',
+      prompt: 'hello glados',
+      store: false,
+      queryImpl,
+      options: { firstActivityTimeoutMs: 30, firstActivityDiagnostic: false, haltPollMs: 0 },
+    }),
+    error => error.code === 'GLADOS_FIRST_ACTIVITY_TIMEOUT'
+      && error.timeoutMs === 30
+      && /within 30ms/.test(error.message)
+  );
+});
+
+test('first-activity diagnostics identify a model missing from a healthy LiteLLM catalog', async () => {
+  const error = new Error('Agent SDK produced no model or tool activity within 60000ms');
+  error.code = 'GLADOS_FIRST_ACTIVITY_TIMEOUT';
+  error.timeoutMs = 60000;
+  error.model = 'claude-sonnet-5';
+  const enhanced = await enhanceFirstActivityTimeoutError(error, {
+    modelCatalogFetcher: async () => ({ available: true, models: ['claude-opus-4-8'] }),
+  });
+  assert.match(enhanced.message, /model claude-sonnet-5 is not available/);
+  assert.equal(enhanced.liteLlmDiagnostic.modelAvailable, false);
 });
 
 test('streamAgentTurn drops a resumed session and retries once after first-activity timeout', async () => {

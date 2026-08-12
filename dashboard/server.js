@@ -902,7 +902,9 @@ function queueAcceptedChatTurn({ sessionId, agentId, message, turnId, onSuccess 
         error: error.message || String(error),
         code: error.code || null,
         provider: 'LiteLLM Anthropic Messages',
+        model: error.model || null,
         api: '/v1/messages',
+        liteLlmDiagnostic: error.liteLlmDiagnostic || null,
         turnId,
         isError: true,
       });
