@@ -2,10 +2,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { fork, spawnSync } = require('node:child_process');
-const { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, net, safeStorage, session, shell } = require('electron');
 const { AppImageUpdater, DebUpdater, MacUpdater } = require('electron-updater');
 const { UpdateCredentialStore } = require('./lib/private-update.cjs');
 const { SetupAssistant } = require('./lib/setup-assistant.cjs');
+const { systemNetworkEnvironment } = require('./lib/network-environment.cjs');
 
 const runtimeDir = path.resolve(process.env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), '.glados'));
 
@@ -35,6 +36,7 @@ let updater = null;
 let lastUpdateCheck = null;
 let downloadedUpdateVersion = null;
 let lastSetupVerification = null;
+let dashboardNetworkEnv = {};
 
 const updateCredentials = new UpdateCredentialStore({ runtimeDir, safeStorage, platform: process.platform });
 
@@ -93,6 +95,7 @@ function startDashboard() {
         GLADOS_DESKTOP: '1',
         GLADOS_DESKTOP_RESOURCES: root,
         GLADOS_BROWSER_MCP: process.env.GLADOS_BROWSER_MCP || '1',
+        ...dashboardNetworkEnv,
       },
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
@@ -168,6 +171,11 @@ function createWindow(url) {
 
 app.whenReady().then(async () => {
   try {
+    dashboardNetworkEnv = await systemNetworkEnvironment({
+      env: process.env,
+      url: setupAssistant().gatewayUrl(),
+      resolveProxy: target => session.defaultSession.resolveProxy(target),
+    });
     const url = await startDashboard();
     if (process.env.GLADOS_PACKAGED_SMOKE === '1') {
       const response = await fetch(`${url}/api/healthz`);
@@ -311,7 +319,12 @@ ipcMain.handle('desktop:setup:trust-ca', async event => {
 ipcMain.handle('desktop:setup:verify', async event => {
   assertTrustedDashboardEvent(event);
   const { verifyLiteLlm } = require(path.join(repoRoot(), 'dashboard', 'lib', 'litellm-setup.js'));
-  const litellm = await verifyLiteLlm({ env: process.env });
+  const litellm = await verifyLiteLlm({
+    env: process.env,
+    fetchImpl: (url, options) => net.fetch(url, options),
+    modelTimeoutMs: 30_000,
+    messageTimeoutMs: 45_000,
+  });
   const status = await setupStatus();
   lastSetupVerification = {
     ...litellm,

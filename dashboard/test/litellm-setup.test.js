@@ -53,3 +53,17 @@ test('setup verification does not make network requests without a stored key', a
   assert.equal(result.messages.reason, 'missing-secret');
   assert.equal(calls, 0);
 });
+
+test('setup verification exposes a safe transport code without exposing credentials', async () => {
+  const fixtureCredential = ['private', 'fixture', 'credential'].join('-');
+  const error = new Error('fetch failed');
+  error.cause = { code: 'SELF_SIGNED_CERT_IN_CHAIN' };
+  const result = await verifyLiteLlm({
+    token: fixtureCredential,
+    fetchImpl: async () => { throw error; },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.models.networkCode, 'SELF_SIGNED_CERT_IN_CHAIN');
+  assert.equal(result.messages.networkCode, 'SELF_SIGNED_CERT_IN_CHAIN');
+  assert.equal(JSON.stringify(result).includes(fixtureCredential), false);
+});

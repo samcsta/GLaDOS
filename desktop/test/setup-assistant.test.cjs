@@ -55,6 +55,42 @@ test('optional local profiles use an atomic owner-only file and may reuse Ford c
   }
 });
 
+test('Dradis-only credentials accept an email username and preserve an existing Ford profile', () => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-setup-'));
+  try {
+    const assistant = new SetupAssistant({ runtimeDir, platform: 'linux', env: {} });
+    assistant.saveLocalSecrets({
+      fordUsername: 'ford-operator@example.test',
+      fordPassword: 'ford-fixture-password',
+      useFordForDradis: false,
+    });
+    const status = assistant.saveLocalSecrets({
+      dradisUsername: 'dradis-operator@example.test',
+      dradisPassword: 'dradis-fixture-password',
+      useFordForDradis: false,
+    });
+    assert.deepEqual(status.profiles, ['dradis', 'ford-sso']);
+    const saved = JSON.parse(fs.readFileSync(assistant.localAuthFile, 'utf8'));
+    assert.equal(saved.profiles['ford-sso'].username, 'ford-operator@example.test');
+    assert.equal(saved.profiles.dradis.username, 'dradis-operator@example.test');
+  } finally {
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
+  }
+});
+
+test('optional profile validation reports the missing field precisely', () => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-setup-'));
+  try {
+    const assistant = new SetupAssistant({ runtimeDir, platform: 'linux', env: {} });
+    assert.throws(
+      () => assistant.saveLocalSecrets({ dradisUsername: 'dradis-operator@example.test' }),
+      /Dradis password is required/,
+    );
+  } finally {
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
+  }
+});
+
 test('setup input rejects empty and control-character secrets', () => {
   assert.equal(normalizeSecret(' Bearer abc-123 '), 'abc-123');
   assert.throws(() => normalizeSecret('  '), /required/);

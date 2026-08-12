@@ -4291,8 +4291,8 @@ function openSetupAssistant(initialStatus, onStatus) {
             <label class="setup-field"><span>Ford SSO username</span><input id="setup-ford-user" autocomplete="username" /></label>
             <label class="setup-field"><span>Ford SSO password</span><input id="setup-ford-pass" type="password" autocomplete="new-password" /></label>
           </div>
-          <label class="setup-check"><input id="setup-reuse-ford" type="checkbox" checked /><span>Use the Ford SSO credentials for Dradis</span></label>
-          <div class="setup-field-grid" id="setup-dradis-fields" hidden>
+          <label class="setup-check"><input id="setup-reuse-ford" type="checkbox" /><span>Use the saved Ford SSO credentials for Dradis</span></label>
+          <div class="setup-field-grid" id="setup-dradis-fields">
             <label class="setup-field"><span>Dradis username</span><input id="setup-dradis-user" autocomplete="username" /></label>
             <label class="setup-field"><span>Dradis password</span><input id="setup-dradis-pass" type="password" autocomplete="new-password" /></label>
           </div>

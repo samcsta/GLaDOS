@@ -2,7 +2,7 @@ const { loadLlmAuthToken } = require('./secrets/llm-secrets');
 const { bareModelAlias, isBareModelAlias } = require('../../scripts/lib/model-aliases');
 
 const DEFAULT_BASE_URL = 'https://llmapi.redteamstuff.com';
-const DEFAULT_TIMEOUT_MS = 5000;
+const DEFAULT_TIMEOUT_MS = 15000;
 
 function gatewayBaseUrl(env = process.env, fallback = DEFAULT_BASE_URL) {
   return String(env.ANTHROPIC_BASE_URL || env.LLMAPI_BASE_URL || fallback || DEFAULT_BASE_URL)
@@ -21,6 +21,15 @@ function unavailable(reason, message, extra = {}) {
     checkedAt: new Date().toISOString(),
     ...extra,
   };
+}
+
+function networkErrorCode(error) {
+  const direct = [error?.code, error?.cause?.code, error?.cause?.errno]
+    .map(value => String(value || '').trim())
+    .find(Boolean);
+  if (direct && /^[A-Z0-9_-]+$/i.test(direct)) return direct;
+  const match = String(error?.message || '').match(/\b(ERR_[A-Z0-9_]+|E[A-Z0-9_]+)\b/);
+  return match?.[1] || null;
 }
 
 function isEmbeddingModel(row, id) {
@@ -70,9 +79,10 @@ async function fetchLiteLlmModels(options = {}) {
     };
   } catch (error) {
     const timedOut = error?.name === 'AbortError';
+    const code = networkErrorCode(error);
     return unavailable(timedOut ? 'timeout' : 'unreachable', timedOut
       ? 'LiteLLM model discovery timed out.'
-      : 'LiteLLM model discovery is currently unreachable.');
+      : `LiteLLM model discovery is currently unreachable${code ? ` (${code})` : ''}.`, { networkCode: code });
   } finally {
     clearTimeout(timer);
   }
@@ -81,5 +91,6 @@ async function fetchLiteLlmModels(options = {}) {
 module.exports = {
   fetchLiteLlmModels,
   gatewayBaseUrl,
+  networkErrorCode,
   selectableModelIds,
 };

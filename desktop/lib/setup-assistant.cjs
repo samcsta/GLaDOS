@@ -48,6 +48,17 @@ function privateFileStatus(file) {
   return { exists: true, ownerOnly: (stat.mode & 0o077) === 0 };
 }
 
+function readPrivateJson(file) {
+  const status = privateFileStatus(file);
+  if (!status.exists) return null;
+  if (!status.ownerOnly) throw new Error(`${file} must use owner-only permissions (chmod 600)`);
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    throw new Error(`${file} is not valid JSON`);
+  }
+}
+
 class SetupAssistant {
   constructor(options = {}) {
     this.runtimeDir = path.resolve(options.runtimeDir || path.join(os.homedir(), '.glados'));
@@ -160,30 +171,42 @@ class SetupAssistant {
   }
 
   saveLocalSecrets(input = {}) {
-    const profiles = {};
+    const saved = readPrivateJson(this.localAuthFile);
+    const profiles = { ...(saved?.profiles || {}) };
+    let changed = false;
     const fordUsernameRaw = String(input.fordUsername || '').trim();
     const fordPasswordRaw = String(input.fordPassword || '');
     if (fordUsernameRaw || fordPasswordRaw) {
+      if (!fordUsernameRaw) throw new Error('Ford SSO username is required when a Ford password is entered');
+      if (!fordPasswordRaw.trim()) throw new Error('Ford SSO password is required when a Ford username is entered');
       profiles['ford-sso'] = {
         username: normalizeUsername(fordUsernameRaw, 'Ford SSO username'),
         password: normalizeSecret(fordPasswordRaw, 'Ford SSO password'),
         allowed_hosts: ['corp.sts.ford.com', 'www.is.dealerconnection.com'],
         purpose: 'Ford ADFS / Active Directory login for authorized assessments',
       };
+      changed = true;
     }
 
     const reuseFord = Boolean(input.useFordForDradis);
-    const dradisUsernameRaw = reuseFord ? fordUsernameRaw : String(input.dradisUsername || '').trim();
-    const dradisPasswordRaw = reuseFord ? fordPasswordRaw : String(input.dradisPassword || '');
-    if (dradisUsernameRaw || dradisPasswordRaw || reuseFord) {
+    const reusableFord = changed ? profiles['ford-sso'] : saved?.profiles?.['ford-sso'];
+    const dradisUsernameRaw = reuseFord ? String(reusableFord?.username || '').trim() : String(input.dradisUsername || '').trim();
+    const dradisPasswordRaw = reuseFord ? String(reusableFord?.password || '') : String(input.dradisPassword || '');
+    if (reuseFord && (!dradisUsernameRaw || !dradisPasswordRaw)) {
+      throw new Error('Save Ford SSO credentials before reusing them for Dradis');
+    }
+    if (dradisUsernameRaw || dradisPasswordRaw) {
+      if (!dradisUsernameRaw) throw new Error('Dradis username is required when a Dradis password is entered');
+      if (!dradisPasswordRaw.trim()) throw new Error('Dradis password is required when a Dradis username is entered');
       profiles.dradis = {
         username: normalizeUsername(dradisUsernameRaw, 'Dradis username'),
         password: normalizeSecret(dradisPasswordRaw, 'Dradis password'),
         allowed_hosts: ['dradis.redteamstuff.com', 'dradistab.redteamstuff.com'],
         purpose: 'Dradis prior-report lookup and approved report workflow',
       };
+      changed = true;
     }
-    if (!Object.keys(profiles).length) throw new Error('enter at least one optional local credential profile or skip this step');
+    if (!changed) throw new Error('Enter a Ford or Dradis username and password, or skip this optional step');
 
     writePrivateJson(this.localAuthFile, {
       version: 1,
@@ -222,5 +245,6 @@ module.exports = {
   DEFAULT_KEYCHAIN_SERVICE,
   SetupAssistant,
   normalizeSecret,
+  readPrivateJson,
   writePrivateJson,
 };
