@@ -14,10 +14,16 @@ function fixture() {
   const installRoot = path.join(base, 'Applications');
   const app = path.join(installRoot, 'GLaDOS.app');
   const runtime = path.join(home, '.glados');
+  const metadataLog = path.join(base, 'metadata.log');
+  const lsregister = path.join(base, 'lsregister');
+  const mdimport = path.join(base, 'mdimport');
   fs.mkdirSync(path.join(app, 'Contents', 'MacOS'), { recursive: true });
   fs.mkdirSync(runtime, { recursive: true });
   fs.writeFileSync(path.join(runtime, 'operator-data.txt'), 'preserve me');
-  return { base, home, installRoot, app, runtime };
+  for (const executable of [lsregister, mdimport]) {
+    fs.writeFileSync(executable, '#!/bin/bash\nprintf "%s\\n" "$*" >> "$GLADOS_METADATA_LOG"\n', { mode: 0o755 });
+  }
+  return { base, home, installRoot, app, runtime, metadataLog, lsregister, mdimport };
 }
 
 function runUninstaller(paths, args) {
@@ -30,6 +36,9 @@ function runUninstaller(paths, args) {
       GLADOS_RUNTIME_DIR: paths.runtime,
       GLADOS_UNINSTALL_SKIP_PROCESS_STOP: '1',
       GLADOS_UNINSTALL_SKIP_SECURITY: '1',
+      GLADOS_LSREGISTER: paths.lsregister,
+      GLADOS_MDIMPORT: paths.mdimport,
+      GLADOS_METADATA_LOG: paths.metadataLog,
     },
   });
 }
@@ -44,6 +53,12 @@ test('default macOS uninstall trashes only the app and preserves operator data',
   const trash = fs.readdirSync(path.join(paths.home, '.Trash'));
   assert.equal(trash.some(name => name.startsWith('GLaDOS.app.uninstalled-')), true);
   assert.match(result.stdout, /Operator data remains at/);
+  assert.match(result.stdout, /refreshed Spotlight metadata/);
+  const metadata = fs.readFileSync(paths.metadataLog, 'utf8');
+  assert.match(metadata, new RegExp(`-u ${paths.app.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(metadata, /-u .*GLaDOS\.app\.uninstalled-/);
+  assert.match(metadata, /-gc/);
+  assert.match(metadata, new RegExp(`-i ${paths.installRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
 });
 
 test('purge mode trashes app and operator data without targeting toolchains', t => {

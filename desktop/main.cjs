@@ -5,6 +5,7 @@ const { fork, spawnSync } = require('node:child_process');
 const { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } = require('electron');
 const { AppImageUpdater, DebUpdater, MacUpdater } = require('electron-updater');
 const { UpdateCredentialStore } = require('./lib/private-update.cjs');
+const { SetupAssistant } = require('./lib/setup-assistant.cjs');
 
 const runtimeDir = path.resolve(process.env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), '.glados'));
 
@@ -33,12 +34,17 @@ let dashboardOrigin = null;
 let updater = null;
 let lastUpdateCheck = null;
 let downloadedUpdateVersion = null;
+let lastSetupVerification = null;
 
 const updateCredentials = new UpdateCredentialStore({ runtimeDir, safeStorage, platform: process.platform });
 
 function repoRoot() {
   if (app.isPackaged) return process.resourcesPath;
   return path.resolve(__dirname, '..');
+}
+
+function setupAssistant() {
+  return new SetupAssistant({ runtimeDir, appRoot: repoRoot(), env: process.env });
 }
 
 function dashboardNodeExecPath() {
@@ -250,14 +256,76 @@ function updaterForPlatform(access) {
 
 async function dashboardJson(pathname, options = {}) {
   if (!dashboardUrl) throw new Error('dashboard is not ready');
+  const { timeoutMs = 15000, ...fetchOptions } = options;
   const response = await fetch(new URL(pathname, dashboardUrl), {
-    ...options,
-    signal: AbortSignal.timeout(15000),
+    ...fetchOptions,
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok || body.ok === false) throw new Error(body.error || `dashboard returned HTTP ${response.status}`);
   return body;
 }
+
+async function setupStatus() {
+  const status = setupAssistant().status();
+  let proxy = { healthy: false, processStatus: 'unknown', error: 'proxy health is unavailable' };
+  try {
+    const current = await dashboardJson('/api/health/proxy');
+    proxy = {
+      healthy: Boolean(current.healthy),
+      backend: current.backend || null,
+      processStatus: current.processStatus || null,
+      error: current.error || null,
+    };
+  } catch (error) {
+    proxy.error = error.message;
+  }
+  return { ...status, proxy, lastVerification: lastSetupVerification };
+}
+
+ipcMain.handle('desktop:setup:status', async event => {
+  assertTrustedDashboardEvent(event);
+  return setupStatus();
+});
+ipcMain.handle('desktop:setup:save-litellm', async (event, input) => {
+  assertTrustedDashboardEvent(event);
+  lastSetupVerification = null;
+  setupAssistant().saveLiteLlmKey(input);
+  return setupStatus();
+});
+ipcMain.handle('desktop:setup:save-local-secrets', async (event, input) => {
+  assertTrustedDashboardEvent(event);
+  setupAssistant().saveLocalSecrets(input);
+  return setupStatus();
+});
+ipcMain.handle('desktop:setup:generate-ca', async event => {
+  assertTrustedDashboardEvent(event);
+  await setupAssistant().runCaAction('generate');
+  return setupStatus();
+});
+ipcMain.handle('desktop:setup:trust-ca', async event => {
+  assertTrustedDashboardEvent(event);
+  await setupAssistant().runCaAction('trust');
+  return setupStatus();
+});
+ipcMain.handle('desktop:setup:verify', async event => {
+  assertTrustedDashboardEvent(event);
+  const { verifyLiteLlm } = require(path.join(repoRoot(), 'dashboard', 'lib', 'litellm-setup.js'));
+  const litellm = await verifyLiteLlm({ env: process.env });
+  const status = await setupStatus();
+  lastSetupVerification = {
+    ...litellm,
+    ca: { ok: status.ca.generated && status.ca.trusted },
+    proxy: {
+      ok: status.proxy.healthy,
+      processStatus: status.proxy.processStatus,
+      message: status.proxy.healthy
+        ? 'The bundled proxy is running.'
+        : (status.proxy.error || 'The bundled proxy is not healthy.'),
+    },
+  };
+  return { ...status, lastVerification: lastSetupVerification };
+});
 
 ipcMain.handle('desktop:update-auth:status', event => {
   assertTrustedDashboardEvent(event);

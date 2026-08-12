@@ -964,60 +964,18 @@ function bootstrap() {
 
 async function llmCheck() {
   loadDotenv();
-  const { loadLlmAuthToken } = require('../../dashboard/lib/secrets/llm-secrets');
-  const { fetchLiteLlmModels, gatewayBaseUrl } = require('../../dashboard/lib/litellm-models');
-  const token = loadLlmAuthToken(process.env);
-  if (!token) throw new Error('No stored LiteLLM key was found. Run scripts/setup-llm-secret.sh first.');
-
-  const model = primaryModel();
-  const baseUrl = gatewayBaseUrl(process.env);
-  const catalog = await fetchLiteLlmModels({ token, env: process.env, timeoutMs: 10_000 });
-  if (catalog.available) {
-    const modelPresent = catalog.models.includes(model);
-    log(`LiteLLM model catalog: OK (${catalog.models.length} model(s); ${model} ${modelPresent ? 'available' : 'missing'})`);
+  const { verifyLiteLlm } = require('../../dashboard/lib/litellm-setup');
+  const result = await verifyLiteLlm({ env: process.env });
+  if (result.models.ok) {
+    log(`LiteLLM model catalog: OK (${result.models.count} model(s); ${result.model} ${result.models.modelAvailable ? 'available' : 'missing'})`);
   } else {
-    warn(`LiteLLM model catalog: ${catalog.message}`);
+    warn(`LiteLLM model catalog: ${result.models.message}`);
   }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30_000);
-  const startedAt = Date.now();
-  let response;
-  try {
-    response = await fetch(`${baseUrl}/v1/messages`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 4,
-        messages: [{ role: 'user', content: 'Reply with OK.' }],
-      }),
-      signal: controller.signal,
-    });
-    await response.text();
-  } catch (error) {
-    if (error?.name === 'AbortError') throw new Error('LiteLLM Anthropic Messages check timed out after 30 seconds.');
-    throw new Error('LiteLLM Anthropic Messages route is unreachable.');
-  } finally {
-    clearTimeout(timer);
-  }
-
-  if (!response.ok) {
-    if (response.status === 401) {
-      throw new Error('LiteLLM Anthropic Messages check failed with HTTP 401: the stored key is not recognized. Re-run scripts/setup-llm-secret.sh with the current key.');
-    }
-    if (response.status === 403) {
-      throw new Error(`LiteLLM Anthropic Messages check failed with HTTP 403: the key lacks AI API or ${model} access.`);
-    }
-    throw new Error(`LiteLLM Anthropic Messages check failed with HTTP ${response.status}.`);
-  }
-  log(`LiteLLM Anthropic Messages: OK (HTTP ${response.status}, model ${model}, ${Date.now() - startedAt}ms)`);
-  if (!catalog.available) warn('Chat is authorized, but Settings model discovery will remain unavailable until /v1/models access is granted.');
-  return { catalog, model };
+  if (!result.messages.ok) throw new Error(result.messages.message);
+  log(`LiteLLM Anthropic Messages: OK (HTTP ${result.messages.status}, model ${result.model}, ${result.messages.latencyMs}ms)`);
+  if (!result.models.ok) warn('Chat is authorized, but Settings model discovery will remain unavailable until /v1/models access is granted.');
+  if (!result.models.modelAvailable) throw new Error(`LiteLLM model ${result.model} is not available to this key.`);
+  return result;
 }
 
 function update() {

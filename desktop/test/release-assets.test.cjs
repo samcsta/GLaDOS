@@ -45,3 +45,15 @@ test('release notarizes and validates the uninstaller independently and from the
   assert.match(release, /stapler', 'validate', mountedUninstaller/);
   assert.match(release, /Uninstall GLaDOS\.command/);
 });
+
+test('local installer can deploy the exact signed release and refresh app discovery metadata', () => {
+  const installer = fs.readFileSync(path.join(root, 'scripts', 'install-desktop-app.sh'), 'utf8');
+  assert.match(installer, /GLADOS_APP_SOURCE/);
+  assert.match(installer, /verify-packaged\.cjs/);
+  assert.match(installer, /LSREGISTER.*-u/s);
+  assert.match(installer, /LSREGISTER.*-f/s);
+  assert.match(installer, /LSREGISTER.*-gc/s);
+  assert.match(installer, /MDIMPORT.*-i/s);
+  assert.match(installer, /GLaDOS\.app\.replaced-/);
+  assert.doesNotMatch(installer, /rm -rf "\$DEST"/);
+});

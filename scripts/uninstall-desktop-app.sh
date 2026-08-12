@@ -8,10 +8,13 @@ TRASH_DIR="$HOME/.Trash"
 LLM_SERVICE="${GLADOS_LLM_KEYCHAIN_SERVICE:-glados.llmapi}"
 LLM_ACCOUNT="${GLADOS_LLM_KEYCHAIN_ACCOUNT:-$(id -un)}"
 LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+LSREGISTER="${GLADOS_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}"
+MDIMPORT="${GLADOS_MDIMPORT:-/usr/bin/mdimport}"
 PURGE_DATA=0
 ASSUME_YES=0
 DRY_RUN=0
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+LAST_TRASH_DESTINATION=""
 
 usage() {
   cat <<'EOF'
@@ -61,6 +64,7 @@ describe_plan() {
     echo "  LiteLLM key:   preserve Keychain service '$LLM_SERVICE' for '$LLM_ACCOUNT'"
   fi
   echo "  MITM CA trust: remove GLaDOS Operator MITM CA from the login keychain"
+  echo "  App discovery: remove GLaDOS from Launch Services and refresh Spotlight"
   echo "  Toolchains:    preserve Homebrew, Node, mitmproxy, and red-team tools"
 }
 
@@ -122,7 +126,21 @@ move_to_trash() {
   destination="$TRASH_DIR/${label}.uninstalled-${STAMP}-$$"
   [[ ! -e "$destination" ]] || fail "Trash destination already exists: $destination"
   mv "$source" "$destination"
+  LAST_TRASH_DESTINATION="$destination"
   echo "Moved to Trash: $source -> $destination"
+}
+
+unregister_app_metadata() {
+  local bundle="$1"
+  [[ "${GLADOS_UNINSTALL_SKIP_METADATA:-0}" != "1" ]] || return 0
+  [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -u "$bundle" >/dev/null 2>&1 || true
+}
+
+refresh_app_metadata() {
+  [[ "${GLADOS_UNINSTALL_SKIP_METADATA:-0}" != "1" ]] || return 0
+  [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -gc >/dev/null 2>&1 || true
+  [[ -x "$MDIMPORT" ]] && "$MDIMPORT" -i "$INSTALL_ROOT" >/dev/null 2>&1 || true
+  echo "Removed GLaDOS from Launch Services and refreshed Spotlight metadata."
 }
 
 remove_ca_trust() {
@@ -141,11 +159,10 @@ delete_llm_key() {
 stop_glados
 remove_ca_trust
 
-if [[ -d "$APP_PATH" ]]; then
-  LSREGISTER='/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
-  [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -u "$APP_PATH" >/dev/null 2>&1 || true
-fi
+[[ -d "$APP_PATH" ]] && unregister_app_metadata "$APP_PATH"
 move_to_trash "$APP_PATH" 'GLaDOS.app'
+[[ -n "$LAST_TRASH_DESTINATION" ]] && unregister_app_metadata "$LAST_TRASH_DESTINATION"
+refresh_app_metadata
 
 if ((PURGE_DATA)); then
   delete_llm_key

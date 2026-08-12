@@ -1,6 +1,6 @@
 # GLaDOS
 
-GLaDOS v4.4.9 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
+GLaDOS v4.5.0 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
 
 The application has no OpenClaw or Burp Suite runtime dependency. HTTP capture, replay, history, metrics, and per-agent attribution are provided by a supervised local mitmproxy process behind `/api/proxy/*`. Signed macOS packages include the pinned official Apple-silicon mitmproxy runtime; source installations continue to use the bootstrap-managed Homebrew installation.
 
@@ -63,6 +63,13 @@ scripts/install-desktop-app.sh
 open /Applications/GLaDOS.app
 ```
 
+After launch, open **Settings → Setup Assistant** to complete workstation
+configuration without using Terminal. The guided flow stores the LiteLLM key
+in macOS Keychain, optionally writes allowlisted local credential profiles
+with owner-only permissions, generates and trusts that Mac's unique proxy CA,
+and verifies model discovery, a live Anthropic Messages request, and the
+bundled proxy.
+
 To remove the application while preserving operator data for a reinstall:
 
 ```bash
@@ -73,7 +80,10 @@ Use `scripts/uninstall-desktop-app.sh --purge-data` only when the local
 workspaces, reports, investigations, credentials, proxy history, and databases
 should also be removed. Filesystem data is moved to Trash; the LiteLLM
 Keychain item and GLaDOS MITM CA trust are deleted. The macOS DMG also includes
-a separately signed and notarized **Uninstall GLaDOS.app**.
+a separately signed and notarized **Uninstall GLaDOS.app**. Uninstall also
+unregisters the installed and trashed bundles from Launch Services and
+refreshes Spotlight metadata for `/Applications` so GLaDOS no longer appears
+as an installed application in Spotlight.
 
 On Ubuntu 24.04 x86-64, bootstrap and install the AppImage for the current
 user:
@@ -140,6 +150,6 @@ npm run pack --prefix desktop
 npm run verify:pack --prefix desktop
 ```
 
-The release marker is `v4.4.9`. Build artifacts are written under
+The release marker is `v4.5.0`. Build artifacts are written under
 `artifacts/desktop/` and use the product name `GLaDOS`, so the bundle remains
 `GLaDOS.app`.

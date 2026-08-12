@@ -1,7 +1,7 @@
 # GLaDOS Desktop
 
-Electron shell for GLaDOS v4.4.9. The macOS bundle is named `GLaDOS.app`; the
-Ubuntu package is `GLaDOS-4.4.9-x86_64.AppImage`.
+Electron shell for GLaDOS v4.5.0. The macOS bundle is named `GLaDOS.app`; the
+Ubuntu package is `GLaDOS-4.5.0-x86_64.AppImage`.
 
 See [DISTRIBUTION_PLAN.md](DISTRIBUTION_PLAN.md) for the Developer ID,
 notarization, Apple-silicon/Ubuntu architecture, first-run dependency, and
@@ -30,7 +30,13 @@ bundle.
   independently before it is placed in the notarized DMG. Its default mode
   moves only the app to Trash, removes GLaDOS MITM CA trust, and preserves
   `~/.glados`; its purge option also trashes runtime data and removes the
-  LiteLLM Keychain item.
+  LiteLLM Keychain item. Both modes unregister GLaDOS from Launch Services and
+  refresh Spotlight metadata after moving the application to Trash.
+- Settings includes a four-step Setup Assistant for first install and
+  credential rotation. It stores the LiteLLM key directly in macOS Keychain,
+  supports optional allowlisted local credential profiles, manages the unique
+  workstation proxy CA, and performs live LiteLLM and proxy verification.
+  Secret values are never returned to the dashboard after saving.
 - Source checkouts use the SSE git updater and restart the supervised dashboard
   child. Packaged apps use the authenticated generic HTTPS feed documented in
   `services/private-update-feed/README.md`.

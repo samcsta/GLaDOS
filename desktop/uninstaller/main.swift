@@ -55,7 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let confirmation = NSAlert()
         confirmation.alertStyle = .warning
         confirmation.messageText = "Uninstall GLaDOS?"
-        confirmation.informativeText = "The normal uninstall moves /Applications/GLaDOS.app to Trash, removes GLaDOS MITM CA trust, and preserves ~/.glados for a future reinstall."
+        confirmation.informativeText = "The normal uninstall moves /Applications/GLaDOS.app to Trash, removes it from Spotlight and Launch Services, removes GLaDOS MITM CA trust, and preserves ~/.glados for a future reinstall."
         confirmation.accessoryView = purge
         confirmation.addButton(withTitle: "Uninstall")
         confirmation.addButton(withTitle: "Cancel")

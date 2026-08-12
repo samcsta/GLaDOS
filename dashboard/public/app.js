@@ -4181,11 +4181,193 @@ function toCurl(r) {
 
 // --- Settings ---
 
+function setupStateCard(label, complete, detail, { optional = false } = {}) {
+  const tone = complete ? 'complete' : optional ? 'optional' : 'attention';
+  const marker = complete ? '✓' : optional ? '—' : '!';
+  return `<div class="setup-state-card ${tone}"><span>${marker}</span><div><strong>${escapeHtml(label)}</strong><small>${escapeHtml(detail)}</small></div></div>`;
+}
+
+function renderSetupSummary(root, status) {
+  if (!root) return;
+  if (!status) {
+    root.innerHTML = '<div class="setup-summary-loading">Setup status unavailable.</div>';
+    return;
+  }
+  const verification = status.lastVerification;
+  root.innerHTML = [
+    setupStateCard('LiteLLM key', status.llm?.configured, status.llm?.configured ? `Stored in ${status.llm.source}` : 'Required'),
+    setupStateCard('Local credentials', status.localSecrets?.configured, status.localSecrets?.configured ? status.localSecrets.profiles.join(', ') : 'Optional', { optional: !status.localSecrets?.configured }),
+    setupStateCard('Unique proxy CA', status.ca?.generated && status.ca?.trusted, status.ca?.trusted ? 'Trusted in login Keychain' : status.ca?.generated ? 'Generated; trust required' : 'Generation required'),
+    setupStateCard('Live verification', Boolean(verification?.ok), verification?.ok ? `Passed for ${verification.model}` : 'Run the final check'),
+  ].join('');
+}
+
+async function wireSetupAssistant(wrap) {
+  const summary = wrap.querySelector('#setup-summary');
+  const launch = wrap.querySelector('#launch-setup-assistant');
+  const bridge = window.gladosDesktop;
+  if (!bridge?.getSetupStatus) {
+    renderSetupSummary(summary, null);
+    launch.disabled = true;
+    launch.title = 'The setup assistant is available inside the GLaDOS desktop app.';
+    return;
+  }
+  let status = null;
+  const refresh = async next => {
+    status = next || await bridge.getSetupStatus();
+    renderSetupSummary(summary, status);
+    launch.textContent = status.ready && status.lastVerification?.ok ? 'Review Setup' : 'Open Setup Assistant';
+    return status;
+  };
+  try { await refresh(); }
+  catch (error) {
+    summary.innerHTML = `<div class="setup-summary-loading error">${escapeHtml(error.message)}</div>`;
+  }
+  launch.addEventListener('click', async () => {
+    try {
+      status = status || await refresh();
+      await openSetupAssistant(status, refresh);
+    } catch (error) {
+      pushNotification('error', `Setup assistant failed: ${error.message}`, { toast: true, label: 'Setup' });
+    }
+  });
+}
+
+function setupResultRow(label, ok, message) {
+  return `<div class="setup-result ${ok ? 'pass' : 'fail'}"><span>${ok ? '✓' : '×'}</span><div><strong>${escapeHtml(label)}</strong><small>${escapeHtml(message)}</small></div></div>`;
+}
+
+function openSetupAssistant(initialStatus, onStatus) {
+  return new Promise(resolve => {
+    const bridge = window.gladosDesktop;
+    const root = document.getElementById('modal-root');
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    let status = initialStatus;
+    let step = 0;
+    let busy = false;
+    const steps = ['LiteLLM', 'Local secrets', 'Proxy CA', 'Verify'];
+
+    const close = () => {
+      backdrop.remove();
+      resolve(status);
+    };
+    const updateStatus = async next => {
+      status = next;
+      await onStatus?.(status);
+      render();
+    };
+    const run = async (button, work, successMessage) => {
+      if (busy) return;
+      busy = true;
+      button.disabled = true;
+      const prior = button.textContent;
+      button.textContent = 'Working…';
+      try {
+        await updateStatus(await work());
+        if (successMessage) showToast(successMessage, { kind: 'success', label: 'Setup' });
+      } catch (error) {
+        pushNotification('error', error.message, { toast: true, label: 'Setup' });
+        button.disabled = false;
+        button.textContent = prior;
+      } finally {
+        busy = false;
+      }
+    };
+
+    const stepBody = () => {
+      if (step === 0) {
+        return `<div class="setup-step-copy"><h3>Connect GLaDOS to LiteLLM</h3><p>The key is written directly to macOS Keychain and is never returned to this page. GLaDOS uses the configured corporate gateway below.</p></div>
+          <div class="setup-readonly"><span>Gateway</span><code>${escapeHtml(status.gatewayUrl || 'not configured')}</code></div>
+          <div class="setup-inline-status ${status.llm?.configured ? 'complete' : ''}"><span>${status.llm?.configured ? '✓' : '1'}</span><div><strong>${status.llm?.configured ? 'Key configured' : 'Key required'}</strong><small>${escapeHtml(status.llm?.configured ? `Stored in ${status.llm.source}` : 'Paste the LiteLLM key once. Existing keys can be replaced here.')}</small></div></div>
+          <label class="setup-field" for="setup-litellm-key"><span>${status.llm?.configured ? 'Replace LiteLLM key' : 'LiteLLM key'}</span><input id="setup-litellm-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Paste key" /></label>
+          <div class="setup-action-row"><button type="button" class="safe" data-setup-action="save-litellm">${status.llm?.configured ? 'Replace Key' : 'Save to Keychain'}</button></div>`;
+      }
+      if (step === 1) {
+        const profiles = status.localSecrets?.profiles || [];
+        return `<div class="setup-step-copy"><h3>Optional local credentials</h3><p>Add Ford SSO and Dradis credentials only if this Mac needs those authorized workflows. They are stored in <code>~/.glados/secrets/local-auth.json</code> with owner-only permissions and never committed.</p></div>
+          ${status.localSecrets?.configured ? `<div class="setup-inline-status complete"><span>✓</span><div><strong>Optional profiles configured</strong><small>${escapeHtml(profiles.join(', '))}</small></div></div>` : '<div class="setup-inline-status optional"><span>—</span><div><strong>Safe to skip</strong><small>Core GLaDOS and LiteLLM operation do not require these profiles.</small></div></div>'}
+          <div class="setup-field-grid">
+            <label class="setup-field"><span>Ford SSO username</span><input id="setup-ford-user" autocomplete="username" /></label>
+            <label class="setup-field"><span>Ford SSO password</span><input id="setup-ford-pass" type="password" autocomplete="new-password" /></label>
+          </div>
+          <label class="setup-check"><input id="setup-reuse-ford" type="checkbox" checked /><span>Use the Ford SSO credentials for Dradis</span></label>
+          <div class="setup-field-grid" id="setup-dradis-fields" hidden>
+            <label class="setup-field"><span>Dradis username</span><input id="setup-dradis-user" autocomplete="username" /></label>
+            <label class="setup-field"><span>Dradis password</span><input id="setup-dradis-pass" type="password" autocomplete="new-password" /></label>
+          </div>
+          <div class="setup-action-row"><button type="button" class="safe" data-setup-action="save-local">${status.localSecrets?.configured ? 'Replace Optional Profiles' : 'Save Optional Profiles'}</button></div>`;
+      }
+      if (step === 2) {
+        const fingerprint = status.ca?.fingerprint || 'Not generated yet';
+        return `<div class="setup-step-copy"><h3>Trust this Mac’s unique proxy CA</h3><p>GLaDOS generates a different interception CA on every workstation. Trusting its public certificate lets authorized proxy traffic work without TLS warnings. The private key never leaves this Mac.</p></div>
+          <div class="setup-inline-status ${status.ca?.generated ? 'complete' : ''}"><span>${status.ca?.generated ? '✓' : '1'}</span><div><strong>${status.ca?.generated ? 'Unique CA generated' : 'Generate unique CA'}</strong><small>Private key permissions: ${status.ca?.privateKeyOwnerOnly === true ? 'owner only' : status.ca?.privateKeyOwnerOnly === false ? 'unsafe' : 'not available'}</small></div></div>
+          <div class="setup-inline-status ${status.ca?.trusted ? 'complete' : ''}"><span>${status.ca?.trusted ? '✓' : '2'}</span><div><strong>${status.ca?.trusted ? 'Trusted in macOS Keychain' : 'Trust is required'}</strong><small>macOS may ask for your login password or Touch ID.</small></div></div>
+          <div class="setup-readonly fingerprint"><span>SHA-256 fingerprint</span><code>${escapeHtml(fingerprint)}</code></div>
+          <div class="setup-action-row">
+            ${status.ca?.generated ? '' : '<button type="button" data-setup-action="generate-ca">Generate CA</button>'}
+            <button type="button" class="safe" data-setup-action="trust-ca" ${status.ca?.trusted ? 'disabled' : ''}>${status.ca?.trusted ? 'CA Trusted' : 'Trust CA'}</button>
+          </div>`;
+      }
+      const verification = status.lastVerification;
+      const results = verification ? [
+        setupResultRow('Model catalog', verification.models?.ok && verification.models?.modelAvailable, verification.models?.message || 'No result'),
+        setupResultRow('Anthropic Messages', verification.messages?.ok, verification.messages?.message || 'No result'),
+        setupResultRow('Proxy CA trust', verification.ca?.ok, verification.ca?.ok ? 'The unique CA is generated and trusted.' : 'Proxy CA trust is incomplete.'),
+        setupResultRow('Bundled proxy', verification.proxy?.ok, verification.proxy?.message || 'No proxy result'),
+      ].join('') : '<div class="setup-verification-empty">Run verification to test model discovery, a live four-token message, CA trust, and the bundled proxy.</div>';
+      return `<div class="setup-step-copy"><h3>Verify the complete setup</h3><p>This makes one minimal live LiteLLM request. No key or response content is displayed or saved by the wizard.</p></div>
+        <div class="setup-results">${results}</div>
+        <div class="setup-action-row"><button type="button" class="safe" data-setup-action="verify">${verification ? 'Run Again' : 'Run Verification'}</button></div>`;
+    };
+
+    function render() {
+      const verified = Boolean(status.lastVerification?.ok && status.lastVerification?.ca?.ok && status.lastVerification?.proxy?.ok);
+      backdrop.innerHTML = `<section class="app-modal setup-assistant-modal" role="dialog" aria-modal="true" aria-labelledby="setup-assistant-title">
+        <header><div><h2 id="setup-assistant-title">GLaDOS Setup Assistant</h2><small>Step ${step + 1} of ${steps.length}: ${escapeHtml(steps[step])}</small></div><button type="button" data-modal-close aria-label="Close">×</button></header>
+        <ol class="setup-progress">${steps.map((label, index) => `<li class="${index === step ? 'active' : index < step ? 'complete' : ''}"><span>${index < step ? '✓' : index + 1}</span><small>${escapeHtml(label)}</small></li>`).join('')}</ol>
+        <div class="app-modal-copy setup-assistant-copy">${stepBody()}</div>
+        <footer><button type="button" data-setup-back ${step === 0 ? 'disabled' : ''}>Back</button><span></span>${step === 1 ? '<button type="button" data-setup-skip>Skip Optional</button>' : ''}<button type="button" class="safe" data-setup-next ${step === 0 && !status.llm?.configured ? 'disabled' : step === 2 && !status.ca?.trusted ? 'disabled' : step === 3 && !verified ? 'disabled' : ''}>${step === 3 ? 'Finish' : 'Next'}</button></footer>
+      </section>`;
+      root.replaceChildren(backdrop);
+      backdrop.querySelector('[data-modal-close]').addEventListener('click', close);
+      backdrop.querySelector('[data-setup-back]').addEventListener('click', () => { if (!busy && step > 0) { step--; render(); } });
+      backdrop.querySelector('[data-setup-skip]')?.addEventListener('click', () => { if (!busy) { step++; render(); } });
+      backdrop.querySelector('[data-setup-next]').addEventListener('click', () => {
+        if (busy) return;
+        if (step === 3) close();
+        else { step++; render(); }
+      });
+      backdrop.addEventListener('click', event => { if (event.target === backdrop && !busy) close(); });
+
+      const reuse = backdrop.querySelector('#setup-reuse-ford');
+      reuse?.addEventListener('change', () => { backdrop.querySelector('#setup-dradis-fields').hidden = reuse.checked; });
+      backdrop.querySelector('[data-setup-action="save-litellm"]')?.addEventListener('click', event => run(event.currentTarget, () => bridge.saveLiteLlmKey({ token: backdrop.querySelector('#setup-litellm-key').value }), 'LiteLLM key saved to macOS Keychain.'));
+      backdrop.querySelector('[data-setup-action="save-local"]')?.addEventListener('click', event => run(event.currentTarget, () => bridge.saveLocalSecrets({
+        fordUsername: backdrop.querySelector('#setup-ford-user').value,
+        fordPassword: backdrop.querySelector('#setup-ford-pass').value,
+        useFordForDradis: backdrop.querySelector('#setup-reuse-ford').checked,
+        dradisUsername: backdrop.querySelector('#setup-dradis-user')?.value || '',
+        dradisPassword: backdrop.querySelector('#setup-dradis-pass')?.value || '',
+      }), 'Optional local profiles saved with owner-only permissions.'));
+      backdrop.querySelector('[data-setup-action="generate-ca"]')?.addEventListener('click', event => run(event.currentTarget, () => bridge.generateProxyCa(), 'A unique proxy CA was generated for this Mac.'));
+      backdrop.querySelector('[data-setup-action="trust-ca"]')?.addEventListener('click', event => run(event.currentTarget, () => bridge.trustProxyCa(), 'The unique proxy CA is trusted.'));
+      backdrop.querySelector('[data-setup-action="verify"]')?.addEventListener('click', event => run(event.currentTarget, () => bridge.verifySetup(), null));
+    }
+
+    render();
+  });
+}
+
 async function renderSettingsPane() {
   const wrap = document.createElement('div');
   wrap.className = 'settings-pane';
   wrap.innerHTML = `
     <h1>Settings</h1>
+    <section class="settings-section setup-assistant-section">
+      <div class="settings-section-heading"><div><h2>Setup Assistant</h2><p class="settings-section-copy">Configure the workstation from start to finish: LiteLLM, optional local credentials, the unique proxy CA, and live verification.</p></div><button id="launch-setup-assistant" type="button" class="safe">Open Setup Assistant</button></div>
+      <div id="setup-summary" class="setup-summary"><div class="setup-summary-loading">Checking setup…</div></div>
+    </section>
     <section class="settings-section appearance-settings">
       <h2>Appearance</h2>
       <p class="settings-section-copy">Choose how GLaDOS and agent workspaces are presented. Both themes keep the current dark blue color palette.</p>
@@ -4228,6 +4410,7 @@ async function renderSettingsPane() {
     </section>`;
   paneEl.appendChild(wrap);
   wireOperationControls(wrap);
+  wireSetupAssistant(wrap);
   wrap.querySelectorAll('[data-dashboard-theme]').forEach(button => {
     button.addEventListener('click', () => applyDashboardTheme(button.dataset.dashboardTheme));
   });
