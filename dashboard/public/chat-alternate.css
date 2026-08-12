@@ -40,6 +40,8 @@
 }
 
 .chat-visual-chamber .transcript {
+  display: flex;
+  flex-direction: column;
   padding: 30px clamp(18px, 6vw, 86px) 36px;
   background-color: var(--bg);
   background-image:
@@ -73,6 +75,7 @@
   letter-spacing: .05em;
 }
 .chat-visual-chamber .entry.assistant-text {
+  align-self: flex-start;
   border-color: var(--control-border);
   border-left-color: var(--accent);
   background: var(--bg-alt);
@@ -92,12 +95,12 @@
   letter-spacing: .12em;
 }
 .chat-visual-chamber .entry.user-message {
-  width: 100%;
-  max-width: none;
-  margin: 12px 0;
-  padding: 13px 16px 14px 52px;
+  align-self: flex-end;
+  width: fit-content;
+  max-width: min(74%, 800px);
+  margin: 12px 0 12px auto;
+  padding: 10px 48px 10px 12px;
   border: 0;
-  border-bottom: 1px solid rgba(255,255,255,.06);
   border-radius: 0;
   color: var(--fg);
   background: transparent;
@@ -106,14 +109,15 @@
 .chat-visual-chamber .entry.user-message::before {
   content: "";
   position: absolute;
-  top: 13px;
-  left: 12px;
+  top: 8px;
+  right: 8px;
   width: 28px;
   height: 28px;
   border: 0;
   background: transparent url('/assets/red-team-operator.png') center / contain no-repeat;
 }
-.chat-visual-chamber .entry.user-message .ts { color: var(--fg-dim); }
+.chat-visual-chamber .entry.user-message .ts { color: var(--fg-dim); text-align: right; }
+.chat-visual-chamber .entry.user-message pre { overflow-wrap: anywhere; text-align: left; }
 .chat-visual-chamber .entry.thinking {
   max-width: min(70%, 760px);
   border: 1px dashed rgba(184, 146, 255, .42);
@@ -179,11 +183,15 @@
   text-transform: uppercase;
 }
 .chat-visual-chamber .chat-input {
-  gap: 9px;
+  display: block;
   padding: 13px clamp(14px, 4vw, 58px) 15px;
   border-top: 2px solid var(--accent);
   background: var(--bg-alt);
   box-shadow: 0 -10px 30px var(--chamber-shadow);
+}
+.chat-visual-chamber .chat-composer-shell {
+  width: min(100%, 980px);
+  margin: 0 auto;
 }
 .chat-visual-chamber .chat-input textarea {
   height: 66px;
@@ -221,9 +229,12 @@
   .chat-visual-chamber .agent-runtime-status { display: none; }
   .chat-visual-chamber .transcript { padding: 22px 12px 28px; }
   .chat-visual-chamber .entry,
-  .chat-visual-chamber .entry.thinking { max-width: 92%; }
-  .chat-visual-chamber .chat-input { display: grid; grid-template-columns: 1fr 1fr; padding: 10px; }
-  .chat-visual-chamber .chat-input textarea { grid-column: 1 / -1; width: 100%; }
+  .chat-visual-chamber .entry.thinking,
+  .chat-visual-chamber .entry.user-message { max-width: 92%; }
+  .chat-visual-chamber .chat-input { padding: 10px; }
+  .chat-visual-chamber .chat-composer-shell { flex-direction: column; align-items: stretch; }
+  .chat-visual-chamber .chat-input textarea { width: 100%; }
+  .chat-visual-chamber .chat-composer-actions { align-self: flex-end; }
   .chat-visual-chamber .chat-input button { min-height: 38px; }
 }
 
@@ -257,7 +268,8 @@ html[data-theme="quantum"] .investigation-session-host .overview-session-menu su
 html[data-theme="quantum"] .investigation-session-host .overview-session-menu summary small { margin-top: 1px; }
 html[data-theme="quantum"] .investigation-session-host .overview-new-session { min-width: 92px; min-height: 35px; border-radius: 6px; background: transparent; }
 html[data-theme="quantum"] .chat-visual-chamber .transcript {
-  padding: 20px clamp(12px, 2vw, 28px) 34px;
+  gap: 2px;
+  padding: 22px max(20px, calc((100% - 980px) / 2)) 38px;
   background: var(--bg);
   background-image: none;
   color: var(--fg);
@@ -265,12 +277,11 @@ html[data-theme="quantum"] .chat-visual-chamber .transcript {
   scroll-padding-bottom: 28px;
 }
 html[data-theme="quantum"] .chat-visual-chamber .entry {
-  width: 100%;
-  max-width: none;
-  margin: 0;
-  padding: 15px 8px 17px 46px;
+  width: fit-content;
+  max-width: min(80%, 920px);
+  margin: 8px 0;
+  padding: 8px 8px 9px 44px;
   border: 0;
-  border-bottom: 1px solid rgba(255,255,255,.045);
   border-radius: 0;
   color: var(--fg);
   background: transparent;
@@ -280,18 +291,23 @@ html[data-theme="quantum"] .chat-visual-chamber .entry .ts {
   position: static;
   display: block;
   min-height: 13px;
-  margin: 0 0 4px;
-  text-align: right;
-  opacity: .58;
+  margin: 0 0 3px;
+  text-align: left;
+  opacity: .42;
   transition: opacity 120ms ease;
 }
-html[data-theme="quantum"] .chat-visual-chamber .entry:hover .ts { opacity: .9; }
-html[data-theme="quantum"] .chat-visual-chamber .entry.assistant-text { border-color: rgba(255,255,255,.045); background: transparent; }
+html[data-theme="quantum"] .chat-visual-chamber .entry:hover .ts { opacity: .72; }
+html[data-theme="quantum"] .chat-visual-chamber .entry.assistant-text {
+  align-self: flex-start;
+  margin: 8px auto 16px 0;
+  border-color: transparent;
+  background: transparent;
+}
 html[data-theme="quantum"] .chat-visual-chamber .entry.assistant-text::before,
 html[data-theme="quantum"] .chat-visual-chamber .entry.user-message::before {
   position: absolute;
-  top: 14px;
-  left: 6px;
+  top: 8px;
+  left: 4px;
   width: 26px;
   height: 26px;
   padding: 0;
@@ -311,22 +327,30 @@ html[data-theme="quantum"] .chat-visual-chamber .entry.assistant-text::before {
 html[data-theme="quantum"] .chat-visual-chamber[data-agent]:not([data-agent="glados"]) .entry.assistant-text::before { content: "A"; }
 html[data-theme="quantum"] .chat-visual-chamber[data-agent]:not([data-agent="glados"]) .entry.assistant-text::before { background-image: none; font-size: 10px; }
 html[data-theme="quantum"] .chat-visual-chamber .entry.user-message {
-  width: 100%;
-  max-width: none;
-  margin: 0;
-  padding: 15px 8px 17px 46px;
+  align-self: flex-end;
+  width: fit-content;
+  max-width: min(72%, 780px);
+  margin: 16px 0 16px auto;
+  padding: 8px 44px 8px 12px;
   border: 0;
-  border-bottom: 1px solid rgba(255,255,255,.045);
   border-radius: 0;
   background: transparent;
 }
 html[data-theme="quantum"] .chat-visual-chamber .entry.user-message::before {
   content: "";
+  right: 4px;
+  left: auto;
   border: 0;
   background: transparent url('/assets/red-team-operator.png') center / contain no-repeat;
 }
+html[data-theme="quantum"] .chat-visual-chamber .entry.user-message .ts { text-align: right; }
+html[data-theme="quantum"] .chat-visual-chamber .entry.user-message pre {
+  font: 500 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  overflow-wrap: anywhere;
+}
 html[data-theme="quantum"] .chat-visual-chamber .entry.thinking {
-  max-width: none;
+  align-self: flex-start;
+  max-width: min(80%, 920px);
   padding-block: 10px;
   border: 0;
   border-bottom: 1px solid rgba(184,146,255,.10);
@@ -344,9 +368,10 @@ html[data-theme="quantum"] .chat-visual-chamber .entry.session-start,
 html[data-theme="quantum"] .chat-visual-chamber .entry.harness-init,
 html[data-theme="quantum"] .chat-visual-chamber .entry.liveness,
 html[data-theme="quantum"] .chat-visual-chamber .entry.prompt-error {
-  width: calc(100% - 46px);
-  max-width: none;
-  margin: 5px 0 5px 46px;
+  align-self: flex-start;
+  width: min(calc(100% - 46px), 980px);
+  max-width: calc(100% - 46px);
+  margin: 5px 0 5px 44px;
   padding: 9px 11px;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -364,7 +389,11 @@ html[data-theme="quantum"] .chat-visual-chamber .entry.permission-denied {
 html[data-theme="quantum"] .chat-visual-chamber .entry.prompt-error pre,
 html[data-theme="quantum"] .chat-visual-chamber .entry.tool-result.error .tool-name,
 html[data-theme="quantum"] .chat-visual-chamber .entry.permission-denied .tool-name { color: var(--err); }
-html[data-theme="quantum"] .chat-visual-chamber .entry .md-content { font-size: 13px; line-height: 1.65; }
+html[data-theme="quantum"] .chat-visual-chamber .entry .md-content {
+  font-size: 14px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
 html[data-theme="quantum"] .chat-visual-chamber .entry .md-content h1,
 html[data-theme="quantum"] .chat-visual-chamber .entry .md-content h2,
 html[data-theme="quantum"] .chat-visual-chamber .entry .md-content h3 { border: 0; }
@@ -380,26 +409,57 @@ html[data-theme="quantum"] .chat-visual-chamber .sending-indicator {
   text-transform: none;
 }
 html[data-theme="quantum"] .chat-visual-chamber .chat-input {
-  gap: 7px;
-  padding: 10px clamp(12px, 2vw, 28px) 14px;
+  display: block;
+  padding: 12px clamp(12px, 3vw, 48px) 18px;
   border-top: 0;
   background: linear-gradient(180deg, rgba(12,16,22,0), var(--bg) 18%);
   box-shadow: none;
 }
-html[data-theme="quantum"] .chat-visual-chamber .chat-input textarea {
-  height: 58px;
-  min-height: 58px;
-  padding: 11px 13px;
+html[data-theme="quantum"] .chat-visual-chamber .chat-composer-shell {
+  width: min(100%, 980px);
+  margin: 0 auto;
+  padding: 7px;
+  gap: 7px;
   border: 1px solid var(--control-border);
-  border-radius: 9px;
-  color: var(--fg);
+  border-radius: 14px;
   background: var(--bg-alt);
-  font: 12px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  box-shadow: 0 8px 24px rgba(0,0,0,.18);
+  box-shadow: 0 10px 30px rgba(0,0,0,.22);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
-html[data-theme="quantum"] .chat-visual-chamber .chat-input textarea:focus { outline: 1px solid var(--accent); box-shadow: 0 8px 28px rgba(0,0,0,.24), 0 0 0 2px var(--accent-soft); }
-html[data-theme="quantum"] .chat-visual-chamber .chat-input button { min-width: 68px; border-radius: 8px; font: 700 10px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; text-transform: none; }
-html[data-theme="quantum"] .chat-visual-chamber .chat-input button.secondary { min-width: 54px; border-color: var(--border); background: transparent; }
+html[data-theme="quantum"] .chat-visual-chamber .chat-composer-shell:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 10px 32px rgba(0,0,0,.26), 0 0 0 2px var(--accent-soft);
+}
+html[data-theme="quantum"] .chat-visual-chamber .chat-input textarea {
+  height: 46px;
+  min-height: 46px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--fg);
+  background: transparent;
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  box-shadow: none;
+}
+html[data-theme="quantum"] .chat-visual-chamber .chat-input textarea:focus { outline: 0; box-shadow: none; }
+html[data-theme="quantum"] .chat-visual-chamber .chat-composer-actions { gap: 6px; align-self: flex-end; }
+html[data-theme="quantum"] .chat-visual-chamber .chat-input button {
+  min-width: 64px;
+  min-height: 38px;
+  padding-inline: 14px;
+  border-radius: 9px;
+  font: 700 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+}
+html[data-theme="quantum"] .chat-visual-chamber .chat-input button.secondary { min-width: 50px; border-color: var(--border); background: transparent; }
+html[data-theme="quantum"] .chat-visual-chamber .chat-input button.secondary:disabled { display: none; }
+html[data-theme="quantum"] .chat-visual-chamber .slash-menu {
+  right: auto;
+  left: 50%;
+  width: min(calc(100% - 24px), 966px);
+  transform: translateX(-50%);
+}
 
 @media (max-width: 760px) {
   html[data-theme="quantum"] .chat-visual-chamber .agent-view-toolbar { padding-inline: 9px; flex-wrap: wrap; }
@@ -407,8 +467,8 @@ html[data-theme="quantum"] .chat-visual-chamber .chat-input button.secondary { m
   html[data-theme="quantum"] .investigation-session-host .overview-session-controls { width: 100%; }
   html[data-theme="quantum"] .investigation-session-host .overview-session-popover { position: fixed; top: auto; right: 8px; bottom: 8px; left: 8px; width: auto; }
   html[data-theme="quantum"] .chat-visual-chamber .transcript { padding: 16px 10px 24px; }
-  html[data-theme="quantum"] .chat-visual-chamber .entry { max-width: none; padding-left: 42px; }
-  html[data-theme="quantum"] .chat-visual-chamber .entry.user-message { max-width: none; padding-left: 42px; }
+  html[data-theme="quantum"] .chat-visual-chamber .entry { max-width: 92%; padding-left: 42px; }
+  html[data-theme="quantum"] .chat-visual-chamber .entry.user-message { max-width: 88%; padding: 8px 40px 8px 8px; }
   html[data-theme="quantum"] .chat-visual-chamber .entry.tool-call,
   html[data-theme="quantum"] .chat-visual-chamber .entry.tool-result,
   html[data-theme="quantum"] .chat-visual-chamber .entry.meta,
@@ -418,7 +478,9 @@ html[data-theme="quantum"] .chat-visual-chamber .chat-input button.secondary { m
   html[data-theme="quantum"] .chat-visual-chamber .entry.harness-init,
   html[data-theme="quantum"] .chat-visual-chamber .entry.liveness,
   html[data-theme="quantum"] .chat-visual-chamber .entry.prompt-error { width: calc(100% - 42px); margin-left: 42px; }
-  html[data-theme="quantum"] .chat-visual-chamber .chat-input { display: grid; grid-template-columns: 1fr auto auto; padding: 8px 10px 10px; }
-  html[data-theme="quantum"] .chat-visual-chamber .chat-input textarea { grid-column: 1 / -1; width: 100%; }
+  html[data-theme="quantum"] .chat-visual-chamber .chat-input { padding: 8px 10px 10px; }
+  html[data-theme="quantum"] .chat-visual-chamber .chat-composer-shell { flex-direction: column; align-items: stretch; }
+  html[data-theme="quantum"] .chat-visual-chamber .chat-input textarea { width: 100%; }
+  html[data-theme="quantum"] .chat-visual-chamber .chat-composer-actions { align-self: flex-end; }
   html[data-theme="quantum"] .chat-visual-chamber .chat-input button { min-height: 34px; }
 }

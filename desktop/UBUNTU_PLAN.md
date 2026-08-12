@@ -32,7 +32,7 @@ The bootstrap installs Node 22, Ubuntu/AppImage prerequisites, the required
 core command-line tools, mitmproxy, application dependencies, and initializes
 the per-user runtime. The installer builds and audits the current release, installs it under
 `~/.local/opt/glados/`, and registers `glados.desktop` for the current user.
-Set `GLADOS_APPIMAGE=/path/to/GLaDOS-4.5.1-x86_64.AppImage` to install an
+Set `GLADOS_APPIMAGE=/path/to/GLaDOS-4.5.2-x86_64.AppImage` to install an
 already-built artifact instead.
 
 `pack:ubuntu` creates `artifacts/desktop/linux-unpacked` and audits every ELF

@@ -2073,9 +2073,13 @@ function renderLegacyChatPane() {
   const inputRow = document.createElement('div');
   inputRow.className = 'chat-input';
   inputRow.innerHTML = `
-    <textarea id="chat-text" placeholder="Talk to GLaDOS (Enter to send, Shift+Enter for newline)…"></textarea>
-    <button id="chat-send">Send</button>
-    <button id="chat-stop" class="secondary" title="Stop the current response" disabled>Stop</button>
+    <div class="chat-composer-shell">
+      <textarea id="chat-text" placeholder="Talk to GLaDOS (Enter to send, Shift+Enter for newline)…"></textarea>
+      <div class="chat-composer-actions">
+        <button id="chat-send">Send</button>
+        <button id="chat-stop" class="secondary" title="Stop the current response" disabled>Stop</button>
+      </div>
+    </div>
   `;
   chat.appendChild(transcript);
   chat.appendChild(sendingEl);
@@ -2203,9 +2207,13 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
   const inputRow = document.createElement('div');
   inputRow.className = 'chat-input';
   inputRow.innerHTML = `
-    <textarea data-chat-tab="${escapeHtml(tabId)}" placeholder="Talk to ${escapeHtml(label)} (Enter to send, Shift+Enter for newline)…"></textarea>
-    <button type="button" data-chat-send data-chat-tab="${escapeHtml(tabId)}">Send</button>
-    <button type="button" data-chat-stop data-chat-tab="${escapeHtml(tabId)}" class="secondary" title="Stop the current response" disabled>Stop</button>
+    <div class="chat-composer-shell">
+      <textarea data-chat-tab="${escapeHtml(tabId)}" placeholder="Talk to ${escapeHtml(label)} (Enter to send, Shift+Enter for newline)…"></textarea>
+      <div class="chat-composer-actions">
+        <button type="button" data-chat-send data-chat-tab="${escapeHtml(tabId)}">Send</button>
+        <button type="button" data-chat-stop data-chat-tab="${escapeHtml(tabId)}" class="secondary" title="Stop the current response" disabled>Stop</button>
+      </div>
+    </div>
   `;
   chat.append(transcript, sendingEl, inputRow);
   paneEl.appendChild(chat);

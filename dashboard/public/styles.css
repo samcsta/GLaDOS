@@ -651,6 +651,12 @@ body.debug-off .entry.session-start { display: none; }
   display: flex; gap: 8px; padding: 8px; border-top: 1px solid var(--border);
   background: var(--bg-alt);
 }
+.chat-composer-shell {
+  display: flex; flex: 1; min-width: 0; gap: 8px; align-items: flex-end;
+}
+.chat-composer-actions {
+  display: flex; flex: 0 0 auto; gap: 8px; align-self: stretch;
+}
 .chat-input textarea {
   flex: 1; background: var(--bg-hi); color: var(--fg);
   border: 1px solid var(--border); border-radius: 6px;
