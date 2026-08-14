@@ -8,6 +8,10 @@ const {
   sourceReviewGateStatus,
 } = require('./security-review/workflow');
 const { generateSecurityReviewInventory } = require('./security-review/inventory');
+const {
+  buildSecurityReviewCampaign,
+  expeditedDeepScanConfig,
+} = require('./security-review/campaign');
 const { IDLE_AGENT_STATUS } = require('./runtime-reset');
 const {
   initializeDeepScanRun,
@@ -15,7 +19,10 @@ const {
 } = require('./security-review/deep-scan');
 
 const RUNNING_STATUSES = ['running', 'cancelling'];
-const SECURITY_REVIEW_MAX_CONTINUATIONS = 12;
+// Security-review coordinator turns are finite, but the durable workflow is
+// completion-driven. A max-turn interruption resumes the same artifacts and
+// must not become an implicit campaign cutoff.
+const SECURITY_REVIEW_MAX_CONTINUATIONS = null;
 
 function isRecoverableCoordinatorInterruption(error) {
   return /maximum number of turns|reached max(?:imum)? turns|dashboard restarted before worker-owned job finished/i
@@ -277,7 +284,8 @@ class ControllerLite {
   _resumeInterruptedSecurityReview(job, error) {
     if (job?.job_type !== 'security_review_workflow_v3') return false;
     if (!isRecoverableCoordinatorInterruption(error)) return false;
-    if (Number(job.attempts || 0) >= SECURITY_REVIEW_MAX_CONTINUATIONS) return false;
+    if (SECURITY_REVIEW_MAX_CONTINUATIONS != null
+        && Number(job.attempts || 0) >= SECURITY_REVIEW_MAX_CONTINUATIONS) return false;
 
     const runtimeDir = path.dirname(path.dirname(this.db.name));
     const artifactRoot = securityReviewArtifactRoot(runtimeDir, job.engagement_id);
@@ -367,20 +375,38 @@ class ControllerLite {
     allowedModels = [],
     requireModelDiversity = true,
     modelDiversityWaiver = null,
+    reviewProfile = 'comprehensive',
+    campaignMode = false,
   } = {}) {
     const abs = path.resolve(localPath);
     if (!fs.existsSync(abs)) throw new Error(`local path not found: ${abs}`);
-    const goal = goalId ? this.getGoal(goalId) : this.createSecurityReviewGoal(abs, { source: 'slash' });
+    const profile = reviewProfile === 'expedited' ? 'expedited' : 'comprehensive';
+    if (campaignMode && profile !== 'expedited') throw new Error('security-review campaign requires the expedited profile');
+    const campaign = campaignMode ? buildSecurityReviewCampaign(abs) : null;
+    const goal = goalId ? this.getGoal(goalId) : this.createSecurityReviewGoal(abs, {
+      source: 'slash',
+      review_profile: profile,
+      campaign: campaignMode,
+    });
     const jobId = id('job');
     const engId = engagementId || goal.engagement_id || this.ensureEngagement(abs);
     const runtimeDir = path.dirname(path.dirname(this.db.name));
     const artifactRoot = securityReviewArtifactRoot(runtimeDir, engId);
     const inventory = generateSecurityReviewInventory({ repositoryPath: abs, artifactRoot });
+    const scanConfig = profile === 'expedited'
+      ? expeditedDeepScanConfig(campaign?.repository_count || 0, {
+          maxDurationMinutes,
+          discoveryConcurrency,
+          specialistConcurrency,
+        })
+      : { maxDurationMinutes, discoveryConcurrency, specialistConcurrency };
     const run = initializeDeepScanRun(artifactRoot, {
-      config: { maxDurationMinutes, discoveryConcurrency, specialistConcurrency },
+      config: scanConfig,
       allowedModels,
       requireModelDiversity,
       modelDiversityWaiver,
+      reviewProfile: profile,
+      campaign,
     });
     const prompt = securityReviewCoordinatorPrompt({
       repositoryPath: abs,
@@ -390,11 +416,14 @@ class ControllerLite {
       contextMode,
       deepScan: run.deepScan,
       modelPolicy: run.modelPolicy,
+      reviewProfile: profile,
+      campaign,
     });
     this.insertJob.run(jobId, goal.id, engId, 'glados', 'glados#security-review', 'security_review_workflow_v3', abs, prompt, nowIso());
     this.logEvent(goal.id, jobId, 'job_queued', `Queued staged source-code security review for ${abs}.`, {
       agent_id: 'glados', target: abs, workflow_version: 3, context_mode: contextMode, artifact_root: artifactRoot,
       repository_head: inventory.head, deadline_at: run.deepScan.deadlineAt, model_policy: run.modelPolicy,
+      review_profile: profile, campaign_repository_count: campaign?.repository_count || 0,
     });
     return this.getJob(jobId);
   }
@@ -442,9 +471,13 @@ class ControllerLite {
     const noNewStreak = Number.isInteger(dedupe?.no_new_streak) ? dedupe.no_new_streak : 0;
     const saturationTarget = Number(run?.deepScan?.stopAfterNoNew || 6);
     const terminalState = run?.deepScan?.terminalState || manifest?.status || 'RUNNING';
+    const reviewProfile = run?.reviewProfile || 'comprehensive';
+    const repositoryCount = Number(run?.campaign?.repositoryCount || 0);
     const base = {
       phase: job.status === 'queued' ? 'Queued' : 'Initializing',
-      detail: job.status === 'queued' ? 'Waiting for the review coordinator' : 'Preparing deterministic inventory',
+      detail: job.status === 'queued'
+        ? `Waiting for the review coordinator${repositoryCount ? ` · ${repositoryCount}-repository expedited campaign` : ''}`
+        : `Preparing deterministic inventory${repositoryCount ? ` for ${repositoryCount} repositories` : ''}`,
       percent: job.status === 'queued' ? 0 : 3,
       workers,
       successfulWorkers,
@@ -452,6 +485,8 @@ class ControllerLite {
       saturationTarget,
       terminalState,
       deadlineAt: run?.deepScan?.deadlineAt || manifest?.deadline_at || null,
+      reviewProfile,
+      repositoryCount,
     };
     if (job.status === 'queued') return base;
     if (terminalState === 'CAPPED') return { ...base, phase: 'Capped', detail: run?.deepScan?.capReason || manifest?.cap_reason || 'Review limit reached', percent: 100 };
@@ -459,8 +494,10 @@ class ControllerLite {
     if (manifest?.status !== 'SATURATED') {
       return {
         ...base,
-        phase: 'Blind discovery',
-        detail: `${successfulWorkers} successful worker${successfulWorkers === 1 ? '' : 's'} · saturation ${noNewStreak}/${saturationTarget}`,
+        phase: repositoryCount ? 'Portfolio discovery' : 'Blind discovery',
+        detail: repositoryCount
+          ? `${Math.min(successfulWorkers, repositoryCount)}/${repositoryCount} repository breadth passes · ${successfulWorkers} total workers · saturation ${noNewStreak}/${saturationTarget}`
+          : `${successfulWorkers} successful worker${successfulWorkers === 1 ? '' : 's'} · saturation ${noNewStreak}/${saturationTarget}`,
         percent: Math.min(40, 15 + successfulWorkers * 2),
       };
     }
@@ -655,9 +692,11 @@ class ControllerLite {
     if (status === 'succeeded' && job.job_type === 'security_review_workflow_v3') {
       const runtimeDir = path.dirname(path.dirname(this.db.name));
       const artifactRoot = securityReviewArtifactRoot(runtimeDir, job.engagement_id);
+      const goal = job.goal_id ? this.getGoal(job.goal_id) : null;
       gate = sourceReviewGateStatus(artifactRoot, {
         authoritativeWorkerRuns: this.authoritativeWorkerRuns.all(job.engagement_id),
         authoritativeModelObservations: this.authoritativeModelObservations.all(job.engagement_id),
+        campaignExpected: goal?.metadata?.campaign === true,
       });
       finalResult = result && typeof result === 'object'
         ? { ...result, securityReviewGate: gate }

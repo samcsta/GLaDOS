@@ -22,6 +22,8 @@ test('update preservation snapshots databases and user configuration without mov
     makeDb(blackboardDb, 'blackboard-ok');
     makeDb(watchdogDb, 'watchdog-ok');
     fs.writeFileSync(path.join(runtimeDir, 'model-overrides.json'), '{"glados":"opus"}\n');
+    fs.mkdirSync(path.join(runtimeDir, 'preferences'), { recursive: true });
+    fs.writeFileSync(path.join(runtimeDir, 'preferences', 'chat.json'), '{"efforts":{"glados":"xhigh"}}\n');
     fs.mkdirSync(path.join(runtimeDir, 'reports'), { recursive: true });
     const report = path.join(runtimeDir, 'reports', 'operator-report.md');
     fs.writeFileSync(report, '# durable report\n');
@@ -36,6 +38,7 @@ test('update preservation snapshots databases and user configuration without mov
     assert.equal(result.ok, true);
     assert.equal(fs.readFileSync(report, 'utf8'), '# durable report\n');
     assert.equal(fs.readFileSync(path.join(result.snapshotDir, 'config', 'model-overrides.json'), 'utf8'), '{"glados":"opus"}\n');
+    assert.equal(fs.readFileSync(path.join(result.snapshotDir, 'config', 'preferences', 'chat.json'), 'utf8'), '{"efforts":{"glados":"xhigh"}}\n');
     for (const [name, value] of [['blackboard.db', 'blackboard-ok'], ['watchdog.db', 'watchdog-ok']]) {
       const db = new Database(path.join(result.snapshotDir, name), { readonly: true });
       assert.equal(db.prepare('SELECT value FROM state').get().value, value);

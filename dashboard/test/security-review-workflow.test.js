@@ -19,6 +19,7 @@ const {
   discoveryDispatchCheckpoint,
   discoverySaturationCheckpoint,
   finalizeDiscoveryWorker,
+  normalizeDeepScanConfig,
 } = require('../lib/security-review/deep-scan');
 const { ensureBlackboardDb } = require('../../scripts/lib/glados-local');
 
@@ -54,6 +55,24 @@ test('runtime model ledger rejects SDK lifecycle placeholders', () => {
     worker_id: 'worker-001',
   });
   assert.equal(valid.model, 'gpt-5.6-luna');
+});
+
+test('completion-driven discovery preserves a null attempt ceiling', () => {
+  assert.deepEqual(normalizeDeepScanConfig({
+    minDiscoveryRuns: 10,
+    stopAfterNoNew: 3,
+    maxDiscoveryRuns: null,
+    maxDurationMinutes: null,
+    discoveryConcurrency: 3,
+    specialistConcurrency: 3,
+  }), {
+    minDiscoveryRuns: 10,
+    stopAfterNoNew: 3,
+    maxDiscoveryRuns: null,
+    maxDurationMinutes: null,
+    discoveryConcurrency: 3,
+    specialistConcurrency: 3,
+  });
 });
 
 test('controller-owned worker claims allow three-wide discovery and reject overflow', () => {
@@ -368,6 +387,28 @@ test('informed source review preserves blind discovery before mandatory regressi
   assert.match(prompt, /Every supplied prior finding is dispositioned/);
 });
 
+test('expedited campaign contract preserves breadth, risk-ranked depth, and validation quality', () => {
+  const campaign = {
+    repository_count: 2,
+    repositories: [
+      { repository_id: 'repo-001', relative_path: 'api', required_discovery_worker: 'worker-001' },
+      { repository_id: 'repo-002', relative_path: 'web', required_discovery_worker: 'worker-002' },
+    ],
+  };
+  const prompt = securityReviewCoordinatorPrompt({
+    repositoryPath: '/tmp/repos', engagementId: 'eng-1', goalId: 'goal-1', artifactRoot: '/tmp/artifacts',
+    reviewProfile: 'expedited', campaign, deepScan: { minDiscoveryRuns: 3, stopAfterNoNew: 3, maxDiscoveryRuns: null },
+  });
+  assert.match(prompt, /review_profile: expedited/);
+  assert.match(prompt, /Required breadth assignments: worker-001=repo-001:api, worker-002=repo-002:web/);
+  assert.match(prompt, /before any repeated or cross-repository hotspot pass/);
+  assert.match(prompt, /risk-ranked-depth, not reduced evidence standards/i);
+  assert.match(prompt, /portfolio\/coverage\.jsonl/);
+  assert.match(prompt, /independent reproduction from source/);
+  assert.match(prompt, /no repository is partial, blocked, deferred, or silently omitted/i);
+  assert.match(prompt, /no fixed discovery-attempt ceiling/i);
+});
+
 test('source review gate status blocks incomplete artifact sets', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-source-review-gates-'));
   const blocked = sourceReviewGateStatus(root);
@@ -375,6 +416,30 @@ test('source review gate status blocks incomplete artifact sets', () => {
   assert.equal(blocked.missing.includes('inventory/files.jsonl'), true);
   assert.equal(blocked.missing.includes('validation/challenge-matrix.json'), true);
   assert.equal(blocked.missing.includes('validation/semantic-coverage.json'), true);
+});
+
+test('source review gate conditionally requires portfolio manifest and coverage', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-source-review-portfolio-gates-'));
+  writeJson(root, 'run.json', {
+    workflowVersion: 3,
+    campaign: { enabled: true, repositoryCount: 2 },
+  });
+  const blocked = sourceReviewGateStatus(root);
+  assert.equal(blocked.passed, false);
+  assert.equal(blocked.missing.includes('portfolio/repositories.json'), true);
+  assert.equal(blocked.missing.includes('portfolio/coverage.jsonl'), true);
+});
+
+test('controller campaign expectation cannot be disabled inside mutable run artifacts', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-source-review-portfolio-marker-'));
+  writeJson(root, 'run.json', {
+    workflowVersion: 3,
+    reviewProfile: 'expedited',
+    campaign: { enabled: false },
+  });
+  const blocked = sourceReviewGateStatus(root, { campaignExpected: true });
+  assert.equal(blocked.missing.includes('portfolio/repositories.json'), true);
+  assert.match(blocked.invalid.join('\n'), /controller expected a campaign run/);
 });
 
 test('source review gate passes a complete machine-verifiable artifact set', () => {

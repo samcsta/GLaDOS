@@ -48,6 +48,7 @@ test('resume coordinator preserves the exact interrupted specialist assignment',
   const filePath = path.join(root, 'state', 'paused-agent-work.json');
   const coordinator = new ResumeCoordinator({ filePath });
   coordinator.capture('webapp-recon', {
+    investigationSessionId: 'session-a',
     parentAgentId: 'glados',
     taskDescription: 'Proxy smoke test',
     taskPrompt: 'Perform exactly one GET to https://www.ford.com and stop.',
@@ -61,6 +62,7 @@ test('resume coordinator preserves the exact interrupted specialist assignment',
   const snapshot = restored.take('webapp-recon');
   const continuation = coordinator.buildContinuationPrompt(snapshot);
   assert.equal(snapshot.agentId, 'webapp-recon');
+  assert.equal(snapshot.investigationSessionId, 'session-a');
   assert.match(continuation, /Re-dispatch exactly webapp-recon/);
   assert.match(continuation, /Perform exactly one GET to https:\/\/www\.ford\.com and stop\./);
   assert.match(continuation, /Spawn webapp-recon for a one-request proxy test\./);
@@ -392,6 +394,64 @@ test('GLaDOS process mounts fleet tools but enforces caller-specific permissions
     interrupt: true,
     toolUseID: 'bash-3',
   });
+});
+
+test('chat turns pass reasoning effort and force SDK automatic compaction', () => {
+  const env = baseTestEnv();
+  const opts = buildAgentSdkOptions('glados', { env, effort: 'xhigh', autoCompact: true });
+  assert.equal(opts.effort, 'xhigh');
+  assert.equal(opts.settings.autoCompactEnabled, true);
+
+  const [status] = mapSdkMessageToEvents('glados', {
+    type: 'system', subtype: 'status', status: 'compacting', session_id: 's1', uuid: 'status-1',
+  });
+  assert.equal(status.kind, 'context-status');
+  assert.equal(status.status, 'compacting');
+
+  const [boundary] = mapSdkMessageToEvents('glados', {
+    type: 'system', subtype: 'compact_boundary', session_id: 's1', uuid: 'compact-1',
+    compact_metadata: { trigger: 'auto', pre_tokens: 190000, post_tokens: 41000, duration_ms: 1200 },
+  });
+  assert.equal(boundary.kind, 'context-compacted');
+  assert.equal(boundary.preTokens, 190000);
+  assert.equal(boundary.postTokens, 41000);
+});
+
+test('chat turns send screenshots as native SDK image blocks', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-chat-image-'));
+  const screenshot = path.join(root, 'screenshot.png');
+  fs.writeFileSync(screenshot, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB', 'base64'));
+  let capturedPrompt;
+  const queryImpl = ({ prompt }) => {
+    capturedPrompt = prompt;
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'result', subtype: 'success', result: 'reviewed', session_id: 'image-session' };
+      },
+    };
+  };
+
+  await streamAgentTurn({
+    agentId: 'glados',
+    prompt: 'Review this screenshot.',
+    store: false,
+    queryImpl,
+    options: {
+      attachments: [{ file: screenshot, mimeType: 'image/png' }],
+      sdkOptions: {},
+      requiredMcpServers: [],
+    },
+  });
+
+  const messages = [];
+  for await (const message of capturedPrompt) messages.push(message);
+  assert.equal(messages.length, 1);
+  assert.deepEqual(messages[0].message.content[0], { type: 'text', text: 'Review this screenshot.' });
+  assert.equal(messages[0].message.content[1].type, 'image');
+  assert.equal(messages[0].message.content[1].source.type, 'base64');
+  assert.equal(messages[0].message.content[1].source.media_type, 'image/png');
+  assert.match(messages[0].message.content[1].source.data, /^iVBOR/);
+  assert.equal('session_id' in messages[0], false);
 });
 
 test('optional browser MCP mounts only when enabled and uses the active GLaDOS proxy', () => {

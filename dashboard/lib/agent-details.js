@@ -5,6 +5,9 @@ const { loadRegistry: loadAgentRegistry, loadPolicy, buildMcpServers } = require
 const { fetchLiteLlmModels } = require('./litellm-models');
 const { bareModelAlias } = require('../../scripts/lib/model-aliases');
 
+let modelCatalogCache = null;
+const MODEL_CATALOG_TTL_MS = 2 * 60 * 1000;
+
 function safeRead(p) {
   try { return fs.readFileSync(p, 'utf8'); } catch { return null; }
 }
@@ -160,7 +163,8 @@ function updateAgentModels(changes, availableModels) {
     const agentId = String(change?.agentId || '').trim();
     const requested = String(change?.model || '').trim();
     const expected = bareModelAlias(change?.expectedModel, { fallback: null });
-    const current = bareModelAlias(registry.get(agentId)?.model, { fallback: null });
+    const local = agentId ? workspaceMeta(agentId) : null;
+    const current = bareModelAlias(registry.get(agentId)?.model || local?.meta?.model || local?.upstream?.model, { fallback: null });
     let error = null;
     let code = null;
 
@@ -260,11 +264,17 @@ function updateAgentEnabled(agentId, enabled) {
 
 async function listKnownModels(options = {}) {
   const policy = options.policy || loadPolicy();
-  return fetchLiteLlmModels({
+  const cacheable = !options.fetchImpl && !options.token && !options.tokenLoader && !options.force;
+  if (cacheable && modelCatalogCache && Date.now() - modelCatalogCache.cachedAt < MODEL_CATALOG_TTL_MS) {
+    return { ...modelCatalogCache.value, cache: 'memory' };
+  }
+  const result = await fetchLiteLlmModels({
     env: options.env || process.env,
     baseUrl: policy.harness?.anthropicBaseUrl,
     ...options,
   });
+  if (cacheable && result.available) modelCatalogCache = { cachedAt: Date.now(), value: result };
+  return result;
 }
 
 module.exports = { agentDetails, updateAgentModel, updateAgentModels, updateAgentEnabled, listKnownModels, listSettingsAgents };

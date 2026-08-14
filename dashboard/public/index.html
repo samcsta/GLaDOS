@@ -10,8 +10,8 @@
       document.documentElement.dataset.theme = theme === 'classic' ? 'classic' : 'quantum';
     } catch { document.documentElement.dataset.theme = 'quantum'; }
   </script>
-  <link rel="stylesheet" href="/styles.css?v=20260812-chat-rails" />
-  <link rel="stylesheet" href="/chat-alternate.css?v=20260812-chat-rails" />
+  <link rel="stylesheet" href="/styles.css?v=20260814-project-sessions" />
+  <link rel="stylesheet" href="/chat-alternate.css?v=20260814-project-sessions" />
 </head>
 <body>
   <header class="topbar">
@@ -40,7 +40,8 @@
   <main class="layout">
     <aside class="sidebar">
       <h2 class="collapsible-heading" id="workspace-heading" data-section="workspace" title="Click to collapse/expand">
-        <span class="collapsible-chevron">▾</span> Workspace
+        <span class="collapsible-heading-label">Workspace</span>
+        <span class="sidebar-heading-controls"><span class="collapsible-chevron">▾</span></span>
       </h2>
       <div class="workspace-links" id="workspace-links">
         <a href="#" id="open-overview">Overview</a>
@@ -51,8 +52,19 @@
         <a href="#" id="open-proxy">Proxy</a>
         <a href="#" id="open-settings">Settings</a>
       </div>
+      <h2 class="collapsible-heading" id="projects-heading" data-section="projects" title="Click to collapse/expand">
+        <span class="collapsible-heading-label">Projects</span>
+        <span class="sidebar-heading-controls"><button id="sidebar-project-new" class="sidebar-heading-action" type="button" title="Create project" aria-label="Create project">＋</button><span class="collapsible-chevron">▾</span></span>
+      </h2>
+      <div id="projects-section" class="sidebar-collection"></div>
+      <h2 class="collapsible-heading" id="sessions-heading" data-section="sessions" title="Click to collapse/expand">
+        <span class="collapsible-heading-label">Sessions</span>
+        <span class="sidebar-heading-controls"><button id="sidebar-session-new" class="sidebar-heading-action" type="button" title="New session" aria-label="New session">＋</button><span class="collapsible-chevron">▾</span></span>
+      </h2>
+      <div id="sessions-section" class="sidebar-collection"></div>
       <h2 class="collapsible-heading" id="agents-heading" data-section="agents" title="Click to collapse/expand">
-        <span class="collapsible-chevron">▾</span> Agents
+        <span class="collapsible-heading-label">Agents</span>
+        <span class="sidebar-heading-controls"><span class="collapsible-chevron">▾</span></span>
       </h2>
       <div id="agents-section">
         <section id="security-reviews" class="security-reviews hidden" aria-label="Active security reviews">
@@ -108,6 +120,6 @@
   <script src="/vendor/dompurify/purify.min.js"></script>
   <script src="/vendor/xterm/lib/xterm.js"></script>
   <script src="/vendor/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
-  <script src="/app.js?v=20260812-chat-rails"></script>
+  <script src="/app.js?v=20260814-session-attention"></script>
 </body>
 </html>

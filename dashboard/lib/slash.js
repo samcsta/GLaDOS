@@ -4,7 +4,7 @@ const SLASH_COMMANDS = [
   { cmd: '/help', desc: 'List dashboard slash commands' },
   { cmd: '/goal <target>', desc: 'Start an approval-gated webapp investigation goal' },
   { cmd: '/investigate <target>', desc: 'Alias for /goal <target>' },
-  { cmd: '/security-review <url|domain|path>', desc: 'Start a deep source review; supports context mode, an optional --time-limit, and an approved --single-model alias' },
+  { cmd: '/security-review', desc: 'Choose a repository and start the expedited review; add --full for comprehensive depth' },
   { cmd: '/status', desc: 'Show active goals, jobs, agents, plans, and target health' },
   { cmd: '/agents', desc: 'Show live subagents (curl /api/agents)' },
   { cmd: '/halt <agent>', desc: 'Halt one agent and interrupt its owning SDK turn' },
@@ -25,7 +25,7 @@ function parseSlashCommand(raw) {
 
 function helpText() {
   const groups = [
-    ['Workflow', ['/goal <target>', '/investigate <target>', '/security-review <url|domain|path>', '/status']],
+    ['Workflow', ['/goal <target>', '/investigate <target>', '/security-review', '/status']],
     ['Safety', ['/halt <agent>', '/resume <agent>']],
     ['Diagnostics', ['/agents', '/probe <url>', '/help', '/clear']],
   ];
@@ -36,6 +36,8 @@ function helpText() {
     for (const cmd of cmds) lines.push(`  ${cmd.padEnd(30)} ${byCmd.get(cmd) || ''}`);
   }
   lines.push('');
+  lines.push('/security-review opens the repository chooser and defaults to the expedited completion-driven workflow.');
+  lines.push('/security-review --full opens the same chooser for the comprehensive workflow.');
   lines.push('Dashboard /security-review is separate from Claude Code CLI skills.');
   return lines.join('\n');
 }
@@ -72,24 +74,44 @@ function parseSecurityReviewArg(value, fs = require('node:fs')) {
   const modelMatches = [...raw.matchAll(/(?:^|\s)--single-model(?:=|\s+)([a-zA-Z0-9._-]+)(?=\s|$)/g)];
   if (modelMatches.length > 1) return { ok: false, error: 'choose only one approved single model' };
   const singleModel = modelMatches[0]?.[1] || null;
+  const expeditedMatches = [...raw.matchAll(/(?:^|\s)--expedited(?=\s|$)/gi)];
+  if (expeditedMatches.length > 1) return { ok: false, error: 'specify --expedited only once' };
+  const fullMatches = [...raw.matchAll(/(?:^|\s)--full(?=\s|$)/gi)];
+  if (fullMatches.length > 1) return { ok: false, error: 'specify --full only once' };
+  if (fullMatches.length && expeditedMatches.length) return { ok: false, error: 'choose either the default expedited workflow or --full' };
+  const campaignMatches = [...raw.matchAll(/(?:^|\s)--campaign(?=\s|$)/gi)];
+  if (campaignMatches.length > 1) return { ok: false, error: 'specify --campaign only once' };
+  const reviewProfile = fullMatches.length ? 'comprehensive' : 'expedited';
+  const campaign = campaignMatches.length > 0;
+  if (campaign && reviewProfile !== 'expedited') {
+    return { ok: false, error: '--campaign requires --expedited so the portfolio uses the bounded breadth-then-depth workflow' };
+  }
   let target = raw
     .replace(/(?:^|\s)--(?:blind|regression|informed)(?=\s|$)/ig, ' ')
     .replace(/(?:^|\s)--time-limit(?:=|\s+)\d+(?:m|h)(?=\s|$)/ig, ' ')
     .replace(/(?:^|\s)--single-model(?:=|\s+)[a-zA-Z0-9._-]+(?=\s|$)/g, ' ')
+    .replace(/(?:^|\s)--(?:expedited|campaign|full)(?=\s|$)/ig, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   if (/(?:^|\s)--[a-z0-9-]+/i.test(target)) return { ok: false, error: 'unknown security-review option' };
   const quote = target[0];
   if ((quote === '"' || quote === "'") && target.endsWith(quote)) target = target.slice(1, -1).trim();
   if (!target) return { ok: false, error: 'security-review target required' };
+  const isLocalPath = isExistingLocalPath(target, fs);
+  const isUrlOrDomainTarget = isUrlOrDomain(target);
+  if (reviewProfile === 'expedited' && !isLocalPath) {
+    return { ok: false, error: 'the expedited workflow is available only for an existing local source directory; use --full for URL/domain reviews' };
+  }
   return {
     ok: true,
     mode,
     maxDurationMinutes: duration,
     singleModel,
+    reviewProfile,
+    campaign,
     target,
-    isLocalPath: isExistingLocalPath(target, fs),
-    isUrlOrDomain: isUrlOrDomain(target),
+    isLocalPath,
+    isUrlOrDomain: isUrlOrDomainTarget,
   };
 }
 

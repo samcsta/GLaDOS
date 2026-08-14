@@ -9,6 +9,8 @@ const CONFIG_FILES = [
   'agent-seed-state.json',
   'upstream-agent-status.json',
   path.join('sessions', 'agent-sdk-sessions.json'),
+  path.join('policy', 'full-access.json'),
+  path.join('preferences', 'chat.json'),
 ];
 
 function safeSegment(value) {
@@ -74,7 +76,7 @@ async function createUpdatePreservationSnapshot({
     runtimeDir,
     databases,
     configs,
-    protectedInPlace: ['reports', 'investigations', path.join('workspaces', 'agents')]
+    protectedInPlace: ['reports', 'investigations', 'attachments', path.join('workspaces', 'agents')]
       .map(relative => protectedPathState(runtimeDir, relative)),
     note: 'Protected-in-place paths live outside the application bundle and are not modified by electron-updater.',
   };

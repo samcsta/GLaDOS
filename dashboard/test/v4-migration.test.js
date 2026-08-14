@@ -232,11 +232,11 @@ test('v4 desktop UI keeps app operations in Settings and agent operations in con
   assert.match(styles, /\.agent-runtime-status\.halted/);
   assert.match(app, /kind === 'operator-event'/);
   assert.match(styles, /\.entry\.operator-event\.halt-event/);
-  assert.match(app, /id="chat-stop"/);
+  assert.match(app, /data-chat-stop/);
   assert.doesNotMatch(`${html}\n${app}`, /indicators-heading|indicators-group|proxy-rps|refreshIndicators|Proxy RPS|Burp RPS/);
-  assert.match(app, /Enter to send, Shift\+Enter for newline/);
+  assert.match(app, /placeholder="Message \$\{escapeHtml\(label\)\}…"/);
   assert.match(app, /ev\.key === 'Enter' && !ev\.shiftKey/);
-  assert.doesNotMatch(app, /glados-dash\.chat-visual-mode|data-chat-mode|createChatModeSwitch|chat-visual-classic/);
+  assert.doesNotMatch(app, /glados-dash\.chat-visual-mode|data-chat-mode(?!l)|createChatModeSwitch|chat-visual-classic/);
   assert.match(app, /chat\.className = 'chat-pane chat-visual-chamber'/);
   assert.match(html, /chat-alternate\.css/);
   assert.match(styles, /\.ask-glados-action/);
@@ -259,13 +259,16 @@ test('v4 operator workspace exposes overview, search, provenance, notifications,
   const app = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
   const styles = fs.readFileSync(path.join(ROOT, 'dashboard/public/styles.css'), 'utf8');
   const server = fs.readFileSync(path.join(ROOT, 'dashboard/server.js'), 'utf8');
-  for (const id of ['open-overview', 'agent-search', 'security-review-list', 'notifications-toggle', 'notification-drawer', 'sidebar-splitter', 'events-splitter']) {
+  for (const id of ['open-overview', 'projects-section', 'sessions-section', 'agent-search', 'security-review-list', 'notifications-toggle', 'notification-drawer', 'sidebar-splitter', 'events-splitter']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.doesNotMatch(html, /investigation-session-select|new-investigation-session|session-picker/);
-  assert.match(app, /function renderInvestigationSessionManager\(/);
-  assert.match(app, /sessionHost\.className = 'investigation-session-host'/);
-  assert.match(app, /toolbar\.querySelector\('\.agent-actions'\)\.before\(sessionHost\)/);
+  assert.match(app, /function renderInvestigationNavigation\(/);
+  assert.match(app, /data-project-toggle/);
+  assert.match(app, /data-project-drop/);
+  assert.match(app, /data-session-project-id/);
+  assert.match(app, /session-run-state/);
+  assert.doesNotMatch(app, /sessionHost\.className = 'investigation-session-host'/);
   assert.doesNotMatch(app, /wrap\.innerHTML = '<div class="overview-session-host/);
   assert.match(app, /data-session-rename/);
   assert.match(app, /data-session-delete/);
@@ -295,8 +298,10 @@ test('v4 operator workspace exposes overview, search, provenance, notifications,
   assert.match(styles, /\.overview-progress-track/);
   assert.match(app, /function renderLiteLlmUsage\(/);
   assert.match(app, /data-usage-share/);
-  assert.match(app, /Assessment cost/);
-  assert.match(app, /Assessment tokens/);
+  assert.match(app, /Workspace command center/);
+  assert.match(app, /System readiness/);
+  assert.match(app, /Model assignments/);
+  assert.match(app, /Full access/);
   assert.match(app, /function openAgentProvenance\(/);
   assert.match(app, /function openRelatedTraffic\(/);
   assert.match(app, /function confirmAction\(/);
@@ -353,7 +358,7 @@ test('v4 long-run workspace bounds transcript memory and retries tab reads', () 
   assert.match(server, /transcriptStore\.listRecent\(sessionId, agentId, \{ limit: BUFFER_LIMIT \}\)/);
   assert.match(app, /data-overview-end/);
   assert.match(app, /load\.inFlight/);
-  assert.match(server, /admitUserTranscript\(session\.id, 'glados', message, req\.body\?\.client_id\)/);
+  assert.match(server, /admitUserTranscript\(session\.id, 'glados', message, req\.body\?\.client_id, \{ attachments: attachmentMetadata \}\)/);
   assert.match(server, /fastPath: 'model'/);
   assert.match(server, /fastPath: 'version'/);
   assert.match(server, /res\.status\(202\)\.json\(\{ ok: true, accepted: true/);

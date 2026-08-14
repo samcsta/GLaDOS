@@ -153,7 +153,7 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     }
     const overview = await request(srv.port, 'GET', '/api/overview');
     assert.equal(overview.status, 200, overview.raw);
-    assert.equal(overview.json.version, 'v4.5.2');
+    assert.equal(overview.json.version, 'v4.5.3');
     assert.equal(overview.json.engagement.target, 'example.com');
     assert.equal(overview.json.phase, 'Awaiting approval');
     assert.equal(overview.json.pendingApprovals, 1);
@@ -163,6 +163,8 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     assert.equal(overview.json.assessmentMetrics.metering.tokens.totalTokens, 125);
     assert.equal(Array.isArray(overview.json.agents), true);
     assert.equal(overview.json.agents.some(agent => agent.id === 'atlas'), false);
+    assert.equal(typeof overview.json.fullAccess.enabled, 'boolean');
+    assert.equal(overview.json.fullAccess.available, false);
     assert.equal(overview.json.llmUsage.available, false);
     assert.equal(overview.json.llmUsage.reason, 'disabled');
 
@@ -220,7 +222,7 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     cp.execFileSync('git', ['-C', localRepo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
     const review = await slashRun(srv.port, `/security-review ${localRepo}`);
     assert.equal(review.ok, true);
-    assert.match(review.events.at(-1).text, /Queued deep source-code security review/);
+    assert.match(review.events.at(-1).text, /Queued expedited source-code security review/);
 
     const status = await slashRun(srv.port, '/status');
     assert.equal(status.ok, true);

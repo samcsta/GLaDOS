@@ -135,3 +135,22 @@ test('startup removes duplicate empty archived unassigned sessions', () => {
   assert.equal(store.list().filter(session => session.metadata.unassigned).length, 1);
   store.close();
 });
+
+test('projects group sessions and deleting a project safely returns them to Unfiled', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-investigation-projects-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  const store = new InvestigationSessionStore(dbPath);
+  const active = store.getActive();
+  const project = store.createProject('Ford reviews');
+  store.moveToProject(active.id, project.id);
+  let listed = store.list().find(session => session.id === active.id);
+  assert.equal(listed.projectId, project.id);
+  assert.equal(listed.projectName, 'Ford reviews');
+  assert.equal(store.listProjects()[0].sessionCount, 1);
+  store.deleteProject(project.id);
+  listed = store.list().find(session => session.id === active.id);
+  assert.equal(listed.projectId, null);
+  assert.equal(store.listProjects().length, 0);
+  store.close();
+});

@@ -1,6 +1,6 @@
 # GLaDOS
 
-GLaDOS v4.5.2 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
+GLaDOS v4.5.3 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
 
 The application has no OpenClaw or Burp Suite runtime dependency. HTTP capture, replay, history, metrics, and per-agent attribution are provided by a supervised local mitmproxy process behind `/api/proxy/*`. Signed macOS packages include the pinned official Apple-silicon mitmproxy runtime; source installations continue to use the bootstrap-managed Homebrew installation.
 
@@ -141,6 +141,33 @@ Edit agent behavior under `~/.glados/workspaces/agents/<agent-id>/`. Prompt asse
 
 Use the Settings model picker or edit `~/.glados/model-overrides.json`. Settings queries LiteLLM's authenticated `/v1/models` catalog each time it opens, excludes embedding-only entries, and validates new selections against a fresh catalog response. Existing assignments that were removed upstream remain visible as unavailable until the operator selects a live replacement. Overrides must contain bare gateway aliases. High-risk `c2-*`, `phish-*`/`phisherman`, and `postex*` agents remain disabled until the operator explicitly enables them.
 
+## Security Review Campaigns
+
+Run `/security-review` in GLaDOS Chat to open the native repository chooser.
+The default is the expedited, completion-driven workflow. Select a single
+repository for one review, or a parent containing multiple Git repositories
+for an automatically detected portfolio campaign. Use `/security-review
+--full` when you want the comprehensive workflow instead.
+
+```text
+/security-review
+/security-review --full
+```
+
+GLaDOS creates one durable campaign, gives every direct child repository a
+required blind breadth pass, and then spends the remaining discovery budget on
+the highest-risk trust boundaries and vulnerability classes. The default
+expedited campaign has no wall-clock or fixed discovery-attempt ceiling. It
+stops only after every repository received its breadth pass and three
+consecutive successful passes produced no new canonical candidates. Up to
+three passes run concurrently by default, and coordinator continuations resume
+from durable artifacts instead of initializing a new review.
+
+Expedited mode does not waive deterministic file coverage, semantic candidate
+closure, specialist artifacts, model receipts, or independent High/Critical
+validation. A campaign cannot pass its hard gates if a repository is omitted,
+partial, blocked, deferred, or represented as clean without evidence.
+
 ## Verification
 
 ```bash
@@ -150,6 +177,6 @@ npm run pack --prefix desktop
 npm run verify:pack --prefix desktop
 ```
 
-The release marker is `v4.5.2`. Build artifacts are written under
+The release marker is `v4.5.3`. Build artifacts are written under
 `artifacts/desktop/` and use the product name `GLaDOS`, so the bundle remains
 `GLaDOS.app`.

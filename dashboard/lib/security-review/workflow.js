@@ -67,9 +67,23 @@ function securityReviewCoordinatorPrompt({
   contextMode = 'blind',
   deepScan = {},
   modelPolicy = {},
+  reviewProfile = 'comprehensive',
+  campaign = null,
 }) {
   const mode = ['blind', 'regression', 'informed'].includes(contextMode) ? contextMode : 'blind';
+  const profile = reviewProfile === 'expedited' ? 'expedited' : 'comprehensive';
   const scan = normalizeDeepScanConfig(deepScan);
+  const campaignContract = campaign ? [
+    '',
+    'EXPEDITED MULTI-REPOSITORY CAMPAIGN CONTRACT:',
+    `- The harness-created portfolio/repositories.json defines ${campaign.repository_count} required repositories. Preserve it; do not delete, reorder, rename, or silently merge repositories.`,
+    `- Required breadth assignments: ${campaign.repositories.map(repo => `${repo.required_discovery_worker}=${repo.repository_id}:${repo.relative_path}`).join(', ')}.`,
+    '- Breadth wave: before any repeated or cross-repository hotspot pass, dispatch exactly one blind-discovery worker scoped to each required repository using its assigned worker ID. Batches may contain up to the configured discovery concurrency. A broad worker inventories trust boundaries, entry points, authn/authz, data flows, secrets exposure, dependency/config/IaC risk, and executable security controls for its repository.',
+    '- Depth wave: only after every breadth worker succeeds, use the shared threat model, deterministic inventories, and canonical candidates to rank hotspots across the portfolio. Spend remaining discovery attempts on the most attack-relevant paths, varying trust boundary and vulnerability class. Repository size alone is not a risk ranking.',
+    '- Expedited means breadth-then-risk-ranked-depth, not reduced evidence standards. Do not sample away a repository, waive candidate closure, weaken High/Critical validation, or describe deferred/unreviewed coverage as clean.',
+    '- Write portfolio/coverage.jsonl with exactly one row per repository: {"repository_id":"repo-NNN","status":"STANDARD_COMPLETE|TARGETED_DEEP_COMPLETE","discovery_worker_ids":["worker-NNN"],"inventory_file_count":1,"covered_file_count":1,"high_risk_surfaces":["path or component"],"specialist_tracks":["track-name"],"evidence":["artifact or exact source reference"],"residual_risks":[]}. The assigned breadth worker must be included. Counts must equal the deterministic manifest and coverage ledger for that repository. BLOCKED, DEFERRED, PARTIAL, and CLEAN_WITHOUT_REVIEW do not pass.',
+    '- Generated, binary, vendored, and static assets may receive tooling-backed or deterministic class dispositions, but every file remains in the manifest and coverage ledger. Every security-sensitive candidate file still requires deep file-specific review.',
+  ] : [];
   const contextContract = mode === 'blind'
     ? [
         'CONTEXT MODE: BLIND',
@@ -94,9 +108,12 @@ function securityReviewCoordinatorPrompt({
     `controller_goal_id: ${goalId}`,
     `artifact_root: ${artifactRoot}`,
     `context_mode: ${mode}`,
+    `review_profile: ${profile}`,
+    `campaign_manifest: ${campaign ? 'portfolio/repositories.json' : 'none'}`,
     `deadline_at: ${deepScan.deadlineAt || 'none (operator did not set a wall-clock limit)'}`,
     `model_policy: ${JSON.stringify(modelPolicy)}`,
     ...contextContract,
+    ...campaignContract,
     '',
     'The assessed repository is read-only. You may write only under artifact_root and the blackboard.',
     'Do not deliver conclusions after one broad pass. Run the ordered workflow below and preserve each artifact.',
@@ -114,7 +131,10 @@ function securityReviewCoordinatorPrompt({
     '',
     'Stage 3 — Threat model and repeated blind discovery:',
     '- First write context/threat-model.json with summary, trust_boundaries, entry_points, assets, attacker_goals, and priority_hypotheses. Derive it only from this repository and the operator-declared scope.',
-    `- Run at least ${scan.minDiscoveryRuns} successful source-code discovery attempts, stopping early only after ${scan.stopAfterNoNew} consecutive successful attempts add no canonical candidates. Never start more than ${scan.maxDiscoveryRuns} attempts or continue after an operator-set deadline in run.json.`,
+    `- Run at least ${scan.minDiscoveryRuns} successful source-code discovery attempts, stopping only after ${scan.stopAfterNoNew} consecutive successful attempts add no canonical candidates.${scan.maxDiscoveryRuns == null ? ' This completion-driven profile has no fixed discovery-attempt ceiling.' : ` Never start more than ${scan.maxDiscoveryRuns} attempts.`} Never continue after an operator-set deadline in run.json.`,
+    campaign
+      ? `- Campaign saturation cannot be evaluated until all ${campaign.repository_count} required breadth workers have succeeded and are present in centralized deduplication. A no-new streak reached before the breadth wave ends is not saturation.`
+      : '- Saturation is evaluated across the single assessed source tree after the minimum successful run count.',
     `- Coordinator dispatch boundary: GLaDOS owns orchestration and aggregation. Dispatch discovery in ordered batches of up to ${scan.discoveryConcurrency} synchronous Agent SDK source-code tasks in one assistant response so the SDK runs that batch concurrently. Never ask one source-code task to run the complete workflow, multiple discovery workers, validation, or multiple specialist tracks. Each worker writes only its own directory. After the full batch returns, reconcile terminal rows and run centralized deduplication strictly by worker ordinal before dispatching the next batch. Never let completion order alter canonical ordering or saturation. Before dispatch, record started_at and the current runtime observation IDs; after return, use only harness-issued observations bound to that worker. Never invent, predict, alias, or use a placeholder observation ID.`,
     '- Every blind-discovery Agent SDK task prompt must begin with these three standalone machine-readable lines exactly: security_review_role: blind-discovery; worker_id: worker-NNN; artifact_root: <the absolute artifact_root above>. Put each field on its own line with no bullets, backticks, trailing punctuation, aliases such as "Artifact root", or surrounding prose. The runtime denies dispatch when any header is missing or noncanonical.',
     '- Every attempt is a durable worker. Append exactly one terminal row to discovery/deep/workers.jsonl using {"worker_id":"worker-NNN","sequence":1,"attempt":1,"status":"SUCCEEDED|FAILED|CANCELED","requested_model":"...","actual_model":"...","model_observation_ids":["model-observation-..."],"started_at":"ISO-8601","completed_at":"ISO-8601","retry_of":null,"candidates_artifact":"discovery/deep/worker-NNN/candidates.jsonl","receipt_artifact":"discovery/deep/worker-NNN/receipt.json"}. Use error instead of candidate/receipt paths for a failed or canceled attempt. Do not rename completed_at to finished_at or candidates_artifact to candidate_artifact. model_observation_ids must be exact IDs already present in the harness runtime ledger and bound to the same worker_id.',
@@ -169,6 +189,9 @@ function securityReviewCoordinatorPrompt({
     '- Explicit operator approval is required only for live/target-facing actions and for generating or publishing the formal report package. Do not dispatch report agents without explicit operator wrap approval.',
     '',
     'Hard completion gates:',
+    ...(campaign ? [
+      `0. Portfolio repository manifest and portfolio coverage have exact set equality across all ${campaign.repository_count} repositories; every assigned breadth worker succeeded, per-repository inventory and covered-file counts match, and no repository is partial, blocked, deferred, or silently omitted.`,
+    ] : []),
     '1. File manifest and coverage ledger have exact set equality.',
     '2. Route inventory and authorization matrix have exact set equality.',
     '3. Security-sensitive candidate inventory and semantic candidate dispositions have exact set equality; every candidate file received deep file-specific review.',
@@ -298,7 +321,14 @@ function validateEvidence(evidence, label, invalid, { expectedFile = null, expec
 }
 
 function sourceReviewGateStatus(artifactRoot, options = {}) {
-  const missing = REQUIRED_REVIEW_ARTIFACTS.filter(relative => !fs.existsSync(path.join(artifactRoot, relative)));
+  let runPreview = null;
+  try { runPreview = JSON.parse(fs.readFileSync(path.join(artifactRoot, 'run.json'), 'utf8')); } catch {}
+  const campaignExpected = options.campaignExpected === true;
+  const campaignEnabled = runPreview?.campaign?.enabled === true;
+  const requiredArtifacts = campaignExpected || campaignEnabled
+    ? [...REQUIRED_REVIEW_ARTIFACTS, 'portfolio/repositories.json', 'portfolio/coverage.jsonl']
+    : REQUIRED_REVIEW_ARTIFACTS;
+  const missing = requiredArtifacts.filter(relative => !fs.existsSync(path.join(artifactRoot, relative)));
   const invalid = [];
   const available = relative => !missing.includes(relative);
 
@@ -432,6 +462,12 @@ function sourceReviewGateStatus(artifactRoot, options = {}) {
 
   const run = json('run.json');
   const scope = json('intake/scope.json');
+  if (campaignExpected && run?.campaign?.enabled !== true) {
+    invalid.push('run.json.campaign.enabled: controller expected a campaign run and the campaign marker must remain true');
+  }
+  if (run?.campaign?.enabled && run.reviewProfile !== 'expedited') {
+    invalid.push('run.json.reviewProfile: campaign runs require the expedited profile');
+  }
   if (run) {
     requireText(run.head, 'run.json.head', invalid);
     if (Number(run.fileCount) !== manifest.size) {
@@ -439,6 +475,69 @@ function sourceReviewGateStatus(artifactRoot, options = {}) {
     }
     if (scope?.repository?.head && scope.repository.head !== run.head) {
       invalid.push('intake/scope.json: repository head does not match run.json');
+    }
+  }
+
+  if (run?.campaign?.enabled) {
+    const portfolio = json('portfolio/repositories.json');
+    const portfolioCoverageRows = jsonl('portfolio/coverage.jsonl');
+    const repositories = keyedRows(
+      Array.isArray(portfolio?.repositories) ? portfolio.repositories : [],
+      ['repository_id'],
+      'portfolio repositories',
+      invalid,
+      { allowEmpty: false }
+    );
+    const repositoryCoverage = keyedRows(
+      portfolioCoverageRows,
+      ['repository_id'],
+      'portfolio coverage',
+      invalid,
+      { allowEmpty: false }
+    );
+    requireExactKeys(repositories, repositoryCoverage, 'portfolio repositories vs coverage', invalid);
+    if (Number(portfolio?.repository_count) !== repositories.size) {
+      invalid.push(`portfolio/repositories.json.repository_count: expected ${repositories.size}, received ${portfolio?.repository_count}`);
+    }
+    if (Number(run.campaign.repositoryCount) !== repositories.size) {
+      invalid.push(`run.json.campaign.repositoryCount: expected ${repositories.size}, received ${run.campaign.repositoryCount}`);
+    }
+    const successfulWorkers = new Set(json('discovery/deep/dedupe.json')?.input_worker_ids || []);
+    for (const [repositoryId, repository] of repositories) {
+      requireText(repository.relative_path, `portfolio repository ${repositoryId}.relative_path`, invalid);
+      requireText(repository.required_discovery_worker, `portfolio repository ${repositoryId}.required_discovery_worker`, invalid);
+    }
+    for (const [repositoryId, row] of repositoryCoverage) {
+      const repository = repositories.get(repositoryId);
+      const status = String(row.status || '').toUpperCase();
+      if (!['STANDARD_COMPLETE', 'TARGETED_DEEP_COMPLETE'].includes(status)) {
+        invalid.push(`portfolio coverage ${repositoryId}: status ${status || '(missing)'} is not complete`);
+      }
+      for (const field of ['discovery_worker_ids', 'high_risk_surfaces', 'specialist_tracks', 'evidence', 'residual_risks']) {
+        if (!Array.isArray(row[field])) invalid.push(`portfolio coverage ${repositoryId}.${field}: must be an array`);
+      }
+      if (!Array.isArray(row.evidence) || row.evidence.length === 0) {
+        invalid.push(`portfolio coverage ${repositoryId}.evidence: at least one artifact or exact source reference is required`);
+      }
+      const workers = Array.isArray(row.discovery_worker_ids) ? row.discovery_worker_ids : [];
+      if (repository?.required_discovery_worker && !workers.includes(repository.required_discovery_worker)) {
+        invalid.push(`portfolio coverage ${repositoryId}: missing assigned breadth worker ${repository.required_discovery_worker}`);
+      }
+      for (const workerId of workers) {
+        if (!successfulWorkers.has(workerId)) invalid.push(`portfolio coverage ${repositoryId}: worker ${workerId} is not a successful deduplicated discovery worker`);
+      }
+      const relativePath = typeof repository?.relative_path === 'string' ? repository.relative_path : '';
+      const prefix = relativePath ? `${relativePath.replace(/\/$/, '')}/` : null;
+      if (prefix) {
+        const expectedInventoryCount = [...manifest.keys()].filter(key => key === relativePath || key.startsWith(prefix)).length;
+        const expectedCoverageCount = [...coverage.keys()].filter(key => key === relativePath || key.startsWith(prefix)).length;
+        if (Number(row.inventory_file_count) !== expectedInventoryCount) {
+          invalid.push(`portfolio coverage ${repositoryId}.inventory_file_count: expected ${expectedInventoryCount}, received ${row.inventory_file_count}`);
+        }
+        if (Number(row.covered_file_count) !== expectedCoverageCount) {
+          invalid.push(`portfolio coverage ${repositoryId}.covered_file_count: expected ${expectedCoverageCount}, received ${row.covered_file_count}`);
+        }
+      }
     }
   }
 

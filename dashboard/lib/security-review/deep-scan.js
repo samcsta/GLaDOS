@@ -79,7 +79,7 @@ function claimDiscoveryWorker({ dbPath, artifactRoot, engagementId, workerId, to
       try {
         maxDiscoveryRuns = normalizeDeepScanConfig(JSON.parse(fs.readFileSync(path.join(artifactRoot, 'run.json'), 'utf8'))?.deepScan || {}).maxDiscoveryRuns;
       } catch {}
-      if (dispatched >= maxDiscoveryRuns) return { claimed: false, reason: `discovery maximum of ${maxDiscoveryRuns} attempts has been reached` };
+      if (maxDiscoveryRuns != null && dispatched >= maxDiscoveryRuns) return { claimed: false, reason: `discovery maximum of ${maxDiscoveryRuns} attempts has been reached` };
       const existing = db.prepare(`
         SELECT status FROM security_review_worker_runs WHERE engagement_id=? AND worker_id=?
       `).get(engagementId, workerId);
@@ -201,10 +201,14 @@ function normalizeDeepScanConfig(value = {}) {
     const parsed = Number(input);
     return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, maximum) : fallback;
   };
-  const maxDiscoveryRuns = positiveInteger(value.maxDiscoveryRuns, DEEP_SCAN_DEFAULTS.maxDiscoveryRuns, 200);
+  const maxDiscoveryRuns = Object.hasOwn(value, 'maxDiscoveryRuns') && value.maxDiscoveryRuns === null
+    ? null
+    : positiveInteger(value.maxDiscoveryRuns, DEEP_SCAN_DEFAULTS.maxDiscoveryRuns, 200);
+  const minDiscoveryRuns = positiveInteger(value.minDiscoveryRuns, DEEP_SCAN_DEFAULTS.minDiscoveryRuns, 200);
+  const stopAfterNoNew = positiveInteger(value.stopAfterNoNew, DEEP_SCAN_DEFAULTS.stopAfterNoNew, 20);
   return {
-    minDiscoveryRuns: Math.min(positiveInteger(value.minDiscoveryRuns, DEEP_SCAN_DEFAULTS.minDiscoveryRuns, 20), maxDiscoveryRuns),
-    stopAfterNoNew: Math.min(positiveInteger(value.stopAfterNoNew, DEEP_SCAN_DEFAULTS.stopAfterNoNew, 20), maxDiscoveryRuns),
+    minDiscoveryRuns: maxDiscoveryRuns == null ? minDiscoveryRuns : Math.min(minDiscoveryRuns, maxDiscoveryRuns),
+    stopAfterNoNew: maxDiscoveryRuns == null ? stopAfterNoNew : Math.min(stopAfterNoNew, maxDiscoveryRuns),
     maxDiscoveryRuns,
     maxDurationMinutes: value.maxDurationMinutes == null
       ? null
@@ -219,6 +223,8 @@ function initializeDeepScanRun(artifactRoot, {
   allowedModels = [],
   requireModelDiversity = true,
   modelDiversityWaiver = null,
+  reviewProfile = 'comprehensive',
+  campaign = null,
 } = {}) {
   const runFile = path.join(artifactRoot, 'run.json');
   const run = JSON.parse(fs.readFileSync(runFile, 'utf8'));
@@ -228,6 +234,13 @@ function initializeDeepScanRun(artifactRoot, {
     ? new Date(startedAt.getTime() + deepScan.maxDurationMinutes * 60_000)
     : null;
   run.workflowVersion = 3;
+  run.reviewProfile = reviewProfile === 'expedited' ? 'expedited' : 'comprehensive';
+  run.campaign = campaign ? {
+    enabled: true,
+    repositoryCount: campaign.repository_count,
+    manifestArtifact: 'portfolio/repositories.json',
+    coverageArtifact: 'portfolio/coverage.jsonl',
+  } : { enabled: false };
   run.deepScan = {
     ...deepScan,
     startedAt: startedAt.toISOString(),
@@ -248,6 +261,7 @@ function initializeDeepScanRun(artifactRoot, {
     deadline_at: run.deepScan.deadlineAt,
     omitted_workers: [],
   });
+  if (campaign) writeJson(path.join(artifactRoot, 'portfolio', 'repositories.json'), campaign);
   return run;
 }
 
@@ -320,7 +334,7 @@ function discoveryDispatchCheckpoint(artifactRoot, { nextWorkerId, retryOf = nul
   const deadlineMs = manifest?.deadline_at ? Date.parse(manifest.deadline_at) : null;
   if (manifest?.deadline_at && !Number.isFinite(deadlineMs)) invalid.push('discovery deadline is invalid');
   else if (Number.isFinite(deadlineMs) && deadlineMs <= Date.now()) invalid.push('discovery deadline has elapsed; mark the run CAPPED');
-  if (!saturationProbe && nextSequence > config.maxDiscoveryRuns) invalid.push(`discovery maximum of ${config.maxDiscoveryRuns} attempts has been reached`);
+  if (!saturationProbe && config.maxDiscoveryRuns != null && nextSequence > config.maxDiscoveryRuns) invalid.push(`discovery maximum of ${config.maxDiscoveryRuns} attempts has been reached`);
 
   const workersFile = path.join(artifactRoot, 'discovery/deep/workers.jsonl');
   if (nextSequence <= config.discoveryConcurrency && (!fs.existsSync(workersFile) || !fs.readFileSync(workersFile, 'utf8').trim())) {
@@ -330,7 +344,9 @@ function discoveryDispatchCheckpoint(artifactRoot, { nextWorkerId, retryOf = nul
 
   const workers = parseJsonl('discovery/deep/workers.jsonl').sort((left, right) => Number(left?.sequence) - Number(right?.sequence));
   const firstOpenSequence = workers.length + 1;
-  const lastParallelSequence = Math.min(config.maxDiscoveryRuns, workers.length + config.discoveryConcurrency);
+  const lastParallelSequence = config.maxDiscoveryRuns == null
+    ? workers.length + config.discoveryConcurrency
+    : Math.min(config.maxDiscoveryRuns, workers.length + config.discoveryConcurrency);
   if (!saturationProbe && (nextSequence < firstOpenSequence || nextSequence > lastParallelSequence)) {
     invalid.push(`worker ${nextWorkerId} must be in the next ordered discovery batch ${firstOpenSequence}-${lastParallelSequence}`);
   }
@@ -460,7 +476,7 @@ function discoverySaturationCheckpoint(artifactRoot) {
     if (successful.length < minimum) invalid.push(`discovery saturation requires at least ${minimum} successful workers`);
     if (dedupe.no_new_streak !== trailing) invalid.push('dedupe no_new_streak does not match the computed trailing zero count');
     if (trailing < threshold) invalid.push(`discovery saturation requires ${threshold} consecutive zero-new successful workers; observed ${trailing}`);
-    if (workers.length >= Number(manifest.config?.maxDiscoveryRuns) && trailing < threshold) {
+    if (manifest.config?.maxDiscoveryRuns != null && workers.length >= Number(manifest.config.maxDiscoveryRuns) && trailing < threshold) {
       const reason = 'discovery attempt ceiling reached without saturation';
       invalid.push(`${reason}; mark the run CAPPED`);
       try { markDeepScanCapped(artifactRoot, reason); } catch {}
@@ -578,7 +594,8 @@ function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservation
 
   const deepConfig = normalizeDeepScanConfig(run?.deepScan || {});
   for (const field of ['minDiscoveryRuns', 'stopAfterNoNew', 'maxDiscoveryRuns', 'maxDurationMinutes', 'discoveryConcurrency', 'specialistConcurrency']) {
-    const valid = field === 'maxDurationMinutes' && run?.deepScan?.[field] === null
+    const nullable = field === 'maxDurationMinutes' || field === 'maxDiscoveryRuns';
+    const valid = nullable && run?.deepScan?.[field] === null
       ? true
       : Number.isInteger(run?.deepScan?.[field]) && run.deepScan[field] >= 1 && run.deepScan[field] === deepConfig[field];
     if (!valid) {
@@ -627,7 +644,7 @@ function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservation
   if (new Set(sequences).size !== sequences.length) invalid.push('discovery/deep/workers.jsonl: duplicate sequence');
   succeeded.sort((a, b) => a.sequence - b.sequence);
   if (succeeded.length < deepConfig.minDiscoveryRuns) invalid.push(`deep discovery: expected at least ${deepConfig.minDiscoveryRuns} successful runs, received ${succeeded.length}`);
-  if (workers.length > deepConfig.maxDiscoveryRuns) invalid.push(`deep discovery: worker count exceeds maxDiscoveryRuns ${deepConfig.maxDiscoveryRuns}`);
+  if (deepConfig.maxDiscoveryRuns != null && workers.length > deepConfig.maxDiscoveryRuns) invalid.push(`deep discovery: worker count exceeds maxDiscoveryRuns ${deepConfig.maxDiscoveryRuns}`);
   if (authoritativeWorkerRuns.length) {
     const authoritative = new Map(authoritativeWorkerRuns.map(row => [row.worker_id, row]));
     requireExactKeys(workersById, authoritative, 'worker ledger vs controller dispatch ledger', invalid);

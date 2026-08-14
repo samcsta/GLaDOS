@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
@@ -12,6 +13,7 @@ const { resolveTool, toolStatus, loadManifest } = require('../../scripts/lib/red
 const { actionRequiresOperator } = require('./lib/scope-risk');
 const { findExplicitOperatorActionApproval } = require('./lib/operator-action-approval');
 const { engagementMetrics } = require('./lib/engagement-metrics');
+const { isFullAccessEnabled } = require('../../dashboard/lib/full-access');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const GLADOS_RUNTIME_DIR = process.env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), '.glados');
@@ -193,10 +195,169 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: 'desktop_snapshot',
+    description: 'Capture a connected macOS display for visual inspection. Requires operator-enabled Full Access and macOS Screen Recording permission.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        display_id: { type: 'number', description: 'Optional 1-based macOS display id. Omit to capture the main display.' },
+      },
+    },
+  },
+  {
+    name: 'desktop_list_windows',
+    description: 'List visible macOS applications and windows. Requires operator-enabled Full Access and macOS Accessibility permission.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'desktop_click',
+    description: 'Click an absolute screen coordinate on the macOS desktop. Take a fresh desktop snapshot first. Requires operator-enabled Full Access and macOS Accessibility permission.',
+    inputSchema: {
+      type: 'object',
+      required: ['x', 'y'],
+      properties: {
+        x: { type: 'number' },
+        y: { type: 'number' },
+        count: { type: 'number', enum: [1, 2], description: 'Single or double click. Defaults to 1.' },
+      },
+    },
+  },
+  {
+    name: 'desktop_type',
+    description: 'Type text into the focused macOS control. Requires operator-enabled Full Access and macOS Accessibility permission.',
+    inputSchema: {
+      type: 'object',
+      required: ['text'],
+      properties: { text: { type: 'string', maxLength: 20000 } },
+    },
+  },
+  {
+    name: 'desktop_key',
+    description: 'Press a supported macOS keyboard key, optionally with modifiers. Requires operator-enabled Full Access and macOS Accessibility permission.',
+    inputSchema: {
+      type: 'object',
+      required: ['key'],
+      properties: {
+        key: { type: 'string', enum: ['return', 'tab', 'escape', 'delete', 'space', 'left', 'right', 'up', 'down', 'home', 'end', 'pageup', 'pagedown'] },
+        modifiers: { type: 'array', items: { type: 'string', enum: ['command', 'control', 'option', 'shift'] }, uniqueItems: true },
+      },
+    },
+  },
 ];
 
 function json(result) {
   return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+}
+
+function requireFullAccess() {
+  if (!isFullAccessEnabled(process.env)) {
+    throw new Error('Full Access is disabled. Enable it explicitly in GLaDOS Settings before using desktop controls.');
+  }
+  if (process.platform !== 'darwin') throw new Error('desktop control is currently supported on macOS only');
+}
+
+function runAppleScript(source, { env = process.env, timeout = 10000, language = null } = {}) {
+  const args = language ? ['-l', language, '-e', source] : ['-e', source];
+  const result = spawnSync('/usr/bin/osascript', args, { encoding: 'utf8', env, timeout });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const message = String(result.stderr || result.stdout || `osascript exited ${result.status}`).trim();
+    const hint = /not authorized|assistive access|1002|1743/i.test(message)
+      ? ' Grant GLaDOS Accessibility permission in System Settings > Privacy & Security > Accessibility.'
+      : '';
+    throw new Error(`${message}${hint}`);
+  }
+  return String(result.stdout || '').trim();
+}
+
+function desktopSnapshot(args = {}) {
+  requireFullAccess();
+  const displayId = args.display_id == null ? null : Number(args.display_id);
+  if (displayId != null && (!Number.isInteger(displayId) || displayId < 1 || displayId > 32)) {
+    throw new Error('display_id must be an integer between 1 and 32');
+  }
+  const outputDir = path.join(GLADOS_RUNTIME_DIR, 'computer-use', 'screenshots');
+  fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(outputDir, 0o700);
+  const file = path.join(outputDir, `desktop-${Date.now()}.png`);
+  const captureArgs = ['-x', '-C', '-t', 'png'];
+  if (displayId != null) captureArgs.push('-D', String(displayId));
+  captureArgs.push(file);
+  const result = spawnSync('/usr/sbin/screencapture', captureArgs, { encoding: 'utf8', timeout: 15000 });
+  if (result.error) throw result.error;
+  if (result.status !== 0 || !fs.existsSync(file)) {
+    const message = String(result.stderr || result.stdout || `screencapture exited ${result.status}`).trim();
+    throw new Error(`${message || 'screen capture failed'}. Grant GLaDOS Screen Recording permission in System Settings > Privacy & Security > Screen & System Audio Recording.`);
+  }
+  fs.chmodSync(file, 0o600);
+  const data = fs.readFileSync(file).toString('base64');
+  return {
+    content: [
+      { type: 'text', text: JSON.stringify({ ok: true, path: file, display_id: displayId || 'main' }, null, 2) },
+      { type: 'image', data, mimeType: 'image/png' },
+    ],
+  };
+}
+
+function desktopListWindows() {
+  requireFullAccess();
+  const script = `const systemEvents = Application('System Events');
+const processes = systemEvents.applicationProcesses.whose({ visible: true })();
+const result = [];
+for (const process of processes) {
+  let windows = [];
+  try {
+    windows = process.windows().map(window => ({
+      title: String(window.name() || ''),
+      position: window.position(),
+      size: window.size()
+    }));
+  } catch (_) {}
+  result.push({ name: String(process.name()), frontmost: Boolean(process.frontmost()), windows });
+}
+JSON.stringify(result);`;
+  const output = runAppleScript(script, { language: 'JavaScript', timeout: 15000 });
+  return { ok: true, applications: JSON.parse(output || '[]') };
+}
+
+function desktopClick(args = {}) {
+  requireFullAccess();
+  const x = Number(args.x);
+  const y = Number(args.y);
+  const count = Number(args.count || 1);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > 32768 || y > 32768) {
+    throw new Error('x and y must be valid absolute screen coordinates');
+  }
+  if (![1, 2].includes(count)) throw new Error('count must be 1 or 2');
+  const click = `tell application "System Events" to click at {${Math.round(x)}, ${Math.round(y)}}`;
+  runAppleScript(count === 2 ? `${click}\ndelay 0.12\n${click}` : click);
+  return { ok: true, x: Math.round(x), y: Math.round(y), count };
+}
+
+function desktopType(args = {}) {
+  requireFullAccess();
+  const value = String(args.text ?? '');
+  if (!value) throw new Error('text is required');
+  if (value.length > 20000) throw new Error('text exceeds 20,000 characters');
+  const script = `ObjC.import('stdlib');
+const value = ObjC.unwrap($.getenv('GLADOS_DESKTOP_TYPE_TEXT'));
+Application('System Events').keystroke(value);`;
+  runAppleScript(script, { language: 'JavaScript', env: { ...process.env, GLADOS_DESKTOP_TYPE_TEXT: value }, timeout: 30000 });
+  return { ok: true, characters_typed: value.length };
+}
+
+function desktopKey(args = {}) {
+  requireFullAccess();
+  const keyCodes = { return: 36, tab: 48, escape: 53, delete: 51, space: 49, left: 123, right: 124, down: 125, up: 126, home: 115, end: 119, pageup: 116, pagedown: 121 };
+  const key = String(args.key || '').toLowerCase();
+  if (!(key in keyCodes)) throw new Error(`unsupported key: ${key}`);
+  const allowedModifiers = new Set(['command', 'control', 'option', 'shift']);
+  const modifiers = [...new Set((args.modifiers || []).map(value => String(value).toLowerCase()))];
+  if (modifiers.some(modifier => !allowedModifiers.has(modifier))) throw new Error('unsupported keyboard modifier');
+  const modifierClause = modifiers.length ? ` using {${modifiers.map(modifier => `${modifier} down`).join(', ')}}` : '';
+  runAppleScript(`tell application "System Events" to key code ${keyCodes[key]}${modifierClause}`);
+  return { ok: true, key, modifiers };
 }
 
 function safeName(s) {
@@ -850,6 +1011,11 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       case 'openapi_inventory': return json(openapiInventory(args));
       case 'tool_availability': return json(toolAvailability());
       case 'safe_ffuf_command': return json(safeFfuf(args));
+      case 'desktop_snapshot': return desktopSnapshot(args);
+      case 'desktop_list_windows': return json(desktopListWindows());
+      case 'desktop_click': return json(desktopClick(args));
+      case 'desktop_type': return json(desktopType(args));
+      case 'desktop_key': return json(desktopKey(args));
       default: throw new Error(`unknown tool: ${name}`);
     }
   } catch (e) {

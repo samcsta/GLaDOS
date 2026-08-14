@@ -5,9 +5,11 @@ const { GLADOS_RUNTIME_DIR, GLADOS_AGENT_WORKSPACES, BLACKBOARD_DB, WATCHDOG_DB,
 const { DashboardTranscriptStore } = require('../transcript-store');
 const { loadLlmAuthToken } = require('../secrets/llm-secrets');
 const { fetchLiteLlmModels } = require('../litellm-models');
+const { isFullAccessEnabled } = require('../full-access');
+const { normalizeEffort } = require('../chat-preferences');
 const { bareModelAlias, DEFAULT_BARE_MODEL } = require('../../../scripts/lib/model-aliases');
 const { agentStatus, listHaltedAgents } = require('glados-watchdog/lib/halt');
-const { evaluateToolUse, extractTargets } = require('glados-watchdog/lib/safety-gate');
+const { evaluateToolUse, extractTargets, forbiddenSecretAccess } = require('glados-watchdog/lib/safety-gate');
 const {
   discoveryDispatchCheckpoint,
   discoverySaturationCheckpoint,
@@ -71,6 +73,11 @@ const MCP_SERVER_TOOLS = {
     'openapi_inventory',
     'tool_availability',
     'safe_ffuf_command',
+    'desktop_snapshot',
+    'desktop_list_windows',
+    'desktop_click',
+    'desktop_type',
+    'desktop_key',
   ],
   mcp__browser: [
     'browser_click',
@@ -314,6 +321,12 @@ function decideToolUse({ agentId, toolName, input = {}, policy = loadPolicy(), w
     return { allowed: false, reason: `${toolName} is not mounted for ${agentId}` };
   }
 
+  const desktopControlTool = /^mcp__glados-ops__desktop_/i.test(String(toolName || ''));
+  const fullAccess = agentId === 'glados' && isFullAccessEnabled(env);
+  if (desktopControlTool && !fullAccess) {
+    return { allowed: false, reason: 'desktop control requires the operator to enable Full Access in Settings' };
+  }
+
   if (isTaskDispatchTool(toolName)) {
     if (agentId !== 'glados') {
       return { allowed: false, reason: `Only glados can dispatch subagents; ${agentId} cannot use ${toolName}` };
@@ -331,6 +344,12 @@ function decideToolUse({ agentId, toolName, input = {}, policy = loadPolicy(), w
     if (!agentEnabled(target, { policy, workspaceRoot })) return { allowed: false, reason: `${toolName} dispatch target ${target} is disabled` };
     const contractReason = investigationDispatchContractViolation(target, input, env);
     if (contractReason) return { allowed: false, reason: contractReason };
+  }
+
+  if (fullAccess) {
+    const secretReason = forbiddenSecretAccess(toolName, input);
+    if (secretReason) return { allowed: false, interrupt: true, reason: secretReason };
+    return { allowed: true, reason: 'GLaDOS Full Access is enabled by the operator' };
   }
 
   const browserContractReason = browserToolContractViolation(toolName, input, env);
@@ -882,7 +901,7 @@ function readAgentPrompt(agentId, options = {}) {
   return assembleAgentPrompt(agentId, options).prompt;
 }
 
-function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, workspaceRoot = agentWorkspaceRoot() } = {}) {
+function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, workspaceRoot = agentWorkspaceRoot(), env = process.env } = {}) {
   const persistentWorkspace = path.join(workspaceRoot, agentId);
   const investigationsDir = path.join(GLADOS_RUNTIME_DIR, 'investigations');
   const lines = [
@@ -896,6 +915,12 @@ function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, work
     `- GLaDOS proxy URL for target HTTP(S): ${proxyUrl || proxyUrlFromEnv()}. For shell HTTP, use /usr/bin/curl -x this URL -k and add X-GLaDOS-Agent: ${agentId}. Do not use legacy :8080 proxy examples unless the operator explicitly overrides it.`,
   ];
   if (agentId === 'glados' && registryRows.length) {
+    if (isFullAccessEnabled(env)) {
+      lines.push('- Full Access is ENABLED by the operator. You may use desktop_snapshot, desktop_list_windows, desktop_click, desktop_type, and desktop_key; read/edit requested files; and run shell commands without per-command prompts. macOS Accessibility and Screen Recording consent still apply.');
+      lines.push('- Full Access changes tool permission handling, not operator intent. Perform destructive or external actions only when they are clearly requested in the current operator turn, and verify ambiguous targets before acting.');
+    } else {
+      lines.push('- Full Access is disabled. Desktop-control tools are unavailable; tell the operator to enable Full Access in Settings if the requested task requires them.');
+    }
     const halted = listHaltedAgents().map(marker => marker.agentId).filter(Boolean);
     lines.push(`- Operator halt state: ${halted.length ? `halted agents are ${halted.join(', ')}` : 'no agents are halted'}. Treat this as authoritative and do not dispatch a halted agent.`);
     lines.push('- For normal investigations, perform target reachability preflight only with mcp__watchdog__target_probe. Never use Bash/curl or browser tools from GLaDOS for target interaction; delegate that work to a named specialist.');
@@ -1061,6 +1086,7 @@ function buildAgentSdkOptions(agentId, options = {}) {
     ? Math.min(8, configuredReviewConcurrency)
     : 3;
   const reviewReservations = options.reviewKey ? new Set() : null;
+  const fullAccess = agentId === 'glados' && isFullAccessEnabled(options.env || process.env);
   const preToolUse = buildPreToolUseHook(agentId, policy, {
     workspaceRoot,
     env: options.env || process.env,
@@ -1086,11 +1112,13 @@ function buildAgentSdkOptions(agentId, options = {}) {
       registryRows,
       proxyUrl: proxyUrlFromEnv(options.env || process.env),
       workspaceRoot,
+      env: options.env || process.env,
     }),
     gladosPromptFiles: assembled.files,
     gladosPromptSource: assembled.source,
     gladosPromptSkills: assembled.skills,
     settingSources: [],
+    settings: { autoCompactEnabled: options.autoCompact !== false },
     includePartialMessages: true,
     forwardSubagentText: true,
     appendSubagentSystemPrompt: [
@@ -1098,7 +1126,8 @@ function buildAgentSdkOptions(agentId, options = {}) {
       'They must use their configured AgentDefinition prompt, model, tools, and MCP servers.',
       'They must return the final task result to parent GLaDOS, not ask the operator to message an internal task id.',
     ].join(' '),
-    permissionMode: 'dontAsk',
+    permissionMode: fullAccess ? 'bypassPermissions' : 'dontAsk',
+    allowDangerouslySkipPermissions: fullAccess,
     // Options.tools controls built-ins only. MCP tools are deferred and loaded
     // through ToolSearch, then caller-scoped by AgentDefinition.tools and the
     // authoritative PreToolUse hook.
@@ -1133,6 +1162,8 @@ function buildAgentSdkOptions(agentId, options = {}) {
       ? (policy.harness?.coordinatorMaxTurns ?? 40)
       : (policy.harness?.specialistMaxTurns ?? 100)),
   };
+  const effort = normalizeEffort(options.effort, null);
+  if (effort) sdkOptions.effort = effort;
   if (options.resumeSessionId) sdkOptions.resume = options.resumeSessionId;
   if (reviewReservations) sdkOptions.gladosReviewReservations = reviewReservations;
   return sdkOptions;
@@ -1379,6 +1410,29 @@ function mapSdkMessageToEvents(agentId, message, context = {}) {
   }
 
   if (message.type === 'system') {
+    if (message.subtype === 'status') {
+      return [{
+        ...base,
+        kind: 'context-status',
+        text: message.status === 'compacting' ? 'Compacting conversation context…' : '',
+        status: message.status || null,
+        compactResult: message.compact_result || null,
+        compactError: message.compact_error || null,
+        id: message.uuid || undefined,
+      }];
+    }
+    if (message.subtype === 'compact_boundary') {
+      return [{
+        ...base,
+        kind: 'context-compacted',
+        text: `Context compacted automatically (${Number(message.compact_metadata?.pre_tokens || 0).toLocaleString()} tokens before compaction).`,
+        trigger: message.compact_metadata?.trigger || 'auto',
+        preTokens: Number(message.compact_metadata?.pre_tokens || 0),
+        postTokens: Number(message.compact_metadata?.post_tokens || 0) || null,
+        durationMs: Number(message.compact_metadata?.duration_ms || 0) || null,
+        id: message.uuid || undefined,
+      }];
+    }
     if (message.subtype === 'task_started' || message.subtype === 'task_progress' || message.subtype === 'task_notification') {
       if (!context.subagentByTaskId) context.subagentByTaskId = new Map();
       const toolCallId = message.tool_use_id || null;
@@ -1449,6 +1503,29 @@ function mapSdkMessageToEvents(agentId, message, context = {}) {
 async function importSdkQuery() {
   const mod = await import('@anthropic-ai/claude-agent-sdk');
   return mod.query;
+}
+
+function sdkPromptWithAttachments(prompt, attachments = []) {
+  const rows = (Array.isArray(attachments) ? attachments : []).filter(row => row?.file && row?.mimeType);
+  if (!rows.length) return prompt;
+  const content = [{ type: 'text', text: String(prompt || '') }];
+  for (const row of rows) {
+    content.push({
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: row.mimeType,
+        data: fs.readFileSync(row.file).toString('base64'),
+      },
+    });
+  }
+  return (async function* input() {
+    yield {
+      type: 'user',
+      message: { role: 'user', content },
+      parent_tool_use_id: null,
+    };
+  })();
 }
 
 function sdkErrorText(value) {
@@ -1588,7 +1665,7 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
   const query = queryImpl || await importSdkQuery();
   const turnTargets = options.turnTargets || extractTargets(prompt);
   const sdkOptions = options.sdkOptions || buildAgentSdkOptions(agentId, { ...options, turnTargets });
-  const iterable = query({ prompt, options: sdkOptions });
+  const iterable = query({ prompt: sdkPromptWithAttachments(prompt, options.attachments), options: sdkOptions });
   const transcriptStore = store === false ? null : (store || new DashboardTranscriptStore(BLACKBOARD_DB));
   const events = [];
   const context = { subagentByParentToolUseId: new Map() };

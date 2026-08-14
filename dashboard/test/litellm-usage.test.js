@@ -48,30 +48,56 @@ test('aggregates a complete seven-day LiteLLM usage window and merges legacy mod
 });
 
 test('uses the reporting token only in the server-side Authorization header', async () => {
-  let observed = null;
+  const observed = [];
   const reportingCredential = ['server', 'only', 'fixture'].join('-');
   const result = await fetchLiteLlmUsage({
     token: reportingCredential,
     now: new Date('2026-07-14T16:00:00Z'),
     fetchImpl: async (url, options) => {
-      observed = { url, authorization: options.headers.Authorization };
-      return { ok: true, status: 200, text: async () => JSON.stringify({ results: [] }) };
+      observed.push({ url, authorization: options.headers.Authorization });
+      const payload = url.endsWith('/key/info')
+        ? { key: 'fixture-key-id', info: { key_alias: 'fixture-key', max_budget: 250, budget_duration: '24h' } }
+        : { results: [] };
+      return { ok: true, status: 200, text: async () => JSON.stringify(payload) };
     },
   });
-  assert.match(observed.url, /\/user\/daily\/activity\?start_date=2026-07-08&end_date=2026-07-14/);
-  assert.equal(observed.authorization, ['Bearer', reportingCredential].join(' '));
+  assert.equal(observed.some(row => /\/user\/daily\/activity\?start_date=2026-07-08&end_date=2026-07-14&api_key=fixture-key-id/.test(row.url)), true);
+  assert.equal(observed.some(row => row.url.endsWith('/key/info')), true);
+  assert.equal(observed.every(row => row.authorization === ['Bearer', reportingCredential].join(' ')), true);
   assert.equal(JSON.stringify(result).includes(reportingCredential), false);
+});
+
+test('filters daily activity to the configured virtual key alias', () => {
+  const result = aggregateDailyActivity({ results: [{
+    date: '2026-07-14',
+    metrics: { spend: 99, api_requests: 99 },
+    breakdown: { api_keys: {
+      one: { metadata: { key_alias: 'other-key' }, metrics: { spend: 90, api_requests: 90 } },
+      two: { metadata: { key_alias: 'scosta-glados-prod' }, metrics: { spend: 9, api_requests: 9, total_tokens: 900 } },
+    } },
+  }] }, { now: new Date('2026-07-14T16:00:00Z'), days: 1, keyAlias: 'scosta-glados-prod' });
+  assert.equal(result.scope, 'virtual-key');
+  assert.equal(result.keyAlias, 'scosta-glados-prod');
+  assert.equal(result.totals.spend, 9);
+  assert.equal(result.totals.requests, 9);
+  assert.equal(result.totals.totalTokens, 900);
 });
 
 test('returns a sanitized unavailable state when spend-route access is denied', async () => {
   const reportingCredential = ['server', 'only', 'fixture'].join('-');
   const result = await fetchLiteLlmUsage({
     token: reportingCredential,
-    fetchImpl: async () => ({
-      ok: false,
-      status: 403,
-      text: async () => JSON.stringify({ detail: 'sensitive gateway detail' }),
-    }),
+    fetchImpl: async url => url.endsWith('/key/info')
+      ? {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ key: 'fixture-key-id', info: { key_alias: 'fixture-key' } }),
+        }
+      : {
+          ok: false,
+          status: 403,
+          text: async () => JSON.stringify({ detail: 'sensitive gateway detail' }),
+        },
   });
   assert.equal(result.available, false);
   assert.equal(result.status, 403);

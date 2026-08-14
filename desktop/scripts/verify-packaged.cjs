@@ -164,6 +164,82 @@ async function runBlackboardMcpSmoke(executable) {
   }
 }
 
+async function runGladosOpsMcpSmoke(executable) {
+  const resources = packagedResources(executable);
+  const entrypoint = path.join(resources, 'tools', 'glados-ops-mcp', 'index.js');
+  if (!fs.existsSync(entrypoint)) throw new Error(`Packaged GLaDOS Ops MCP entrypoint is missing: ${entrypoint}`);
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-ops-smoke-'));
+  const child = spawn(executable, [entrypoint], {
+    cwd: resources,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', GLADOS_RUNTIME_DIR: runtimeDir },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  let settled = false;
+  try {
+    await new Promise((resolve, reject) => {
+      const finish = error => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        error ? reject(error) : resolve();
+      };
+      const timeout = setTimeout(() => finish(new Error(`Packaged GLaDOS Ops MCP smoke test timed out.\n${stderr}`)), 15000);
+      const send = message => child.stdin.write(`${JSON.stringify(message)}\n`);
+      child.stdout.on('data', chunk => {
+        stdout += chunk;
+        const lines = stdout.split(/\r?\n/);
+        stdout = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let message;
+          try { message = JSON.parse(line); } catch { continue; }
+          if (message.id === 1 && message.result) {
+            send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+            send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+          }
+          if (message.id === 2) {
+            if (message.error) return finish(new Error(`Packaged GLaDOS Ops MCP tools/list failed: ${JSON.stringify(message.error)}`));
+            const toolNames = new Set((message.result?.tools || []).map(tool => tool.name));
+            const required = ['desktop_snapshot', 'desktop_list_windows', 'desktop_click', 'desktop_type', 'desktop_key'];
+            const missing = required.filter(name => !toolNames.has(name));
+            if (missing.length) return finish(new Error(`Packaged GLaDOS Ops MCP is missing Full Access tools: ${missing.join(', ')}`));
+            send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'desktop_snapshot', arguments: {} } });
+          }
+          if (message.id === 3) {
+            if (message.error) return finish(new Error(`Packaged Full Access default-off check failed: ${JSON.stringify(message.error)}`));
+            const text = (message.result?.content || []).map(item => item.text || '').join('\n');
+            if (message.result?.isError !== true || !/Full Access is disabled/i.test(text)) {
+              return finish(new Error(`Packaged desktop_snapshot did not fail closed: ${JSON.stringify(message.result)}`));
+            }
+            finish();
+          }
+        }
+      });
+      child.stderr.on('data', chunk => { stderr += chunk; });
+      child.once('error', finish);
+      child.once('exit', code => {
+        if (!settled) finish(new Error(`Packaged GLaDOS Ops MCP exited before becoming ready (exit ${code}).\n${stderr}`));
+      });
+      send({
+        jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'glados-packaged-smoke', version: '1.0.0' } },
+      });
+    });
+    process.stdout.write('GLADOS_PACKAGED_FULL_ACCESS_TOOLS_OK\n');
+  } finally {
+    child.stdin.end();
+    if (child.exitCode == null) child.kill('SIGTERM');
+    await new Promise(resolve => {
+      if (child.exitCode != null) return resolve();
+      const timeout = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 3000);
+      child.once('exit', () => { clearTimeout(timeout); resolve(); });
+    });
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
 async function runSmoke(executable, architecture = null, label = architecture || process.arch) {
   const proxyPort = await freePort();
   const command = architecture ? '/usr/bin/arch' : executable;
@@ -211,6 +287,7 @@ async function main() {
     : [process.arch];
   verifyBundledMitmproxy(executable);
   await runBlackboardMcpSmoke(executable);
+  await runGladosOpsMcpSmoke(executable);
   await runSmoke(executable, null, archs.length > 1 ? process.arch : archs[0]);
   if (process.arch === 'arm64' && archs.includes('x86_64') && archs.includes('arm64')) {
     const probe = require('node:child_process').spawnSync('/usr/bin/arch', ['-x86_64', '/usr/bin/true']);

@@ -1,7 +1,7 @@
 # GLaDOS Desktop
 
-Electron shell for GLaDOS v4.5.2. The macOS bundle is named `GLaDOS.app`; the
-Ubuntu package is `GLaDOS-4.5.2-x86_64.AppImage`.
+Electron shell for GLaDOS v4.5.3. The macOS bundle is named `GLaDOS.app`; the
+Ubuntu package is `GLaDOS-4.5.3-x86_64.AppImage`.
 
 See [DISTRIBUTION_PLAN.md](DISTRIBUTION_PLAN.md) for the Developer ID,
 notarization, Apple-silicon/Ubuntu architecture, first-run dependency, and

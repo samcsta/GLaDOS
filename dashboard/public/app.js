@@ -19,7 +19,23 @@ const state = {
   update: { lines: [], running: false, es: null, autoStart: false },
   reports: { query: '', scope: 'all', selectedPath: null },
   investigationSessions: [],
+  investigationProjects: [],
   currentSessionId: null,
+  expandedProjectIds: (() => {
+    try {
+      const raw = localStorage.getItem('glados-dash.expanded-projects');
+      if (raw === null) return null;
+      const stored = JSON.parse(raw);
+      return new Set(Array.isArray(stored) ? stored : []);
+    } catch { return null; }
+  })(),
+  unreadCompletedSessionIds: (() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem('glados-dash.unread-completed-sessions') || '[]');
+      return new Set(Array.isArray(stored) ? stored.map(String) : []);
+    } catch { return new Set(); }
+  })(),
+  operatorProfile: { name: '', initials: 'You' },
   sessionGeneration: 0,
   overview: null,
   securityReviews: [],
@@ -104,43 +120,68 @@ async function loadInvestigationSessions() {
   const body = await response.json();
   if (!response.ok || !body.ok) throw new Error(body.error || 'could not load investigation sessions');
   state.investigationSessions = body.sessions || [];
+  state.investigationProjects = body.projects || [];
   state.currentSessionId = body.activeId;
+  const validSessions = new Set(state.investigationSessions.map(session => session.id));
+  state.unreadCompletedSessionIds = new Set([...state.unreadCompletedSessionIds].filter(id => validSessions.has(id) && id !== body.activeId));
+  persistUnreadCompletedSessions();
+  const validProjects = new Set(state.investigationProjects.map(project => project.id));
+  if (!(state.expandedProjectIds instanceof Set)) state.expandedProjectIds = new Set(validProjects);
+  else state.expandedProjectIds = new Set([...state.expandedProjectIds].filter(id => validProjects.has(id)));
+  renderInvestigationNavigation();
+}
+
+async function loadOperatorProfile() {
+  const response = await fetch('/api/settings/operator-profile');
+  const body = await response.json();
+  if (!response.ok || !body.ok) throw new Error(body.error || 'could not load chat identity');
+  state.operatorProfile = { name: body.name || '', initials: body.initials || 'You' };
+  return state.operatorProfile;
 }
 
 async function activateInvestigationSession(sessionId) {
   if (!sessionId || sessionId === state.currentSessionId) return;
+  const previous = state.investigationSessions.find(session => session.id === state.currentSessionId);
+  const continuesInBackground = Number(previous?.runningCount || 0) > 0 || state.active.size > 0;
   const response = await fetch(`/api/investigation-sessions/${encodeURIComponent(sessionId)}/activate`, { method: 'POST' });
   const body = await response.json();
   if (!response.ok || !body.ok) throw new Error(body.error || 'could not activate investigation');
   closeSessionStreams();
   state.currentSessionId = body.session.id;
   state.investigationSessions = body.sessions || [];
+  state.investigationProjects = body.projects || state.investigationProjects;
+  markSessionSeen(body.session.id);
   clearPlanClientState();
   persistWorkspaceState();
   await Promise.all([loadAgents(), loadSecurityReviews()]);
   renderPane();
   if (!state._lobbySource) subscribeLobby();
+  if (continuesInBackground) showToast(`${previous?.name || 'The previous session'} is still working in the background.`, { kind: 'info', label: 'Sessions' });
 }
 
 async function createInvestigationSession() {
   const current = state.investigationSessions.find(session => session.id === state.currentSessionId);
-  if (current?.metadata?.unassigned) {
+  if (current?.metadata?.unassigned && !current.projectId) {
     showToast('The current session is already unassigned and ready for a new GLaDOS prompt.', { kind: 'info', label: 'Investigation session' });
     return current;
   }
+  const continuesInBackground = Number(current?.runningCount || 0) > 0 || state.active.size > 0;
   const response = await fetch('/api/investigation-sessions', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Unassigned session', metadata: { unassigned: true } }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Unassigned session', metadata: { unassigned: true }, projectId: null }),
   });
   const body = await response.json();
   if (!response.ok || !body.ok) throw new Error(body.error || 'could not create investigation');
   closeSessionStreams();
   state.currentSessionId = body.session.id;
   state.investigationSessions = body.sessions || [];
+  state.investigationProjects = body.projects || state.investigationProjects;
+  markSessionSeen(body.session.id);
   clearPlanClientState();
   persistWorkspaceState();
   await Promise.all([loadAgents(), loadSecurityReviews()]);
   renderPane();
   if (!state._lobbySource) subscribeLobby();
+  if (continuesInBackground) showToast(`${current?.name || 'The previous session'} is still working in the background.`, { kind: 'info', label: 'Sessions' });
   return body.session;
 }
 
@@ -151,7 +192,61 @@ async function renameInvestigationSession(sessionId, name) {
   const body = await response.json();
   if (!response.ok || !body.ok) throw new Error(body.error || 'could not rename investigation');
   state.investigationSessions = body.sessions || [];
+  state.investigationProjects = body.projects || state.investigationProjects;
   return body.session;
+}
+
+async function moveInvestigationSession(sessionId, projectId) {
+  const response = await fetch(`/api/investigation-sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: projectId || null }),
+  });
+  const body = await response.json();
+  if (!response.ok || !body.ok) throw new Error(body.error || 'could not move session');
+  state.investigationSessions = body.sessions || [];
+  state.investigationProjects = body.projects || [];
+  renderInvestigationNavigation();
+  return body.session;
+}
+
+async function createInvestigationProject() {
+  const name = await showNameInput({ title: 'New project', confirmLabel: 'Create project', label: 'Project name', placeholder: 'Security reviews' });
+  if (!name) return null;
+  const response = await fetch('/api/investigation-projects', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+  });
+  const body = await response.json();
+  if (!response.ok || !body.ok) throw new Error(body.error || 'could not create project');
+  state.investigationProjects = body.projects || [];
+  state.investigationSessions = body.sessions || [];
+  if (!(state.expandedProjectIds instanceof Set)) state.expandedProjectIds = new Set();
+  state.expandedProjectIds.add(body.project.id);
+  persistExpandedProjects();
+  renderInvestigationNavigation();
+  return body.project;
+}
+
+async function renameInvestigationProject(projectId, name) {
+  const response = await fetch(`/api/investigation-projects/${encodeURIComponent(projectId)}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+  });
+  const body = await response.json();
+  if (!response.ok || !body.ok) throw new Error(body.error || 'could not rename project');
+  state.investigationProjects = body.projects || [];
+  state.investigationSessions = body.sessions || [];
+  renderInvestigationNavigation();
+  return body.project;
+}
+
+async function deleteInvestigationProject(projectId) {
+  const response = await fetch(`/api/investigation-projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' });
+  const body = await response.json();
+  if (!response.ok || !body.ok) throw new Error(body.error || 'could not delete project');
+  state.investigationProjects = body.projects || [];
+  state.investigationSessions = body.sessions || [];
+  state.expandedProjectIds.delete(projectId);
+  persistExpandedProjects();
+  renderInvestigationNavigation();
+  return body.project;
 }
 
 async function deleteInvestigationSession(sessionId) {
@@ -161,6 +256,8 @@ async function deleteInvestigationSession(sessionId) {
   closeSessionStreams();
   state.currentSessionId = body.activeId;
   state.investigationSessions = body.sessions || [];
+  state.unreadCompletedSessionIds.delete(sessionId);
+  persistUnreadCompletedSessions();
   clearPlanClientState();
   persistWorkspaceState();
   await Promise.all([loadAgents(), loadSecurityReviews()]);
@@ -168,14 +265,14 @@ async function deleteInvestigationSession(sessionId) {
   subscribeLobby();
 }
 
-function showNameInput({ title, value = '', confirmLabel = 'Save' }) {
+function showNameInput({ title, value = '', confirmLabel = 'Save', label = 'Investigation name', placeholder = '' }) {
   return new Promise(resolve => {
     const root = document.getElementById('modal-root');
     const backdrop = document.createElement('div');
     backdrop.className = 'modal-backdrop';
     backdrop.innerHTML = `<section class="app-modal session-name-modal" role="dialog" aria-modal="true" aria-labelledby="session-name-title">
       <header><h2 id="session-name-title">${escapeHtml(title)}</h2><button type="button" data-modal-close aria-label="Close">×</button></header>
-      <div class="app-modal-copy"><label for="session-name-input">Investigation name</label><input id="session-name-input" maxlength="120" value="${escapeHtml(value)}" /></div>
+      <div class="app-modal-copy"><label for="session-name-input">${escapeHtml(label)}</label><input id="session-name-input" maxlength="120" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" /></div>
       <footer><button type="button" data-modal-cancel>Cancel</button><button type="button" data-modal-confirm class="safe">${escapeHtml(confirmLabel)}</button></footer>
     </section>`;
     const input = backdrop.querySelector('input');
@@ -400,7 +497,7 @@ async function fetchJson(url, { timeoutMs = 10000, retries = 0, ...options } = {
 
 async function handleHaltAgent(agentId) {
   try {
-    const result = await fetchJson('/api/halt/' + encodeURIComponent(agentId), {
+    const result = await fetchJson(withSession('/api/halt/' + encodeURIComponent(agentId)), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ reason: `operator halt from ${agentId} agent view` }),
@@ -415,7 +512,7 @@ async function handleHaltAgent(agentId) {
 
 async function handleResumeAgent(agentId) {
   try {
-    const result = await fetchJson('/api/resume/' + encodeURIComponent(agentId), {
+    const result = await fetchJson(withSession('/api/resume/' + encodeURIComponent(agentId)), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{}',
@@ -913,9 +1010,10 @@ function renderUsageModelRows(usage, metric = 'spend') {
 }
 
 function renderLiteLlmUsage(usage, metric = 'spend') {
+  const selectedPeriod = usage?.period?.days === 1 ? 'daily' : 'weekly';
   if (!usage?.available) {
     return `<section class="overview-section overview-usage">
-      <div class="overview-section-head"><div><h2>LLM usage</h2><p>Last seven days from LiteLLM</p></div><span class="status-chip warning">Unavailable</span></div>
+      <div class="overview-section-head"><div><h2>LLM usage</h2><p>Configured virtual key only</p></div><span class="status-chip warning">Unavailable</span></div>
       <div class="usage-unavailable"><strong>Usage metrics unavailable</strong><span>${escapeHtml(usage?.message || 'No reporting data is available.')}</span></div>
     </section>`;
   }
@@ -924,13 +1022,17 @@ function renderLiteLlmUsage(usage, metric = 'spend') {
   const maxDailySpend = Math.max(0, ...daily.map(day => Number(day.spend) || 0));
   const failureRate = totals.requests > 0 ? (totals.failedRequests / totals.requests) * 100 : 0;
   const fetchedAt = usage.fetchedAt ? new Date(usage.fetchedAt).toLocaleTimeString() : 'just now';
+  const budget = usage.budget || {};
+  const budgetSpend = Number(daily.at(-1)?.spend || 0);
+  const budgetPercent = Number(budget.max) > 0 ? Math.min(100, (budgetSpend / Number(budget.max)) * 100) : 0;
+  const windowLabel = selectedPeriod === 'daily' ? 'Today' : 'Seven days';
   return `<section class="overview-section overview-usage">
     <div class="overview-section-head">
-      <div><h2>LLM usage</h2><p>${escapeHtml(usage.period?.startDate || '')} to ${escapeHtml(usage.period?.endDate || '')} · reporting key scope</p></div>
-      <span class="overview-updated">Synced ${escapeHtml(fetchedAt)}</span>
+      <div><h2>LLM usage</h2><p>${escapeHtml(usage.keyAlias || 'Configured key')} · ${escapeHtml(usage.period?.startDate || '')}${selectedPeriod === 'weekly' ? ` to ${escapeHtml(usage.period?.endDate || '')}` : ''}</p></div>
+      <div class="usage-period-controls"><div class="usage-segments" role="group" aria-label="Usage period"><button type="button" data-usage-period="daily" class="${selectedPeriod === 'daily' ? 'active' : ''}">Daily</button><button type="button" data-usage-period="weekly" class="${selectedPeriod === 'weekly' ? 'active' : ''}">Weekly</button></div><span class="overview-updated">Synced ${escapeHtml(fetchedAt)}</span></div>
     </div>
     <div class="overview-usage-summary">
-      <div><span>Spend</span><strong>${formatUsageCurrency(totals.spend)}</strong><small>Seven-day gateway cost</small></div>
+      <div><span>Spend</span><strong>${formatUsageCurrency(totals.spend)}</strong><small>${windowLabel} · this key only</small></div>
       <div><span>Tokens</span><strong>${formatUsageNumber(totals.totalTokens)}</strong><small>${formatUsageNumber(totals.promptTokens)} input · ${formatUsageNumber(totals.completionTokens)} output</small></div>
       <div><span>Requests</span><strong>${formatUsageInteger(totals.requests)}</strong><small>${formatUsageInteger(totals.successfulRequests)} successful</small></div>
       <div><span>Failures</span><strong>${formatUsageInteger(totals.failedRequests)}</strong><small>${failureRate.toFixed(1)}% of requests</small></div>
@@ -950,13 +1052,12 @@ function renderLiteLlmUsage(usage, metric = 'spend') {
         }).join('')}
       </div>
       <div class="usage-models">
-        <div class="usage-subhead">
-          <strong>Model distribution</strong>
-          <div class="usage-segments" role="tablist" aria-label="Model distribution metric">
-            ${['spend', 'tokens', 'requests'].map(name => `<button type="button" role="tab" data-usage-share="${name}" aria-selected="${name === metric}" class="${name === metric ? 'active' : ''}">${name[0].toUpperCase()}${name.slice(1)}</button>`).join('')}
-          </div>
+        <div class="usage-subhead"><strong>Virtual-key budget</strong><span>${escapeHtml(usage.keyAlias || '')}</span></div>
+        <div class="usage-key-budget">
+          <div><span>Daily ceiling</span><strong>${Number(budget.max) > 0 ? formatUsageCurrency(budget.max) : 'Not set'}</strong></div>
+          <div class="usage-bar" aria-label="${budgetPercent.toFixed(1)} percent of key budget"><span style="width:${budgetPercent.toFixed(2)}%"></span></div>
+          <small>${formatUsageCurrency(budgetSpend)} used in the current ${escapeHtml(budget.duration || 'budget window')} (${budgetPercent.toFixed(1)}%)${budget.resetAt ? ` · resets ${escapeHtml(new Date(budget.resetAt).toLocaleString())}` : ''}</small>
         </div>
-        <div data-usage-model-list>${renderUsageModelRows(usage, metric)}</div>
       </div>
     </div>
   </section>`;
@@ -965,26 +1066,33 @@ function renderLiteLlmUsage(usage, metric = 'spend') {
 function renderInvestigationSessionManager(sessionHost) {
   if (!sessionHost) return;
   const current = state.investigationSessions.find(session => session.id === state.currentSessionId) || state.investigationSessions[0];
-  const sorted = [...state.investigationSessions].sort((a, b) => (a.state === 'active' ? -1 : b.state === 'active' ? 1 : Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
+  const sorted = [...state.investigationSessions].sort((a, b) => {
+    if (a.id === state.currentSessionId) return -1;
+    if (b.id === state.currentSessionId) return 1;
+    if (a.state !== b.state) return a.state === 'active' ? -1 : 1;
+    return Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+  });
+  const pencilIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 11.8V14h2.2l7.4-7.4-2.2-2.2L3 11.8Zm10.8-6.4a.8.8 0 0 0 0-1.1l-1.1-1.1a.8.8 0 0 0-1.1 0l-.7.7L13.1 6l.7-.6Z"/></svg>';
+  const trashIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 2.5h5l.5 1.2h2v1.5H3V3.7h2l.5-1.2Zm-1 4h7l-.5 7H5l-.5-7Z"/></svg>';
   sessionHost.innerHTML = `<div class="overview-session-controls">
       <details class="overview-session-menu">
-        <summary aria-label="Select investigation"><span class="session-state-dot ${current?.state || 'active'}"></span><span><strong>${escapeHtml(current?.name || 'Unassigned session')}</strong><small>${current?.metadata?.unassigned ? 'Waiting for the first GLaDOS prompt' : `${current?.engagementCount || 0} engagement${current?.engagementCount === 1 ? '' : 's'}`}</small></span></summary>
+        <summary aria-label="Switch investigation session"><span class="session-state-dot ${current?.state || 'active'}"></span><span><strong>${escapeHtml(current?.name || 'Unassigned session')}</strong><small>${current?.metadata?.unassigned ? 'Ready for your first prompt' : `${current?.engagementCount || 0} engagement${current?.engagementCount === 1 ? '' : 's'}`}</small></span></summary>
         <div class="overview-session-popover">
-          <div class="overview-session-popover-head"><span>Investigations</span></div>
+          <div class="overview-session-popover-head"><div><strong>Sessions</strong><small>Switch, rename, or remove a workspace</small></div></div>
           <div class="overview-session-list">
             ${sorted.map(session => `<div class="overview-session-row${session.id === state.currentSessionId ? ' selected' : ''}">
               <button type="button" class="overview-session-option" data-session-select="${escapeHtml(session.id)}">
-                <span class="session-state-dot ${session.state}"></span><span><strong>${escapeHtml(session.name)}</strong><small>${session.state === 'active' ? 'Active' : 'Archived'} · ${new Date(session.updatedAt).toLocaleDateString()} · ${session.engagementCount || 0} engagement${session.engagementCount === 1 ? '' : 's'}</small></span>${session.id === state.currentSessionId ? '<span class="session-current-mark">Current</span>' : ''}
+                <span class="session-state-dot ${session.state}"></span><span><strong>${escapeHtml(session.name)}</strong><small>${session.state === 'active' ? 'Active' : 'Archived'} · ${new Date(session.updatedAt).toLocaleDateString()} · ${session.engagementCount || 0} engagement${session.engagementCount === 1 ? '' : 's'}</small></span>${session.id === state.currentSessionId ? '<span class="session-current-mark">Open</span>' : ''}
               </button>
-              ${session.id !== state.currentSessionId ? `<button type="button" class="session-row-delete" data-session-delete-id="${escapeHtml(session.id)}" title="Delete ${escapeHtml(session.name)}" aria-label="Delete ${escapeHtml(session.name)}">×</button>` : ''}
+              <div class="session-row-actions">
+                <button type="button" data-session-rename-id="${escapeHtml(session.id)}" title="Rename ${escapeHtml(session.name)}" aria-label="Rename ${escapeHtml(session.name)}">${pencilIcon}</button>
+                <button type="button" class="danger" data-session-delete-id="${escapeHtml(session.id)}" title="Delete ${escapeHtml(session.name)}" aria-label="Delete ${escapeHtml(session.name)}">${trashIcon}</button>
+              </div>
             </div>`).join('')}
-          </div>
-          <div class="overview-session-popover-actions">
-            <button type="button" data-session-rename>Rename</button><button type="button" class="danger" data-session-delete>Delete current</button>
           </div>
         </div>
       </details>
-      <button type="button" class="overview-new-session" data-session-new>New session</button>
+      <button type="button" class="overview-new-session" data-session-new><span aria-hidden="true">＋</span> New</button>
   </div>`;
   const details = sessionHost.querySelector('details');
   sessionHost.querySelectorAll('[data-session-select]').forEach(button => button.addEventListener('click', async () => {
@@ -997,32 +1105,267 @@ function renderInvestigationSessionManager(sessionHost) {
     try { await createInvestigationSession(); }
     catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
   });
+  sessionHost.querySelectorAll('[data-session-rename-id]').forEach(button => button.addEventListener('click', async event => {
+    event.stopPropagation();
+    details.open = false;
+    const session = state.investigationSessions.find(item => item.id === button.dataset.sessionRenameId);
+    if (!session) return;
+    const name = await showNameInput({ title: 'Rename session', value: session.name, confirmLabel: 'Save name', label: 'Session name' });
+    if (!name) return;
+    try { await renameInvestigationSession(session.id, name); renderInvestigationSessionManager(sessionHost); }
+    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
+  }));
   sessionHost.querySelectorAll('[data-session-delete-id]').forEach(button => button.addEventListener('click', async event => {
     event.stopPropagation();
     const session = state.investigationSessions.find(item => item.id === button.dataset.sessionDeleteId);
     if (!session || !await confirmAction({ title: 'Delete investigation session', message: `Permanently delete "${session.name}" and its blackboard records, plans, tasks, findings, and transcripts? Evidence and report files are preserved.`, confirmLabel: 'Delete session', danger: true })) return;
     try {
-      const response = await fetch(`/api/investigation-sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
-      const body = await response.json();
-      if (!response.ok || !body.ok) throw new Error(body.error || 'could not delete investigation');
-      state.investigationSessions = body.sessions || [];
       details.open = false;
-      renderInvestigationSessionManager(sessionHost);
+      if (session.id === state.currentSessionId) await deleteInvestigationSession(session.id);
+      else {
+        const response = await fetch(`/api/investigation-sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
+        const body = await response.json();
+        if (!response.ok || !body.ok) throw new Error(body.error || 'could not delete investigation');
+        state.investigationSessions = body.sessions || [];
+        renderInvestigationSessionManager(sessionHost);
+      }
     } catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
   }));
-  sessionHost.querySelector('[data-session-rename]')?.addEventListener('click', async () => {
-    details.open = false;
-    const name = await showNameInput({ title: 'Rename investigation', value: current?.name || '', confirmLabel: 'Rename' });
-    if (!name || !current) return;
-    try { await renameInvestigationSession(current.id, name); renderInvestigationSessionManager(sessionHost); }
-    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
+}
+
+function renderInvestigationNavigation() {
+  const projectsHost = document.getElementById('projects-section');
+  const sessionsHost = document.getElementById('sessions-section');
+  if (!projectsHost || !sessionsHost) return;
+  const projects = state.investigationProjects || [];
+  const sessions = state.investigationSessions || [];
+  if (!(state.expandedProjectIds instanceof Set)) state.expandedProjectIds = new Set(projects.map(project => project.id));
+  const folderIcon = '<svg class="sidebar-project-folder" viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 5.75A1.75 1.75 0 0 1 4.25 4h3.1l1.5 1.65h6.9A1.75 1.75 0 0 1 17.5 7.4v6.35a1.75 1.75 0 0 1-1.75 1.75H4.25a1.75 1.75 0 0 1-1.75-1.75v-8Z"/></svg>';
+  const sortedSessions = list => [...list].sort((a, b) => {
+    if (a.id === state.currentSessionId) return -1;
+    if (b.id === state.currentSessionId) return 1;
+    return Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0);
   });
-  sessionHost.querySelector('[data-session-delete]')?.addEventListener('click', async () => {
-    details.open = false;
-    if (!current || !await confirmAction({ title: 'Delete investigation session', message: `Permanently delete "${current.name}" and its blackboard records, plans, tasks, findings, and transcripts? Evidence and report files are preserved.`, confirmLabel: 'Delete session', danger: true })) return;
-    try { await deleteInvestigationSession(current.id); }
-    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Investigation session' }); }
+  const moveOptions = session => [
+    `<option value=""${!session.projectId ? ' selected' : ''}>No project</option>`,
+    ...projects.map(project => `<option value="${escapeHtml(project.id)}"${session.projectId === project.id ? ' selected' : ''}>${escapeHtml(project.name)}</option>`),
+  ].join('');
+  const sessionMarkup = (session, { nested = false } = {}) => {
+    const activity = session.runningAgents?.length ? escapeHtml(session.runningAgents.join(', ')) : '';
+    const running = session.runningCount > 0;
+    const needsReview = !running && state.unreadCompletedSessionIds.has(session.id);
+    const indicatorTitle = running
+      ? `${session.runningCount} running agent${session.runningCount === 1 ? '' : 's'}`
+      : needsReview ? 'Completed — open to review' : 'Idle';
+    return `<div class="sidebar-session-row${nested ? ' nested' : ''}${session.id === state.currentSessionId ? ' selected' : ''}" data-session-row="${escapeHtml(session.id)}" draggable="true">
+      <button type="button" class="sidebar-session-main" data-session-select="${escapeHtml(session.id)}" title="Open ${escapeHtml(session.name)}">
+        <span class="session-run-state${running ? ' running' : needsReview ? ' attention' : ''}" title="${indicatorTitle}"><i></i></span>
+        <span><strong>${escapeHtml(session.name)}</strong>${activity ? `<small>${activity}</small>` : ''}</span>
+      </button>
+      <details class="sidebar-session-menu"><summary aria-label="Session actions" title="Session actions">•••</summary><div>
+        <button type="button" data-session-rename-id="${escapeHtml(session.id)}">Rename</button>
+        <label>Move to project<select data-session-project-id="${escapeHtml(session.id)}">${moveOptions(session)}</select></label>
+        <button type="button" class="danger" data-session-delete-id="${escapeHtml(session.id)}">Delete</button>
+      </div></details>
+    </div>`;
+  };
+
+  projectsHost.innerHTML = `
+    <div class="sidebar-project-list">
+      ${projects.map(project => {
+        const expanded = state.expandedProjectIds.has(project.id);
+        const projectSessions = sortedSessions(sessions.filter(session => session.projectId === project.id));
+        return `<div class="sidebar-project-tree${expanded ? ' expanded' : ''}" data-project-id="${escapeHtml(project.id)}">
+          <div class="sidebar-project-head">
+            <button type="button" class="sidebar-project-row" data-project-toggle="${escapeHtml(project.id)}" data-project-drop="${escapeHtml(project.id)}" aria-expanded="${expanded}" title="${expanded ? 'Collapse' : 'Expand'} ${escapeHtml(project.name)}">
+              ${folderIcon}<span>${escapeHtml(project.name)}</span><b>${projectSessions.length}</b><i class="sidebar-project-chevron">›</i>
+            </button>
+            <details class="sidebar-session-menu sidebar-project-menu"><summary aria-label="Project actions" title="Project actions">•••</summary><div>
+              <button type="button" data-project-rename-id="${escapeHtml(project.id)}">Rename</button>
+              <button type="button" class="danger" data-project-delete-id="${escapeHtml(project.id)}">Delete</button>
+            </div></details>
+          </div>
+          <div class="sidebar-project-sessions" ${expanded ? '' : 'hidden'}>
+            ${projectSessions.map(session => sessionMarkup(session, { nested: true })).join('') || '<div class="sidebar-project-empty">Drop sessions here</div>'}
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
+  document.getElementById('sidebar-project-new').onclick = async event => {
+    event.stopPropagation();
+    try { await createInvestigationProject(); }
+    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Projects' }); }
+  };
+  projectsHost.querySelectorAll('[data-project-toggle]').forEach(button => button.addEventListener('click', () => {
+    const projectId = button.dataset.projectToggle;
+    if (state.expandedProjectIds.has(projectId)) state.expandedProjectIds.delete(projectId);
+    else state.expandedProjectIds.add(projectId);
+    persistExpandedProjects();
+    renderInvestigationNavigation();
+  }));
+  projectsHost.querySelectorAll('[data-project-rename-id]').forEach(button => button.addEventListener('click', async () => {
+    const project = projects.find(item => item.id === button.dataset.projectRenameId);
+    if (!project) return;
+    const name = await showNameInput({ title: 'Rename project', value: project.name, confirmLabel: 'Save name', label: 'Project name' });
+    if (!name) return;
+    try { await renameInvestigationProject(project.id, name); }
+    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Projects' }); }
+  }));
+  projectsHost.querySelectorAll('[data-project-delete-id]').forEach(button => button.addEventListener('click', async () => {
+    const project = projects.find(item => item.id === button.dataset.projectDeleteId);
+    if (!project || !await confirmAction({
+      title: 'Delete project',
+      message: `Delete "${project.name}"? Its sessions and conversations will be preserved and returned to Sessions.`,
+      confirmLabel: 'Delete project',
+      danger: true,
+    })) return;
+    try { await deleteInvestigationProject(project.id); }
+    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Projects' }); }
+  }));
+
+  const unassigned = sortedSessions(sessions.filter(session => !session.projectId));
+  sessionsHost.innerHTML = `
+    <div class="sidebar-session-list">
+      ${unassigned.map(session => sessionMarkup(session)).join('')}
+    </div>`;
+  document.getElementById('sidebar-session-new').onclick = async event => {
+    event.stopPropagation();
+    try { await createInvestigationSession(); }
+    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Sessions' }); }
+  };
+  const navigationHost = [projectsHost, sessionsHost];
+  navigationHost.forEach(host => host.querySelectorAll('[data-session-select]').forEach(button => button.addEventListener('click', async () => {
+    try { await activateInvestigationSession(button.dataset.sessionSelect); }
+    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Sessions' }); }
+  })));
+  navigationHost.forEach(host => host.querySelectorAll('[data-session-rename-id]').forEach(button => button.addEventListener('click', async () => {
+    const session = sessions.find(item => item.id === button.dataset.sessionRenameId);
+    if (!session) return;
+    const name = await showNameInput({ title: 'Rename session', value: session.name, confirmLabel: 'Save name', label: 'Session name' });
+    if (!name) return;
+    try { await renameInvestigationSession(session.id, name); renderInvestigationNavigation(); }
+    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Sessions' }); }
+  })));
+  navigationHost.forEach(host => host.querySelectorAll('[data-session-project-id]').forEach(select => select.addEventListener('change', async () => {
+    const prior = sessions.find(item => item.id === select.dataset.sessionProjectId)?.projectId || '';
+    try { await moveInvestigationSession(select.dataset.sessionProjectId, select.value || null); }
+    catch (error) { select.value = prior; pushNotification('error', error.message, { toast: true, label: 'Sessions' }); }
+  })));
+  navigationHost.forEach(host => host.querySelectorAll('[data-session-delete-id]').forEach(button => button.addEventListener('click', async () => {
+    const session = sessions.find(item => item.id === button.dataset.sessionDeleteId);
+    if (!session || !await confirmAction({ title: 'Delete session', message: `Permanently delete "${session.name}" and its database records? Evidence and report files are preserved.`, confirmLabel: 'Delete session', danger: true })) return;
+    try {
+      if (session.id === state.currentSessionId) await deleteInvestigationSession(session.id);
+      else {
+        const response = await fetch(`/api/investigation-sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
+        const body = await response.json();
+        if (!response.ok || !body.ok) throw new Error(body.error || 'could not delete session');
+        state.investigationSessions = body.sessions || [];
+        state.investigationProjects = body.projects || [];
+        renderInvestigationNavigation();
+      }
+    } catch (error) { pushNotification('error', error.message, { toast: true, label: 'Sessions' }); }
+  })));
+
+  navigationHost.forEach(host => host.querySelectorAll('[data-session-row]').forEach(row => {
+    row.addEventListener('dragstart', event => {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', row.dataset.sessionRow);
+      row.classList.add('dragging');
+    });
+    row.addEventListener('dragend', () => {
+      row.classList.remove('dragging');
+      document.querySelectorAll('.session-drop-target').forEach(target => target.classList.remove('session-drop-target'));
+    });
+  }));
+  projectsHost.querySelectorAll('[data-project-drop]').forEach(target => {
+    target.addEventListener('dragover', event => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      target.classList.add('session-drop-target');
+    });
+    target.addEventListener('dragleave', event => {
+      if (!target.contains(event.relatedTarget)) target.classList.remove('session-drop-target');
+    });
+    target.addEventListener('drop', async event => {
+      event.preventDefault();
+      target.classList.remove('session-drop-target');
+      const sessionId = event.dataTransfer.getData('text/plain');
+      const projectId = target.dataset.projectDrop;
+      if (!sessionId || sessions.find(session => session.id === sessionId)?.projectId === projectId) return;
+      state.expandedProjectIds.add(projectId);
+      persistExpandedProjects();
+      try { await moveInvestigationSession(sessionId, projectId); }
+      catch (error) { pushNotification('error', error.message, { toast: true, label: 'Projects' }); }
+    });
   });
+  sessionsHost.ondragover = event => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    sessionsHost.classList.add('session-drop-target');
+  };
+  sessionsHost.ondragleave = event => {
+    if (!sessionsHost.contains(event.relatedTarget)) sessionsHost.classList.remove('session-drop-target');
+  };
+  sessionsHost.ondrop = async event => {
+    event.preventDefault();
+    sessionsHost.classList.remove('session-drop-target');
+    const sessionId = event.dataTransfer.getData('text/plain');
+    if (!sessionId || !sessions.find(session => session.id === sessionId)?.projectId) return;
+    try { await moveInvestigationSession(sessionId, null); }
+    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Sessions' }); }
+  };
+}
+
+function persistExpandedProjects() {
+  try { localStorage.setItem('glados-dash.expanded-projects', JSON.stringify([...state.expandedProjectIds])); } catch {}
+}
+
+function persistUnreadCompletedSessions() {
+  try { localStorage.setItem('glados-dash.unread-completed-sessions', JSON.stringify([...state.unreadCompletedSessionIds])); } catch {}
+}
+
+function markSessionSeen(sessionId) {
+  if (!sessionId || !state.unreadCompletedSessionIds.delete(sessionId)) return;
+  persistUnreadCompletedSessions();
+}
+
+function markBackgroundSessionCompleted(sessionId) {
+  if (!sessionId || sessionId === state.currentSessionId) return;
+  state.unreadCompletedSessionIds.add(sessionId);
+  persistUnreadCompletedSessions();
+}
+
+let investigationNavigationRefreshTimer = null;
+function refreshInvestigationNavigationSoon() {
+  clearTimeout(investigationNavigationRefreshTimer);
+  investigationNavigationRefreshTimer = setTimeout(() => loadInvestigationSessions().catch(() => {}), 180);
+}
+
+function overviewModelGroups(agents = []) {
+  const groups = new Map();
+  for (const agent of agents) {
+    const model = String(agent.model || 'Not assigned');
+    const current = groups.get(model) || { model, count: 0, agents: [] };
+    current.count += 1;
+    current.agents.push(agent.id);
+    groups.set(model, current);
+  }
+  return [...groups.values()].sort((a, b) => b.count - a.count || a.model.localeCompare(b.model));
+}
+
+function renderOverviewModelAssignments(agents = []) {
+  const groups = overviewModelGroups(agents);
+  const total = Math.max(1, agents.length);
+  if (!groups.length) return '<div class="overview-empty">No enabled agents are configured.</div>';
+  return `<div class="overview-model-list">${groups.map(group => {
+    const width = Math.max(4, (group.count / total) * 100);
+    return `<button type="button" class="overview-model-row" data-overview-settings title="Configure agent models">
+      <span><strong>${escapeHtml(group.model)}</strong><small>${group.count} agent${group.count === 1 ? '' : 's'} · ${escapeHtml(group.agents.slice(0, 4).join(', '))}${group.agents.length > 4 ? ` +${group.agents.length - 4}` : ''}</small></span>
+      <span class="overview-model-count">${group.count}</span>
+      <span class="overview-model-bar"><i style="width:${width.toFixed(2)}%"></i></span>
+    </button>`;
+  }).join('')}</div>`;
 }
 
 async function renderOverviewPane() {
@@ -1032,6 +1375,7 @@ async function renderOverviewPane() {
   paneEl.appendChild(wrap);
   const content = wrap.querySelector('.overview-content');
   let usageShareMetric = 'spend';
+  let usagePeriod = 'weekly';
 
   const load = async ({ forceUsage = false } = {}) => {
     if (load.inFlight) {
@@ -1048,7 +1392,7 @@ async function renderOverviewPane() {
       refreshButton.textContent = 'Refreshing…';
     }
     try {
-      const data = await fetchJson(withSession(`/api/overview${forceUsage ? '?usage=refresh' : ''}`), {
+      const data = await fetchJson(withSession(`/api/overview?usage_period=${usagePeriod}${forceUsage ? '&usage=refresh' : ''}`), {
         timeoutMs: 15000,
         retries: 1,
         cache: 'no-store',
@@ -1056,97 +1400,97 @@ async function renderOverviewPane() {
       state.overview = data;
       if (!wrap.isConnected) return;
       const engagement = data.engagement;
+      const agents = data.agents || [];
+      const coordinator = agents.find(agent => agent.id === 'glados');
+      const specialists = agents.filter(agent => agent.id !== 'glados');
       const active = data.activeAgents || [];
+      const activeSpecialists = active.filter(agent => agent.id !== 'glados');
       const halted = data.haltedAgents || [];
-      const agentRows = [...halted, ...active.filter(agent => !agent.halted)];
-      const targetState = data.targetHealth?.state || (engagement ? 'not probed' : 'standby');
-      const assessmentMetering = data.assessmentMetrics?.metering || {};
-      const assessmentTiming = data.assessmentMetrics?.timing || {};
-      const assessmentCost = assessmentMetering.costAvailable
-        ? formatUsageCurrency(assessmentMetering.costUsd)
-        : 'Unavailable';
-      const assessmentTokens = assessmentMetering.tokensAvailable
-        ? formatUsageNumber(assessmentMetering.tokens?.totalTokens)
-        : 'Unavailable';
+      const agentRows = [...halted, ...active.filter(agent => !agent.halted)].filter(agent => agent.id !== 'glados');
+      const session = data.session || state.investigationSessions.find(item => item.id === state.currentSessionId) || {};
+      const gatewayLive = data.llmUsage?.available === true;
+      const proxyLive = data.proxy?.healthy === true;
+      const fullAccessAvailable = data.fullAccess?.available === true;
+      const fullAccessEnabled = fullAccessAvailable && data.fullAccess?.enabled === true;
+      const fullAccessLabel = fullAccessAvailable ? (fullAccessEnabled ? 'Enabled' : 'Restricted') : 'Unavailable';
       const canEndInvestigation = engagement
         && !['cancelled', 'complete', 'completed', 'closed'].includes(String(engagement.status || '').toLowerCase());
-      const nextAction = data.pendingApprovals
-        ? 'Review and approve the current attack plan before phase-gated tools can run.'
-        : halted.length
-          ? `Review ${halted.length} halted agent${halted.length === 1 ? '' : 's'} and resume only when the task is safe to continue.`
-          : active.length
-            ? 'Monitor active specialists and review their evidence as results arrive.'
-            : engagement
-              ? 'Send the next objective to GLaDOS or inspect the current plan.'
-              : 'Start with /investigate <target> in GLaDOS Chat when an authorized engagement is ready.';
       content.innerHTML = `
         <header class="overview-header">
           <div>
-            <span class="overview-eyebrow">Operational overview</span>
-            <h1>${escapeHtml(engagement?.target || 'No active engagement')}</h1>
+            <span class="overview-eyebrow">GLaDOS ${escapeHtml(data.version || '')}</span>
+            <h1>Workspace command center</h1>
+            <p class="overview-intro">Runtime health, model capacity, and AI gateway usage in one place.</p>
             <div class="overview-status-line">
-              <span class="status-chip ${overviewStatusClass(data.phase)}">${escapeHtml(data.phase)}</span>
-              <span class="status-chip ${overviewStatusClass(targetState)}">Target ${escapeHtml(targetState)}</span>
+              <span class="status-chip success">Runtime online</span>
+              <span class="status-chip neutral">${escapeHtml(session.name || 'Current workspace')}</span>
               <span class="overview-updated">Updated ${new Date(data.generatedAt).toLocaleTimeString()}</span>
             </div>
           </div>
           <div class="overview-header-actions">
             <button type="button" data-overview-chat>Open GLaDOS</button>
+            <button type="button" data-overview-new>New workspace</button>
             <button type="button" data-overview-refresh title="Refresh operational state">Refresh</button>
-            ${canEndInvestigation ? '<button type="button" class="danger" data-overview-end>End Investigation</button>' : ''}
           </div>
         </header>
-        <section class="overview-metrics" aria-label="Engagement metrics">
-          <div><span>Agents</span><strong>${active.filter(agent => agent.id !== 'glados').length}</strong><small>${halted.length ? `${halted.length} halted` : `${(data.agents || []).filter(agent => agent.id !== 'glados').length} available`}</small></div>
-          <div><span>Approvals</span><strong>${data.pendingApprovals || 0}</strong><small>${data.plan?.state ? data.plan.state.replaceAll('_', ' ') : 'no plan'}</small></div>
-          <div><span>Findings</span><strong>${data.findings?.total || 0}</strong><small>${data.findings?.critical || 0} critical · ${data.findings?.high || 0} high</small></div>
-          <div><span>Assessment cost</span><strong class="metric-word">${escapeHtml(assessmentCost)}</strong><small>${escapeHtml(assessmentTiming.elapsedHuman || 'no active meter')}</small></div>
-          <div><span>Assessment tokens</span><strong class="metric-word">${escapeHtml(assessmentTokens)}</strong><small>${assessmentMetering.tokensAvailable ? `${assessmentMetering.resultEvents || 0} completed agent turns` : 'updates as turns complete'}</small></div>
-          <div><span>Proxy</span><strong class="metric-word ${overviewStatusClass(data.proxy?.healthy ? 'healthy' : 'offline')}">${data.proxy?.healthy ? 'Live' : 'Offline'}</strong><small>${escapeHtml(data.proxy?.backend || 'not configured')}</small></div>
+        <section class="overview-metrics" aria-label="Workstation metrics">
+          <div><span>GLaDOS model</span><strong class="metric-model">${escapeHtml(coordinator?.model || 'Not assigned')}</strong><small>Coordinator</small></div>
+          <div><span>Agent fleet</span><strong>${specialists.length}</strong><small>${activeSpecialists.length} running · ${halted.length} halted</small></div>
+          <div><span>LiteLLM</span><strong class="metric-word ${gatewayLive ? 'success' : 'warning'}">${gatewayLive ? 'Reporting' : 'Needs setup'}</strong><small>${gatewayLive ? `${formatUsageInteger(data.llmUsage?.totals?.requests)} key requests / ${usagePeriod === 'daily' ? 'today' : '7 days'}` : escapeHtml(data.llmUsage?.reason || 'unavailable')}</small></div>
+          <div><span>Proxy</span><strong class="metric-word ${proxyLive ? 'success' : 'danger'}">${proxyLive ? 'Live' : 'Offline'}</strong><small>${escapeHtml(data.proxy?.backend || 'not configured')}</small></div>
+          <div><span>Full access</span><strong class="metric-word ${fullAccessEnabled ? 'warning' : ''}">${escapeHtml(fullAccessLabel)}</strong><small>${fullAccessEnabled ? 'Coordinator permission prompts bypassed' : 'Safer default mode'}</small></div>
+          <div><span>Workspace</span><strong class="metric-workspace">${escapeHtml(session.name || 'Current')}</strong><small>${session.engagementCount || 0} recorded engagement${session.engagementCount === 1 ? '' : 's'}</small></div>
         </section>
         ${renderLiteLlmUsage(data.llmUsage, usageShareMetric)}
-        <div class="overview-columns">
-          <section class="overview-section">
-            <div class="overview-section-head"><div><h2>Agent activity</h2><p>Running work and operator interventions</p></div></div>
+        <div class="overview-workbench-grid">
+          <section class="overview-section overview-readiness">
+            <div class="overview-section-head"><div><h2>System readiness</h2><p>The services GLaDOS depends on right now</p></div></div>
+            <div class="overview-readiness-list">
+              <button type="button" data-overview-chat><i class="readiness-dot success"></i><span><strong>Agent runtime</strong><small>Dashboard and local Agent SDK are responding</small></span><b>Online</b></button>
+              <button type="button" data-overview-settings><i class="readiness-dot ${gatewayLive ? 'success' : 'warning'}"></i><span><strong>LiteLLM gateway</strong><small>${escapeHtml(gatewayLive ? 'Usage reporting is connected' : (data.llmUsage?.message || 'Configure or verify the reporting key'))}</small></span><b>${gatewayLive ? 'Connected' : 'Review'}</b></button>
+              <button type="button" data-overview-proxy><i class="readiness-dot ${proxyLive ? 'success' : 'danger'}"></i><span><strong>Intercept proxy</strong><small>${escapeHtml(proxyLive ? `${data.proxy?.backend || 'Proxy'} is accepting traffic` : (data.proxy?.error || 'Proxy is not running'))}</small></span><b>${proxyLive ? 'Live' : 'Offline'}</b></button>
+              <button type="button" data-overview-settings><i class="readiness-dot ${fullAccessEnabled ? 'warning' : 'success'}"></i><span><strong>Permission mode</strong><small>${fullAccessEnabled ? 'Full Access is enabled for the coordinator' : 'Per-action approval protections remain enabled'}</small></span><b>${escapeHtml(fullAccessLabel)}</b></button>
+              <button type="button" data-overview-settings><i class="readiness-dot ${halted.length ? 'danger' : 'success'}"></i><span><strong>Agent fleet</strong><small>${specialists.length} specialists available across ${overviewModelGroups(agents).length} model assignment${overviewModelGroups(agents).length === 1 ? '' : 's'}</small></span><b>${halted.length ? `${halted.length} halted` : 'Ready'}</b></button>
+            </div>
+          </section>
+          <section class="overview-section overview-models">
+            <div class="overview-section-head"><div><h2>Model assignments</h2><p>Enabled coordinator and specialist capacity</p></div><button type="button" data-overview-settings>Manage</button></div>
+            ${renderOverviewModelAssignments(agents)}
+          </section>
+        </div>
+        <div class="overview-workbench-grid overview-workbench-secondary">
+          <section class="overview-section overview-current-work">
+            <div class="overview-section-head"><div><h2>Active now</h2><p>Only work that currently needs attention</p></div>${canEndInvestigation ? '<button type="button" class="danger quiet" data-overview-end>End active work</button>' : ''}</div>
+            ${engagement ? `<div class="overview-work-summary"><span>Current objective</span><strong>${escapeHtml(engagement.target || 'Active engagement')}</strong><small>${escapeHtml(data.phase || engagement.status || 'Active')} · ${Number(data.tasks?.running) || 0} running task${Number(data.tasks?.running) === 1 ? '' : 's'} · ${Number(data.pendingApprovals) || 0} approval${Number(data.pendingApprovals) === 1 ? '' : 's'} waiting</small></div>` : ''}
             <div class="overview-agent-list">
               ${agentRows.length ? agentRows.map(agent => `
                 <button type="button" class="overview-agent-row" data-overview-agent="${escapeHtml(agent.id)}">
                   <span class="dot ${agent.halted ? 'halted' : 'live'}"></span>
                   <span><strong>${escapeHtml(agent.id)}</strong><small>${escapeHtml(agent.model || 'model not set')}</small></span>
                   <span class="status-chip ${agent.halted ? 'danger' : 'success'}">${agent.halted ? 'Halted' : 'Running'}</span>
-                </button>`).join('') : '<div class="overview-empty">No agents are running. The team is ready for the next objective.</div>'}
+                </button>`).join('') : '<div class="overview-empty overview-idle"><strong>No agent runs in progress</strong><span>The fleet is available for a new review or task.</span></div>'}
             </div>
           </section>
-          <section class="overview-section">
-            <div class="overview-section-head"><div><h2>Next action</h2><p>${escapeHtml(data.goal?.status || 'operator controlled')}</p></div></div>
-            <div class="overview-next-action">
-              <p>${escapeHtml(nextAction)}</p>
-              <div>
-                ${data.pendingApprovals ? '<button type="button" data-overview-plans class="safe">Review plan</button>' : ''}
-                <button type="button" data-overview-proxy>Inspect traffic</button>
-              </div>
+          <section class="overview-section overview-launchpad">
+            <div class="overview-section-head"><div><h2>Quick launch</h2><p>Common workstation actions</p></div></div>
+            <div class="overview-launch-grid">
+              <button type="button" data-overview-chat><span>01</span><strong>Talk to GLaDOS</strong><small>Start a task or security review</small></button>
+              <button type="button" data-overview-new><span>02</span><strong>New workspace</strong><small>Open a clean, isolated session</small></button>
+              <button type="button" data-overview-settings><span>03</span><strong>Models & setup</strong><small>Credentials, models, and permissions</small></button>
+              <button type="button" data-overview-proxy><span>04</span><strong>Proxy traffic</strong><small>Inspect captured requests</small></button>
+              <button type="button" data-overview-update><span>05</span><strong>App update</strong><small>Check the release channel</small></button>
             </div>
           </section>
-        </div>
-        <section class="overview-section overview-operations">
-          <div class="overview-section-head"><div><h2>Investigation status</h2><p>${escapeHtml(engagement?.id || 'No engagement ID')}</p></div></div>
-          <div class="overview-operations-grid">
-            <article class="overview-operation-card overview-top-findings">
-              <div class="overview-card-head"><div><span>Priority view</span><h3>Top findings</h3></div><button type="button" data-overview-reports>View reports</button></div>
-              ${renderOverviewFindings(data.topFindings)}
-            </article>
-            <article class="overview-operation-card">
-              <div class="overview-card-head"><div><span>Current direction</span><h3>Plan</h3></div></div>
-              ${renderOverviewPlan(data.plan)}
-            </article>
-            <article class="overview-operation-card">
-              <div class="overview-card-head"><div><span>Task lifecycle</span><h3>Progress</h3></div></div>
-              ${renderOverviewProgress(data.tasks, data.phase)}
-            </article>
-          </div>
-        </section>`;
-      content.querySelector('[data-overview-chat]')?.addEventListener('click', openGladosChat);
+        </div>`;
       content.querySelector('[data-overview-refresh]')?.addEventListener('click', () => load({ forceUsage: true }));
+      content.querySelectorAll('[data-overview-chat]').forEach(button => button.addEventListener('click', openGladosChat));
+      content.querySelectorAll('[data-overview-new]').forEach(button => button.addEventListener('click', async () => {
+        try { await createInvestigationSession(); }
+        catch (error) { pushNotification('error', error.message, { toast: true, label: 'Workspace' }); }
+      }));
+      content.querySelectorAll('[data-overview-settings]').forEach(button => button.addEventListener('click', openSettings));
+      content.querySelectorAll('[data-overview-proxy]').forEach(button => button.addEventListener('click', openProxy));
+      content.querySelectorAll('[data-overview-update]').forEach(button => button.addEventListener('click', () => openUpdatePane()));
       content.querySelector('[data-overview-end]')?.addEventListener('click', async () => {
         const confirmed = await confirmAction({
           title: 'End investigation',
@@ -1168,9 +1512,6 @@ async function renderOverviewPane() {
           pushNotification('error', `end investigation failed: ${error.message}`, { toast: true, label: 'Overview' });
         }
       });
-      content.querySelector('[data-overview-plans]')?.addEventListener('click', openPlans);
-      content.querySelector('[data-overview-proxy]')?.addEventListener('click', openProxy);
-      content.querySelectorAll('[data-overview-reports]').forEach(button => button.addEventListener('click', openReports));
       content.querySelectorAll('[data-overview-agent]').forEach(button => button.addEventListener('click', () => openAgentTab(button.dataset.overviewAgent)));
       content.querySelectorAll('[data-usage-share]').forEach(button => button.addEventListener('click', () => {
         usageShareMetric = button.dataset.usageShare;
@@ -1181,6 +1522,12 @@ async function renderOverviewPane() {
         });
         const list = content.querySelector('[data-usage-model-list]');
         if (list) list.innerHTML = renderUsageModelRows(data.llmUsage, usageShareMetric);
+      }));
+      content.querySelectorAll('[data-usage-period]').forEach(button => button.addEventListener('click', () => {
+        const next = button.dataset.usagePeriod;
+        if (!['daily', 'weekly'].includes(next) || next === usagePeriod) return;
+        usagePeriod = next;
+        load({ forceUsage: false });
       }));
     } catch (error) {
       if (!wrap.isConnected) return;
@@ -1328,6 +1675,14 @@ function ensureTranscript(tabId, agentId) {
     }
     if (ev.kind === 'error' || (ev.kind === 'result' && ev.isError)) {
       ev = sdkResultToPromptError(ev);
+    }
+    if (ev.kind === 'context-status') {
+      if (ev.status === 'compacting') markTranscriptActivity(rec, tabId, 'compacting');
+      return;
+    }
+    if (ev.kind === 'context-compacted') {
+      showToast('Conversation context compacted. GLaDOS is continuing automatically.', { kind: 'info', label: 'Context' });
+      return;
     }
 
     // SDK partial deltas: don't buffer, don't push to events list, just update
@@ -1714,6 +2069,7 @@ function transcriptStatusText(rec, label) {
   const ageText = age ? ` · ${formatElapsed(age)}` : '';
   if (activity === 'thinking') return `${base} is thinking live${ageText}…`;
   if (activity === 'responding') return `${base} is responding live${ageText}…`;
+	  if (activity === 'compacting') return `${base} is compacting context and will continue automatically${ageText}…`;
 	  if (activity === 'working') return `${base} is working${ageText}…`;
 	  if (activity === 'stopping') return `${base} is stopping the current response…`;
 	  if (activity === 'finalizing') return `${base} is finalizing the answer…`;
@@ -1728,7 +2084,12 @@ function ackOptimisticUserMessage(rec, ev) {
   );
   if (idx < 0) return false;
   const old = rec.events[idx];
-  rec.events[idx] = { ...ev, _optimistic: false, _acknowledgedClientId: old.clientId || null };
+  rec.events[idx] = {
+    ...ev,
+    attachments: Array.isArray(ev.attachments) && ev.attachments.length ? ev.attachments : old.attachments,
+    _optimistic: false,
+    _acknowledgedClientId: old.clientId || null,
+  };
   rec.pendingUserMessages = (rec.pendingUserMessages || [])
     .filter(p => !textsMatch(p.text, ev.text));
   if (rec.el && rec.el.isConnected) {
@@ -2058,6 +2419,267 @@ function installChatRetryContextMenu(entryEl, agentId, msg) {
   });
 }
 
+let composerModelsPromise = null;
+
+function chatComposerMarkup(tabId, label, { coordinator = false } = {}) {
+  const efforts = [
+    ['low', 'Low'],
+    ['medium', 'Medium'],
+    ['high', 'High'],
+    ['xhigh', 'Extra high'],
+    ['max', 'Max'],
+  ];
+  return `
+    <div class="chat-composer-shell" data-chat-composer data-chat-tab="${escapeHtml(tabId)}">
+      <div class="chat-attachment-strip" data-chat-attachment-strip hidden></div>
+      <textarea data-chat-tab="${escapeHtml(tabId)}" placeholder="Message ${escapeHtml(label)}…" aria-label="Message ${escapeHtml(label)}"></textarea>
+      <div class="chat-composer-toolbar">
+        <div class="chat-composer-tools">
+          <input data-chat-files type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
+          <button type="button" data-chat-attach class="composer-icon-button" aria-label="Add screenshots" title="Add screenshots">+</button>
+          ${coordinator ? '<button type="button" data-chat-full-access class="composer-access-button" aria-pressed="false"><span aria-hidden="true">♢</span><span data-chat-access-label>Full access</span></button>' : ''}
+        </div>
+        <div class="chat-composer-controls">
+          <label class="composer-select" title="GLaDOS model">
+            <span class="sr-only">Model</span>
+            <select data-chat-model aria-label="Model"><option>Loading models…</option></select>
+          </label>
+          <label class="composer-select composer-effort" title="Reasoning effort">
+            <span class="sr-only">Reasoning effort</span>
+            <select data-chat-effort aria-label="Reasoning effort">${efforts.map(([value, text]) => `<option value="${value}">${text}</option>`).join('')}</select>
+          </label>
+          <button type="button" data-chat-stop data-chat-tab="${escapeHtml(tabId)}" class="composer-stop-button" title="Stop the current response" aria-label="Stop response" disabled>■</button>
+          <button type="button" data-chat-send data-chat-tab="${escapeHtml(tabId)}" class="composer-send-button" title="Send" aria-label="Send message">↑</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function loadComposerModels() {
+  if (!composerModelsPromise) {
+    composerModelsPromise = fetchJson('/api/models', { timeoutMs: 16000 }).catch(error => {
+      composerModelsPromise = null;
+      throw error;
+    });
+  }
+  return composerModelsPromise;
+}
+
+function fileDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error(`Could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function wireChatComposerControls(chat, { agentId, tabId, coordinator, rec }) {
+  const root = chat.querySelector(`[data-chat-composer][data-chat-tab="${CSS.escape(tabId)}"]`);
+  const textarea = root.querySelector('textarea');
+  const fileInput = root.querySelector('[data-chat-files]');
+  const attachButton = root.querySelector('[data-chat-attach]');
+  const strip = root.querySelector('[data-chat-attachment-strip]');
+  const modelSelect = root.querySelector('[data-chat-model]');
+  const effortSelect = root.querySelector('[data-chat-effort]');
+  const accessButton = root.querySelector('[data-chat-full-access]');
+  const selectedAttachments = [];
+  let config = null;
+  let busy = false;
+  rec.tabId = tabId;
+
+  const renderAttachments = () => {
+    strip.hidden = selectedAttachments.length === 0;
+    strip.innerHTML = '';
+    selectedAttachments.forEach((attachment, index) => {
+      const item = document.createElement('div');
+      item.className = 'chat-attachment-chip';
+      const img = document.createElement('img');
+      img.src = attachment.dataUrl;
+      img.alt = '';
+      const name = document.createElement('span');
+      name.textContent = attachment.name;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = '×';
+      remove.setAttribute('aria-label', `Remove ${attachment.name}`);
+      remove.addEventListener('click', () => { selectedAttachments.splice(index, 1); renderAttachments(); });
+      item.append(img, name, remove);
+      strip.appendChild(item);
+    });
+  };
+
+  const addScreenshotFiles = async (files, { pasted = false } = {}) => {
+    const incoming = [...(files || [])].filter(Boolean);
+    if (!incoming.length) return 0;
+    if (selectedAttachments.length + incoming.length > 4) throw new Error('Attach at most 4 screenshots per message.');
+    const totalSize = selectedAttachments.reduce((sum, attachment) => sum + Number(attachment.size || 0), 0)
+      + incoming.reduce((sum, file) => sum + Number(file.size || 0), 0);
+    if (totalSize > 20 * 1024 * 1024) throw new Error('Screenshots may total at most 20 MB per message.');
+    const startingCount = selectedAttachments.length;
+    for (const file of incoming) {
+      if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type)) throw new Error(`${file.name || 'Clipboard image'} is not a supported image.`);
+      if (file.size > 8 * 1024 * 1024) throw new Error(`${file.name || 'Clipboard image'} is larger than 8 MB.`);
+    }
+    const prepared = await Promise.all(incoming.map(async (file, index) => {
+      const extension = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }[file.type] || 'png';
+      const fallbackName = pasted ? `Clipboard screenshot ${startingCount + index + 1}.${extension}` : `Screenshot ${startingCount + index + 1}.${extension}`;
+      return { name: file.name || fallbackName, type: file.type, size: file.size, dataUrl: await fileDataUrl(file) };
+    }));
+    selectedAttachments.push(...prepared);
+    renderAttachments();
+    return incoming.length;
+  };
+
+  attachButton.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', async () => {
+    try {
+      await addScreenshotFiles(fileInput.files);
+    } catch (error) {
+      showToast(error.message, { kind: 'warning', label: 'Screenshots' });
+    } finally {
+      fileInput.value = '';
+    }
+  });
+  textarea.addEventListener('paste', async event => {
+    const items = [...(event.clipboardData?.items || [])];
+    const screenshots = items
+      .filter(item => item.kind === 'file' && String(item.type || '').startsWith('image/'))
+      .map(item => item.getAsFile())
+      .filter(Boolean);
+    const fallbackFiles = screenshots.length ? [] : [...(event.clipboardData?.files || [])].filter(file => String(file.type || '').startsWith('image/'));
+    const files = screenshots.length ? screenshots : fallbackFiles;
+    if (!files.length) return;
+    event.preventDefault();
+    try {
+      const added = await addScreenshotFiles(files, { pasted: true });
+      showToast(`${added === 1 ? 'Screenshot' : `${added} screenshots`} attached.`, { kind: 'success', label: 'Clipboard' });
+    } catch (error) {
+      showToast(error.message, { kind: 'warning', label: 'Screenshots' });
+    }
+  });
+
+  const renderAccess = fullAccess => {
+    if (!accessButton) return;
+    const enabled = fullAccess?.enabled === true;
+    const available = fullAccess?.available !== false;
+    accessButton.hidden = !available;
+    accessButton.disabled = busy || !available;
+    accessButton.classList.toggle('enabled', enabled);
+    accessButton.setAttribute('aria-pressed', String(enabled));
+    accessButton.querySelector('[data-chat-access-label]').textContent = 'Full access';
+    accessButton.title = enabled ? 'Full Access is on. Click to return to restricted mode.' : 'Enable Full Access for new GLaDOS turns.';
+  };
+
+  accessButton?.addEventListener('click', async () => {
+    if (busy || !config?.fullAccess?.available) return;
+    const next = !config.fullAccess.enabled;
+    const approved = await confirmAction({
+      title: next ? 'Enable Full Access?' : 'Turn off Full Access?',
+      message: next
+        ? 'GLaDOS will be able to control visible apps, capture connected displays, edit requested files, and run commands without per-command prompts. Destructive or external actions still require a clear request from you, and macOS privacy permissions still apply.'
+        : 'Desktop control and unrestricted command execution will be locked again for new tool calls.',
+      confirmLabel: next ? 'Enable Full Access' : 'Turn Off',
+      danger: next,
+    });
+    if (!approved) return;
+    busy = true;
+    renderAccess(config.fullAccess);
+    try {
+      const response = await fetch('/api/settings/full-access', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: next }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      config.fullAccess = { enabled: body.enabled, available: body.available };
+      showToast(next ? 'Full Access is enabled for new GLaDOS turns.' : 'GLaDOS is back in restricted mode.', {
+        kind: next ? 'warning' : 'success', label: 'Computer use',
+      });
+    } catch (error) {
+      pushNotification('error', error.message, { toast: true, label: 'Computer use' });
+    } finally {
+      busy = false;
+      renderAccess(config.fullAccess);
+    }
+  });
+
+  modelSelect.addEventListener('change', async () => {
+    if (!config || busy || modelSelect.value === config.model) return;
+    const prior = config.model;
+    const next = modelSelect.value;
+    busy = true;
+    modelSelect.disabled = true;
+    try {
+      const response = await fetch('/api/settings/agents/models', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ changes: [{ agentId, expectedModel: prior, model: next }] }),
+      });
+      const body = await response.json().catch(() => ({}));
+      const result = body.results?.[0];
+      if (!response.ok || !result?.ok) throw new Error(result?.error || body.error || `HTTP ${response.status}`);
+      config.model = result.newModel;
+      await loadAgents();
+      showToast(`${agentId === 'glados' ? 'GLaDOS' : agentId} will use ${result.newModel} on the next turn.`, { kind: 'success', label: 'Model' });
+    } catch (error) {
+      modelSelect.value = prior;
+      pushNotification('error', error.message, { toast: true, label: 'Model' });
+    } finally {
+      busy = false;
+      modelSelect.disabled = false;
+    }
+  });
+
+  effortSelect.addEventListener('change', async () => {
+    if (!config || busy || effortSelect.value === config.effort) return;
+    const prior = config.effort;
+    busy = true;
+    effortSelect.disabled = true;
+    try {
+      const response = await fetch(withSession(`/api/chat/${encodeURIComponent(agentId)}/composer`), {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ effort: effortSelect.value }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      config.effort = body.effort;
+      showToast(`Reasoning set to ${effortSelect.options[effortSelect.selectedIndex].text} for new turns.`, { kind: 'success', label: 'Reasoning' });
+    } catch (error) {
+      effortSelect.value = prior;
+      pushNotification('error', error.message, { toast: true, label: 'Reasoning' });
+    } finally {
+      busy = false;
+      effortSelect.disabled = false;
+    }
+  });
+
+  Promise.all([
+    fetchJson(withSession(`/api/chat/${encodeURIComponent(agentId)}/composer`), { timeoutMs: 8000 }),
+    loadComposerModels(),
+  ]).then(([nextConfig, catalog]) => {
+    config = nextConfig;
+    const models = [...new Set([config.model, ...(catalog.models || [])].filter(Boolean))];
+    modelSelect.innerHTML = models.map(model => `<option value="${escapeHtml(model)}"${model === config.model ? ' selected' : ''}>${escapeHtml(model)}</option>`).join('');
+    modelSelect.disabled = !catalog.available || !models.length;
+    modelSelect.title = catalog.available ? `Model for ${agentId}` : (catalog.message || 'Model catalog unavailable');
+    effortSelect.value = config.effort || 'high';
+    renderAccess(config.fullAccess);
+  }).catch(error => {
+    modelSelect.innerHTML = '<option>Models unavailable</option>';
+    modelSelect.disabled = true;
+    showToast(`Chat controls could not load: ${error.message}`, { kind: 'warning', label: 'Composer' });
+  });
+
+  return {
+    hasAttachments: () => selectedAttachments.length > 0,
+    takeAttachments: () => {
+      const payload = selectedAttachments.map(({ name, type, size, dataUrl }) => ({ name, type, size, data: dataUrl }));
+      selectedAttachments.splice(0, selectedAttachments.length);
+      renderAttachments();
+      return payload;
+    },
+    transcriptAttachments: attachments => attachments.map(row => ({ name: row.name, mimeType: row.type, size: row.size, dataUrl: row.data })),
+  };
+}
+
 function renderLegacyChatPane() {
   const chat = document.createElement('div');
   chat.className = 'chat-pane chat-visual-chamber';
@@ -2072,15 +2694,7 @@ function renderLegacyChatPane() {
   sendingEl.textContent = 'GLaDOS is thinking…';
   const inputRow = document.createElement('div');
   inputRow.className = 'chat-input';
-  inputRow.innerHTML = `
-    <div class="chat-composer-shell">
-      <textarea id="chat-text" placeholder="Talk to GLaDOS (Enter to send, Shift+Enter for newline)…"></textarea>
-      <div class="chat-composer-actions">
-        <button id="chat-send">Send</button>
-        <button id="chat-stop" class="secondary" title="Stop the current response" disabled>Stop</button>
-      </div>
-    </div>
-  `;
+  inputRow.innerHTML = chatComposerMarkup('glados-chat', 'GLaDOS', { coordinator: true });
   chat.appendChild(transcript);
   chat.appendChild(sendingEl);
   chat.appendChild(inputRow);
@@ -2101,9 +2715,10 @@ function renderLegacyChatPane() {
   // Shared dispatcher — used by the Send button, Cmd+Enter, the slash-menu,
   // and the right-click Retry action. `override` bypasses the textarea read
   // (retry passes the prior message directly).
+  const ta = chatElement(chat, 'textarea', tabId);
+  const composer = wireChatComposerControls(chat, { agentId: 'glados', tabId, coordinator: true, rec });
   const dispatch = (override) => {
-    const ta = document.getElementById('chat-text');
-    const msg = override !== undefined ? override : ta.value.trim();
+    const msg = override !== undefined ? override : (ta.value.trim() || (composer.hasAttachments() ? 'Please review the attached screenshot.' : ''));
     if (!msg) return;
     // Slash commands are handled locally against dashboard REST; they don't
     // go to the agent session.
@@ -2119,6 +2734,7 @@ function renderLegacyChatPane() {
       ta._gladosAutoGrow?.();
     }
     pushChatHistory('glados', msg);
+    const attachments = override === undefined ? composer.takeAttachments() : [];
 
     const clientId = `user-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const optimistic = {
@@ -2127,6 +2743,7 @@ function renderLegacyChatPane() {
       ts: Date.now(),
       _optimistic: true,
       clientId,
+      attachments: composer.transcriptAttachments(attachments),
     };
     rec.events.push(optimistic);
     rec.pendingUserMessages.push({ clientId, text: msg, ts: optimistic.ts });
@@ -2147,7 +2764,7 @@ function renderLegacyChatPane() {
     fetch('/api/chat/glados', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, client_id: clientId, session_id: state.currentSessionId }),
+      body: JSON.stringify({ message: msg, attachments, client_id: clientId, session_id: state.currentSessionId }),
     }).then(r => r.json()).then(j => {
       if (!j.ok) {
         logEvent('error', 'chat error: ' + (j.error || 'unknown'));
@@ -2164,9 +2781,8 @@ function renderLegacyChatPane() {
   const send = () => dispatch();
   const stop = () => stopChatTurnFromUi(tabId, 'glados');
   chatRetriers.set('glados', (msg) => dispatch(msg));
-  document.getElementById('chat-send').addEventListener('click', send);
-  document.getElementById('chat-stop').addEventListener('click', stop);
-  const ta = document.getElementById('chat-text');
+  chat.querySelector('[data-chat-send]').addEventListener('click', send);
+  chat.querySelector('[data-chat-stop]').addEventListener('click', stop);
   attachChatHistoryNav(ta, 'glados');
   attachAutoGrow(ta, {});
   attachSlashMenu(ta, inputRow, line => { ta.value = line; send(); });
@@ -2190,12 +2806,6 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
   chat.dataset.agent = agentId;
   chat.style.setProperty('--agent-feed-label', `"${String(label).toUpperCase()} / CHAMBER FEED"`);
   const toolbar = createAgentViewToolbar(agentId);
-  if (coordinator) {
-    const sessionHost = document.createElement('div');
-    sessionHost.className = 'investigation-session-host';
-    toolbar.querySelector('.agent-actions').before(sessionHost);
-    renderInvestigationSessionManager(sessionHost);
-  }
   chat.appendChild(toolbar);
 
   const transcript = document.createElement('div');
@@ -2206,15 +2816,7 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
   sendingEl.style.display = 'none';
   const inputRow = document.createElement('div');
   inputRow.className = 'chat-input';
-  inputRow.innerHTML = `
-    <div class="chat-composer-shell">
-      <textarea data-chat-tab="${escapeHtml(tabId)}" placeholder="Talk to ${escapeHtml(label)} (Enter to send, Shift+Enter for newline)…"></textarea>
-      <div class="chat-composer-actions">
-        <button type="button" data-chat-send data-chat-tab="${escapeHtml(tabId)}">Send</button>
-        <button type="button" data-chat-stop data-chat-tab="${escapeHtml(tabId)}" class="secondary" title="Stop the current response" disabled>Stop</button>
-      </div>
-    </div>
-  `;
+  inputRow.innerHTML = chatComposerMarkup(tabId, label, { coordinator });
   chat.append(transcript, sendingEl, inputRow);
   paneEl.appendChild(chat);
   syncAgentViewToolbars(agentId);
@@ -2230,8 +2832,9 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
   refreshChatTurnStatus(tabId, agentId);
 
   const ta = chatElement(chat, 'textarea', tabId);
+  const composer = wireChatComposerControls(chat, { agentId, tabId, coordinator, rec });
   const dispatch = override => {
-    const msg = override !== undefined ? override : ta.value.trim();
+    const msg = override !== undefined ? override : (ta.value.trim() || (composer.hasAttachments() ? 'Please review the attached screenshot.' : ''));
     if (!msg) return;
     if (coordinator && msg.startsWith('/')) {
       if (override === undefined) { ta.value = ''; ta.focus(); }
@@ -2245,8 +2848,9 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
       ta._gladosAutoGrow?.();
     }
     pushChatHistory(agentId, msg);
+    const attachments = override === undefined ? composer.takeAttachments() : [];
     const clientId = `user-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const optimistic = { kind: 'user-message', text: msg, ts: Date.now(), _optimistic: true, clientId };
+    const optimistic = { kind: 'user-message', text: msg, ts: Date.now(), _optimistic: true, clientId, attachments: composer.transcriptAttachments(attachments) };
     rec.events.push(optimistic);
     rec.pendingUserMessages.push({ clientId, text: msg, ts: optimistic.ts });
     rec.autoScroll = true;
@@ -2261,7 +2865,7 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
     fetch(`/api/chat/${encodeURIComponent(agentId)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, client_id: clientId, session_id: state.currentSessionId }),
+      body: JSON.stringify({ message: msg, attachments, client_id: clientId, session_id: state.currentSessionId }),
     }).then(async response => ({ response, body: await response.json().catch(() => ({})) })).then(({ response, body }) => {
       if (!response.ok || !body.ok) {
         pushNotification('error', body.error || `${label} could not start`, { toast: true, label: 'Agent chat' });
@@ -2296,7 +2900,7 @@ async function stopChatTurnFromUi(tabId, agentId) {
   const btn = document.querySelector(`[data-chat-stop][data-chat-tab="${CSS.escape(tabId)}"]`);
   if (btn) {
     btn.disabled = true;
-    btn.textContent = 'Stopping...';
+    btn.textContent = '…';
   }
   try {
     const r = await fetch(withSession(`/api/chat/${encodeURIComponent(agentId)}/stop`), {
@@ -2317,10 +2921,15 @@ function updateChatInputControls(tabId) {
   if (state.currentTab !== tabId) return;
   const rec = state.transcripts.get(tabId);
   const stopBtn = document.querySelector(`[data-chat-stop][data-chat-tab="${CSS.escape(tabId)}"]`);
+  const sendBtn = document.querySelector(`[data-chat-send][data-chat-tab="${CSS.escape(tabId)}"]`);
   if (!stopBtn) return;
   const stopping = rec?.activity === 'stopping';
   stopBtn.disabled = !rec?.sending || stopping;
-  stopBtn.textContent = stopping ? 'Stopping...' : 'Stop';
+  stopBtn.textContent = stopping ? '…' : '■';
+  if (sendBtn) {
+    sendBtn.disabled = !!rec?.sending;
+    sendBtn.hidden = !!rec?.sending;
+  }
 }
 
 function updateSendingIndicator(tabId) {
@@ -2356,7 +2965,7 @@ function renderCollapsible(text, extraClass = '') {
   if ((text || '').length <= COLLAPSE_LEN) {
     return `<pre class="${extraClass}">${safe}</pre>`;
   }
-  return `<pre class="collapsible ${extraClass}">${safe}</pre><span class="expand-toggle">▸ expand (${text.length.toLocaleString()} chars)</span>`;
+  return `<pre class="collapsible open ${extraClass}">${safe}</pre><span class="expand-toggle">▾ collapse</span>`;
 }
 
 // v4: Markdown rendering for assistant-text entries.
@@ -2377,9 +2986,9 @@ function renderMarkdown(text, extraClass = '') {
       FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover'],
     });
     const long = src.length > COLLAPSE_LEN;
-    const cls = `md-content ${extraClass} ${long ? 'collapsible' : ''}`.trim();
+    const cls = `md-content ${extraClass} ${long ? 'collapsible open' : ''}`.trim();
     const toggle = long
-      ? `<span class="expand-toggle">▸ expand (${src.length.toLocaleString()} chars)</span>`
+      ? '<span class="expand-toggle">▾ collapse</span>'
       : '';
     return `<div class="${cls}">${clean}</div>${toggle}`;
   } catch (_) {
@@ -2538,7 +3147,28 @@ function appendEntry(container, ev, rec) {
     el.innerHTML = `<span class="ts">${ts}</span>${renderCollapsible(displayText)}`;
     if (kind === 'user-message') {
       el.dataset.messageText = ev.text || '';
+      el.dataset.operatorInitials = state.operatorProfile.initials || 'You';
       if (ev.clientId) el.dataset.clientId = ev.clientId;
+      if (Array.isArray(ev.attachments) && ev.attachments.length) {
+        const gallery = document.createElement('div');
+        gallery.className = 'entry-attachments';
+        for (const attachment of ev.attachments) {
+          const figure = document.createElement('figure');
+          const src = attachment.dataUrl || attachment.url;
+          if (src) {
+            const img = document.createElement('img');
+            img.src = src;
+            img.alt = attachment.name || 'Attached screenshot';
+            img.loading = 'lazy';
+            figure.appendChild(img);
+          }
+          const caption = document.createElement('figcaption');
+          caption.textContent = attachment.name || 'Screenshot';
+          figure.appendChild(caption);
+          gallery.appendChild(figure);
+        }
+        el.appendChild(gallery);
+      }
     }
     // v4: right-click a user message to retry. Only on surfaces that
     // registered a retrier (GLaDOS chat) — agent transcripts
@@ -2751,9 +3381,9 @@ function subscribeLobby() {
   es.addEventListener('investigation-session-updated', async () => {
     try {
       await loadInvestigationSessions();
-      renderInvestigationSessionManager(document.querySelector('.investigation-session-host'));
     } catch {}
   });
+  es.addEventListener('investigation-projects-changed', () => refreshInvestigationNavigationSoon());
   es.addEventListener('investigation-session-deleted', async () => {
     try { await loadInvestigationSessions(); if (state.currentTab === 'glados-chat') renderPane(); } catch {}
   });
@@ -2769,6 +3399,7 @@ function subscribeLobby() {
   });
   es.addEventListener('session-started', e => {
     const info = JSON.parse(e.data);
+    refreshInvestigationNavigationSoon();
     if (info.investigationSessionId && info.investigationSessionId !== state.currentSessionId) return;
     state.active.set(info.agentId, { sessionId: info.sessionId });
     logEvent('started', `${info.agentId} session-started`);
@@ -2779,6 +3410,7 @@ function subscribeLobby() {
   });
   es.addEventListener('session-ended', e => {
     const info = JSON.parse(e.data);
+    refreshInvestigationNavigationSoon();
     if (info.investigationSessionId && info.investigationSessionId !== state.currentSessionId) return;
     state.active.delete(info.agentId);
     logEvent('ended', `${info.agentId} session-ended`);
@@ -2786,6 +3418,7 @@ function subscribeLobby() {
   });
   es.addEventListener('session-reset', e => {
     const info = JSON.parse(e.data);
+    refreshInvestigationNavigationSoon();
     if (info.investigationSessionId && info.investigationSessionId !== state.currentSessionId) return;
     if (!info.agentId) return;
     clearTranscriptTab(tabIdForAgent(info.agentId));
@@ -2804,6 +3437,8 @@ function subscribeLobby() {
   es.addEventListener('agent-liveness', e => {
     const info = JSON.parse(e.data);
     if (!info.agentId) return;
+    refreshInvestigationNavigationSoon();
+    if (info.investigationSessionId && info.investigationSessionId !== state.currentSessionId) return;
     if (info.live) {
       state.active.set(info.agentId, { sessionId: info.sessionId || info.state || 'live' });
       if (info.agentId !== 'glados' && !state.openTabs.find(t => t.id === info.agentId)) {
@@ -2826,6 +3461,8 @@ function subscribeLobby() {
   });
   es.addEventListener('chat-turn-started', e => {
     let data = {}; try { data = JSON.parse(e.data); } catch {}
+    if (data.investigationSessionId && state.unreadCompletedSessionIds.delete(data.investigationSessionId)) persistUnreadCompletedSessions();
+    refreshInvestigationNavigationSoon();
     if (data.investigationSessionId && data.investigationSessionId !== state.currentSessionId) return;
     const tabId = data.agentId === 'glados' ? 'glados-chat' : null;
     if (!tabId) return;
@@ -2844,6 +3481,8 @@ function subscribeLobby() {
   });
   es.addEventListener('chat-turn-ended', e => {
     let data = {}; try { data = JSON.parse(e.data); } catch {}
+    if (data.agentId === 'glados') markBackgroundSessionCompleted(data.investigationSessionId);
+    refreshInvestigationNavigationSoon();
     if (data.investigationSessionId && data.investigationSessionId !== state.currentSessionId) return;
     const tabId = data.agentId === 'glados' ? 'glados-chat' : null;
     if (!tabId) return;
@@ -2858,6 +3497,10 @@ function subscribeLobby() {
       }, 2500);
     }
     logEvent('ended', `${data.agentId || 'agent'} turn ended`);
+  });
+  es.addEventListener('operator-profile-changed', e => {
+    try { state.operatorProfile = JSON.parse(e.data); } catch { return; }
+    if (state.currentTab === 'glados-chat' || state.agents.some(agent => state.currentTab === agent.id)) renderPane();
   });
   // v4 — Plan-approval workflow lifecycle events.
   for (const type of ['plan-pending','plan-approved','plan-rejected','plan-modified','plan-ended','plan-complete']) {
@@ -4241,6 +4884,81 @@ async function wireSetupAssistant(wrap) {
   });
 }
 
+async function wireFullAccessControl(wrap) {
+  const card = wrap.querySelector('#full-access-card');
+  const toggle = wrap.querySelector('#full-access-toggle');
+  const status = wrap.querySelector('#full-access-status');
+  if (!card || !toggle || !status) return;
+  let current = null;
+  let busy = false;
+
+  const render = next => {
+    current = next;
+    const enabled = next?.enabled === true;
+    const available = next?.available !== false;
+    card.classList.toggle('enabled', enabled);
+    card.classList.toggle('unavailable', !available);
+    toggle.disabled = busy || !available;
+    toggle.setAttribute('aria-pressed', String(enabled));
+    toggle.innerHTML = `<span class="access-switch-track"><i></i></span><span>${enabled ? 'Full Access on' : 'Full Access off'}</span>`;
+    status.className = `full-access-status ${enabled ? 'enabled' : 'restricted'}`;
+    status.innerHTML = `<span></span><div><strong>${enabled ? 'Full Access enabled' : 'Restricted by default'}</strong><small>${enabled
+      ? 'New GLaDOS turns can use host-wide tools without per-command prompts.'
+      : (available ? 'Desktop control and unrestricted execution remain locked.' : 'Available only inside the GLaDOS macOS desktop app.')}</small></div>`;
+  };
+
+  const save = async enabled => {
+    busy = true;
+    render(current);
+    try {
+      const response = await fetch('/api/settings/full-access', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      current = body;
+      showToast(enabled ? 'Full Access is enabled for new GLaDOS turns.' : 'Full Access is disabled.', {
+        kind: enabled ? 'warning' : 'success',
+        label: 'Computer use',
+      });
+    } catch (error) {
+      pushNotification('error', error.message, { toast: true, label: 'Computer use' });
+    } finally {
+      busy = false;
+      render(current);
+    }
+  };
+
+  toggle.addEventListener('click', async () => {
+    if (busy || !current?.available) return;
+    if (current.enabled) {
+      const approved = await confirmAction({
+        title: 'Turn off Full Access?',
+        message: 'Desktop control and unrestricted command execution will be locked again for new tool calls.',
+        confirmLabel: 'Turn Off',
+      });
+      if (approved) await save(false);
+      return;
+    }
+    const understood = await confirmAction({
+      title: 'Enable Full Access?',
+      message: 'GLaDOS will be able to control visible apps, capture connected displays, edit requested files, run shell commands without per-command prompts, and carry out destructive or external actions you explicitly request. macOS may still ask for Accessibility and Screen Recording permission.',
+      confirmLabel: 'Enable Full Access',
+      danger: true,
+    });
+    if (!understood) return;
+    await save(true);
+  });
+
+  try { render(await fetchJson('/api/settings/full-access', { timeoutMs: 5000 })); }
+  catch (error) {
+    render({ enabled: false, available: false });
+    status.querySelector('small').textContent = error.message;
+  }
+}
+
 function setupResultRow(label, ok, message) {
   return `<div class="setup-result ${ok ? 'pass' : 'fail'}"><span>${ok ? '✓' : '×'}</span><div><strong>${escapeHtml(label)}</strong><small>${escapeHtml(message)}</small></div></div>`;
 }
@@ -4376,6 +5094,30 @@ async function renderSettingsPane() {
       <div class="settings-section-heading"><div><h2>Setup Assistant</h2><p class="settings-section-copy">Configure the workstation from start to finish: LiteLLM, optional local credentials, the unique proxy CA, and live verification.</p></div><button id="launch-setup-assistant" type="button" class="safe">Open Setup Assistant</button></div>
       <div id="setup-summary" class="setup-summary"><div class="setup-summary-loading">Checking setup…</div></div>
     </section>
+    <section class="settings-section full-access-section">
+      <div class="settings-section-heading"><div><h2>Computer Use</h2><p class="settings-section-copy">Choose whether GLaDOS stays inside its normal safety boundary or may operate this Mac directly. Full Access is always off by default and requires an explicit confirmation.</p></div></div>
+      <div id="full-access-card" class="full-access-card">
+        <div class="full-access-card-head">
+          <div id="full-access-status" class="full-access-status restricted"><span></span><div><strong>Checking access mode…</strong><small>Reading the local policy.</small></div></div>
+          <button id="full-access-toggle" type="button" class="full-access-toggle" role="switch" aria-pressed="false" disabled><span class="access-switch-track"><i></i></span><span>Full Access off</span></button>
+        </div>
+        <div class="full-access-capabilities">
+          <div><span>Files + shell</span><strong>Read, edit, and run approved work</strong></div>
+          <div><span>Browser agents</span><strong>Coordinate isolated browser sessions</strong></div>
+          <div><span>Desktop</span><strong>See and operate visible macOS apps</strong></div>
+          <div><span>High impact</span><strong>Allow explicitly requested external or destructive actions</strong></div>
+        </div>
+        <p class="full-access-warning"><strong>Full Access removes per-command permission prompts.</strong> It does not grant itself macOS privacy consent, expand the scope of your request, or turn on automatically after an update.</p>
+      </div>
+    </section>
+    <section class="settings-section operator-profile-section">
+      <div class="settings-section-heading"><div><h2>Your chat identity</h2><p class="settings-section-copy">Enter your name once. GLaDOS shows your initials beside your messages instead of the Red Team logo.</p></div></div>
+      <div class="operator-profile-card">
+        <span id="operator-initials-preview" class="operator-initials-preview">${escapeHtml(state.operatorProfile.initials || 'You')}</span>
+        <label for="operator-name"><span>Name</span><input id="operator-name" maxlength="80" value="${escapeHtml(state.operatorProfile.name || '')}" placeholder="Sam Costa" autocomplete="name" /></label>
+        <button id="save-operator-profile" type="button" class="safe">Save name</button>
+      </div>
+    </section>
     <section class="settings-section appearance-settings">
       <h2>Appearance</h2>
       <p class="settings-section-copy">Choose how GLaDOS and agent workspaces are presented. Both themes keep the current dark blue color palette.</p>
@@ -4401,7 +5143,7 @@ async function renderSettingsPane() {
       <h2>Agents</h2>
       <div id="settings-version" class="settings-version">Version loading…</div>
       <div id="settings-model-catalog" class="settings-version">LiteLLM model catalog loading…</div>
-      <p style="color:var(--fg-dim);">Open any agents you want to edit, choose their models, then save all staged assignments together. New turns pick up saved models automatically.</p>
+      <p class="settings-section-copy">Choose models directly in the list. Nothing needs to expand or load before you make changes; save all assignments once when you are done.</p>
       <div class="settings-agent-controls">
         <input id="settings-agent-search" type="search" placeholder="Search agents or models…" aria-label="Search agent settings" />
         <div class="segmented" role="group" aria-label="Filter agent settings">
@@ -4419,6 +5161,32 @@ async function renderSettingsPane() {
   paneEl.appendChild(wrap);
   wireOperationControls(wrap);
   wireSetupAssistant(wrap);
+  wireFullAccessControl(wrap);
+  const operatorName = wrap.querySelector('#operator-name');
+  const operatorPreview = wrap.querySelector('#operator-initials-preview');
+  const saveOperator = wrap.querySelector('#save-operator-profile');
+  const previewInitials = value => {
+    const words = String(value || '').trim().split(/\s+/).filter(Boolean);
+    if (!words.length) return 'You';
+    return `${words[0][0] || ''}${words.length > 1 ? words.at(-1)[0] || '' : words[0][1] || ''}`.toUpperCase().slice(0, 2) || 'You';
+  };
+  operatorName?.addEventListener('input', () => { operatorPreview.textContent = previewInitials(operatorName.value); });
+  saveOperator?.addEventListener('click', async () => {
+    saveOperator.disabled = true;
+    try {
+      const response = await fetch('/api/settings/operator-profile', {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: operatorName.value }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      state.operatorProfile = { name: body.name || '', initials: body.initials || 'You' };
+      operatorName.value = state.operatorProfile.name;
+      operatorPreview.textContent = state.operatorProfile.initials;
+      showToast('Chat identity saved.', { kind: 'success', label: 'Settings' });
+    } catch (error) {
+      pushNotification('error', error.message, { toast: true, label: 'Chat identity' });
+    } finally { saveOperator.disabled = false; }
+  });
   wrap.querySelectorAll('[data-dashboard-theme]').forEach(button => {
     button.addEventListener('click', () => applyDashboardTheme(button.dataset.dashboardTheme));
   });
@@ -4548,35 +5316,45 @@ async function renderSettingsPane() {
     }
     for (const agent of settingsAgents) {
       const card = document.createElement('div');
-      card.className = `agent-card ${agent.enabled ? '' : 'disabled-agent'}`;
+      card.className = `agent-card settings-agent-row ${agent.enabled ? '' : 'disabled-agent'}`;
       card.dataset.agentId = agent.id;
       card.dataset.enabled = String(!!agent.enabled);
       card.dataset.model = agent.model || '';
       card.dataset.committedModel = agent.model || '';
       const badges = [
         agent.enabled ? '<span class="agent-badge enabled">enabled</span>' : '<span class="agent-badge disabled">disabled</span>',
-        agent.registered
-          ? '<span class="agent-badge registered">registered</span>'
-          : (agent.enabled ? '<span class="agent-badge pending">pending restart</span>' : '<span class="agent-badge pending">not loaded</span>'),
         agent.dispatch === 'conditional' ? '<span class="agent-badge conditional">conditional</span>' : '',
-        agent.subagent === false ? '<span class="agent-badge separate">not subagent</span>' : '',
       ].filter(Boolean).join('');
+      const modelChoices = [...new Set([agent.model, ...models].filter(Boolean))];
+      const modelOptions = modelChoices.map(model => `<option value="${escapeHtml(model)}"${model === agent.model ? ' selected' : ''}>${escapeHtml(model)}</option>`).join('');
       card.innerHTML = `
-        <div class="agent-card-head">
-          <span class="title">${escapeHtml(agent.id)}</span>
+        <div class="settings-agent-identity">
+          <span class="settings-agent-dot ${agent.enabled ? 'enabled' : ''}"></span>
+          <span><strong>${escapeHtml(agent.name || agent.id)}</strong><small>${escapeHtml(agent.id)}</small></span>
           <span class="agent-card-badges">${badges}</span>
-          <span class="caret">▸</span>
         </div>
-        <div class="agent-card-body" data-loaded="false">
+        <div class="settings-agent-model">
+          <span>Model</span>
+          <select data-model-select ${modelsResp.available ? '' : 'disabled'}>${modelOptions}</select>
+          <small>Saved: <code data-saved-model>${escapeHtml(agent.model || '?')}</code></small>
+        </div>
+        <button type="button" class="settings-agent-details-toggle" data-agent-details-toggle aria-expanded="false">Details</button>
+        <div class="agent-card-body settings-agent-details" data-loaded="false" hidden>
           <div style="color:var(--fg-dim);">loading details…</div>
         </div>`;
-      card.querySelector('.agent-card-head').addEventListener('click', async () => {
-        const isOpen = card.classList.toggle('open');
+      const inlineSelect = card.querySelector('[data-model-select]');
+      inlineSelect.addEventListener('change', () => stageModelChange(agent.id, card.dataset.committedModel, inlineSelect.value, card, inlineSelect));
+      card.querySelector('[data-agent-details-toggle]').addEventListener('click', async event => {
+        const isOpen = !card.classList.contains('open');
+        card.classList.toggle('open', isOpen);
+        event.currentTarget.setAttribute('aria-expanded', String(isOpen));
+        event.currentTarget.textContent = isOpen ? 'Hide' : 'Details';
         const body = card.querySelector('.agent-card-body');
+        body.hidden = !isOpen;
         if (isOpen && body.dataset.loaded === 'false') {
           await hydrateAgentCard(agent.id, body, models, {
             draft: modelDrafts.get(agent.id),
-            onModelChange: (expectedModel, model, select) => stageModelChange(agent.id, expectedModel, model, card, select),
+            includeModel: false,
           });
           body.dataset.loaded = 'true';
         }
@@ -4601,7 +5379,7 @@ function renderSettingsVersion(info) {
     <code>${escapeHtml(info.version || 'unknown')}</code>`;
 }
 
-async function hydrateAgentCard(agentId, body, models, { draft = null, onModelChange = null } = {}) {
+async function hydrateAgentCard(agentId, body, models, { draft = null, onModelChange = null, includeModel = true } = {}) {
   try {
     const d = await fetchJson(`/api/agents/${encodeURIComponent(agentId)}/details`, { timeoutMs: 8000 });
     if (d.error) { body.textContent = 'error: ' + d.error; return; }
@@ -4629,10 +5407,8 @@ async function hydrateAgentCard(agentId, body, models, { draft = null, onModelCh
         </button>
       </div>
 
-      <label>Model (saved: <code data-saved-model>${escapeHtml(d.model || '?')}</code>)</label>
-      <div class="model-row">
-        <select data-model-select ${d.registered ? '' : 'disabled'}>${modelOpts}</select>
-      </div>
+      ${includeModel ? `<label>Model (saved: <code data-saved-model>${escapeHtml(d.model || '?')}</code>)</label>
+      <div class="model-row"><select data-model-select>${modelOpts}</select></div>` : ''}
 
       <label>Workspace</label>
       <div class="doc" style="max-height:none;font-size:11px;color:var(--fg-dim);">${escapeHtml(d.workspace || '')}</div>
@@ -4655,7 +5431,7 @@ async function hydrateAgentCard(agentId, body, models, { draft = null, onModelCh
       <label>IDENTITY.md</label>
       <div class="doc">${escapeHtml(d.identity || '(missing)')}</div>
     `;
-    const modelSelect = body.querySelector('[data-model-select]');
+    const modelSelect = includeModel ? body.querySelector('[data-model-select]') : null;
     if (draft) modelSelect?.classList.add('model-dirty');
     modelSelect?.addEventListener('change', () => onModelChange?.(d.model, modelSelect.value, modelSelect));
     body.querySelector('[data-toggle-enabled]')?.addEventListener('click', async () => {
@@ -4753,6 +5529,28 @@ function attachSlashMenu(textarea, container, onRun) {
 }
 
 async function runSlashCommand(raw, rec) {
+  const chooser = raw.trim().match(/^\/security-review(?:\s+(--full))?$/i);
+  if (chooser) {
+    try {
+      let selected = null;
+      if (window.gladosDesktop?.chooseSecurityReviewDirectory) {
+        const result = await window.gladosDesktop.chooseSecurityReviewDirectory({ full: !!chooser[1] });
+        if (result?.canceled) return;
+        selected = result?.path;
+      } else {
+        selected = await showNameInput({
+          title: chooser[1] ? 'Full security review' : 'Expedited security review',
+          confirmLabel: 'Start review', label: 'Repository folder', placeholder: '/path/to/repository',
+        });
+      }
+      if (!selected) return;
+      const quoted = String(selected).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      raw = `/security-review${chooser[1] ? ' --full' : ''} "${quoted}"`;
+    } catch (error) {
+      pushNotification('error', error.message, { toast: true, label: 'Security review' });
+      return;
+    }
+  }
   const [cmd] = raw.trim().split(/\s+/);
   if (cmd === '/clear') {
     rec.events.length = 0;
@@ -5175,6 +5973,16 @@ document.getElementById('notifications-clear')?.addEventListener('click', () => 
   renderNotifications();
 });
 
+document.addEventListener('pointerdown', event => {
+  document.querySelectorAll('.overview-session-menu[open]').forEach(menu => {
+    if (!menu.contains(event.target)) menu.open = false;
+  });
+});
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  document.querySelectorAll('.overview-session-menu[open]').forEach(menu => { menu.open = false; });
+});
+
 function applyPersistentLayout() {
   const root = document.documentElement;
   const sidebarWidth = Math.max(190, Math.min(420, Number(localStorage.getItem('glados-dash.sidebar-width')) || 248));
@@ -5236,6 +6044,8 @@ function wirePersistentLayout() {
 (() => {
   const sections = [
     { headingId: 'agents-heading',     bodyId: 'agents-section' },
+    { headingId: 'sessions-heading',   bodyId: 'sessions-section' },
+    { headingId: 'projects-heading',   bodyId: 'projects-section' },
     { headingId: 'workspace-heading',  bodyId: 'workspace-links' },
   ];
   for (const { headingId, bodyId } of sections) {
@@ -5258,7 +6068,8 @@ function wirePersistentLayout() {
   }
 })();
 
-loadInvestigationSessions().then(() => Promise.all([loadAgents(), loadSecurityReviews()])).then(() => {
+Promise.all([loadInvestigationSessions(), loadOperatorProfile().catch(() => state.operatorProfile)])
+  .then(() => Promise.all([loadAgents(), loadSecurityReviews()])).then(() => {
   const allowedStatic = new Set(['overview', 'glados-chat', 'plans', 'reports', 'settings', 'terminal', 'proxy', 'update']);
   const agentIds = new Set(state.agents.map(agent => agent.id).filter(id => id !== 'glados'));
   const savedTabs = storageGetJson('glados-dash.open-tabs', []);

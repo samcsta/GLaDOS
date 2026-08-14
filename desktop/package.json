@@ -1,6 +1,6 @@
 {
   "name": "glados",
-  "version": "4.5.2",
+  "version": "4.5.3",
   "private": true,
   "description": "Electron shell for the GLaDOS operator app.",
   "author": {
@@ -105,6 +105,9 @@
     "mac": {
       "icon": "build/icon.icns",
       "category": "public.app-category.developer-tools",
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "GLaDOS uses Apple Events only when you enable Full Access and ask it to operate visible apps on this Mac."
+      },
       "extraResources": [
         {
           "from": ".vendor/mitmproxy.app",

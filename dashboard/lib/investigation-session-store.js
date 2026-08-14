@@ -59,9 +59,13 @@ class InvestigationSessionStore {
   list({ includeArchived = true } = {}) {
     const where = includeArchived ? '' : `WHERE state='active'`;
     return this.db.prepare(`
-      SELECT s.*, COUNT(e.id) AS engagement_count
+      SELECT s.*, p.name AS project_name, COUNT(e.id) AS engagement_count,
+        (SELECT COUNT(*) FROM controller_jobs j
+          WHERE j.engagement_id IN (SELECT owned.id FROM engagements owned WHERE owned.session_id=s.id)
+            AND j.status IN ('queued','running','cancelling')) AS running_count
       FROM investigation_sessions s
       LEFT JOIN engagements e ON e.session_id=s.id
+      LEFT JOIN investigation_projects p ON p.id=s.project_id
       ${where}
       GROUP BY s.id
       ORDER BY CASE s.state WHEN 'active' THEN 0 ELSE 1 END, datetime(s.updated_at) DESC
@@ -78,13 +82,15 @@ class InvestigationSessionStore {
     return row ? decodeSession(row) : null;
   }
 
-  create({ name, metadata = {}, activate = true } = {}) {
+  create({ name, metadata = {}, activate = true, projectId = null } = {}) {
     const id = `session_${Date.now().toString(36)}_${crypto.randomBytes(5).toString('hex')}`;
     const label = String(name || '').trim().slice(0, 120) || 'Unassigned session';
+    const normalizedProjectId = projectId == null || projectId === '' ? null : String(projectId);
+    if (normalizedProjectId && !this.getProject(normalizedProjectId)) throw new Error(`investigation project not found: ${normalizedProjectId}`);
     const tx = this.db.transaction(() => {
       if (activate) this.db.prepare(`UPDATE investigation_sessions SET state='archived', archived_at=COALESCE(archived_at, datetime('now')), updated_at=datetime('now') WHERE state='active'`).run();
-      this.db.prepare(`INSERT INTO investigation_sessions (id, name, state, archived_at, metadata_json) VALUES (?, ?, ?, ?, ?)`).run(
-        id, label, activate ? 'active' : 'archived', activate ? null : new Date().toISOString(), JSON.stringify(metadata || {})
+      this.db.prepare(`INSERT INTO investigation_sessions (id, project_id, name, state, archived_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)`).run(
+        id, normalizedProjectId, label, activate ? 'active' : 'archived', activate ? null : new Date().toISOString(), JSON.stringify(metadata || {})
       );
     });
     tx();
@@ -111,6 +117,72 @@ class InvestigationSessionStore {
     this.db.prepare(`UPDATE investigation_sessions SET name=?, metadata_json=?, updated_at=datetime('now') WHERE id=?`)
       .run(label, JSON.stringify(metadata), id);
     return this.get(id);
+  }
+
+  listProjects() {
+    return this.db.prepare(`
+      SELECT p.*, COUNT(s.id) AS session_count
+      FROM investigation_projects p
+      LEFT JOIN investigation_sessions s ON s.project_id=p.id
+      GROUP BY p.id
+      ORDER BY lower(p.name), datetime(p.created_at)
+    `).all().map(row => ({
+      id: row.id,
+      name: row.name,
+      sessionCount: Number(row.session_count || 0),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  getProject(id) {
+    const row = this.db.prepare('SELECT * FROM investigation_projects WHERE id=?').get(id);
+    return row ? { id: row.id, name: row.name, createdAt: row.created_at, updatedAt: row.updated_at } : null;
+  }
+
+  createProject(name) {
+    const label = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+    if (!label) throw new Error('project name required');
+    const id = `project_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
+    try {
+      this.db.prepare('INSERT INTO investigation_projects (id, name) VALUES (?, ?)').run(id, label);
+    } catch (error) {
+      if (/unique/i.test(error.message)) throw new Error(`project already exists: ${label}`);
+      throw error;
+    }
+    return this.getProject(id);
+  }
+
+  renameProject(id, name) {
+    if (!this.getProject(id)) throw new Error(`investigation project not found: ${id}`);
+    const label = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+    if (!label) throw new Error('project name required');
+    try {
+      this.db.prepare(`UPDATE investigation_projects SET name=?, updated_at=datetime('now') WHERE id=?`).run(label, id);
+    } catch (error) {
+      if (/unique/i.test(error.message)) throw new Error(`project already exists: ${label}`);
+      throw error;
+    }
+    return this.getProject(id);
+  }
+
+  moveToProject(sessionId, projectId = null) {
+    if (!this.get(sessionId)) throw new Error(`investigation session not found: ${sessionId}`);
+    const normalizedProjectId = projectId == null || projectId === '' ? null : String(projectId);
+    if (normalizedProjectId && !this.getProject(normalizedProjectId)) throw new Error(`investigation project not found: ${normalizedProjectId}`);
+    this.db.prepare(`UPDATE investigation_sessions SET project_id=?, updated_at=datetime('now') WHERE id=?`).run(normalizedProjectId, sessionId);
+    return this.get(sessionId);
+  }
+
+  deleteProject(id) {
+    const project = this.getProject(id);
+    if (!project) throw new Error(`investigation project not found: ${id}`);
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`UPDATE investigation_sessions SET project_id=NULL, updated_at=datetime('now') WHERE project_id=?`).run(id);
+      this.db.prepare('DELETE FROM investigation_projects WHERE id=?').run(id);
+    });
+    tx();
+    return project;
   }
 
   nameFromFirstPrompt(id, prompt) {
@@ -224,6 +296,9 @@ function decodeSession(row) {
     updatedAt: row.updated_at,
     archivedAt: row.archived_at || null,
     engagementCount: Number(row.engagement_count || 0),
+    runningCount: Number(row.running_count || 0),
+    projectId: row.project_id || null,
+    projectName: row.project_name || null,
     metadata,
   };
 }

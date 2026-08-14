@@ -295,6 +295,20 @@ ipcMain.handle('desktop:setup:status', async event => {
   assertTrustedDashboardEvent(event);
   return setupStatus();
 });
+ipcMain.handle('desktop:security-review:choose-directory', async (event, input = {}) => {
+  assertTrustedDashboardEvent(event);
+  const parent = BrowserWindow.fromWebContents(event.sender) || mainWindow || undefined;
+  const options = {
+    title: input.full ? 'Choose a repository for a full security review' : 'Choose a repository for an expedited security review',
+    buttonLabel: 'Review Repository',
+    properties: ['openDirectory', 'createDirectory'],
+  };
+  const preferred = String(input.defaultPath || '').trim();
+  if (preferred && fs.existsSync(preferred)) options.defaultPath = preferred;
+  else options.defaultPath = app.getPath('desktop');
+  const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
+  return { canceled: result.canceled, path: result.canceled ? null : result.filePaths[0] || null };
+});
 ipcMain.handle('desktop:setup:save-litellm', async (event, input) => {
   assertTrustedDashboardEvent(event);
   lastSetupVerification = null;

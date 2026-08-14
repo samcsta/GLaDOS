@@ -29,6 +29,9 @@ contextBridge.exposeInMainWorld('gladosDesktop', {
   verifySetup() {
     return ipcRenderer.invoke('desktop:setup:verify');
   },
+  chooseSecurityReviewDirectory(input) {
+    return ipcRenderer.invoke('desktop:security-review:choose-directory', input);
+  },
   getUpdateAccessStatus() {
     return ipcRenderer.invoke('desktop:update-auth:status');
   },

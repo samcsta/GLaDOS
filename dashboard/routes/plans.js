@@ -396,6 +396,7 @@ function makeRouter(broadcastLobby, { onApproved = null, onEnded = null, dbPath 
             engagement_id: row.engagement_id,
             decision,
             vectors: vectors || null,
+            sessionId: getSessionId(req),
           }) || execution;
         } catch (error) {
           execution = { executionQueued: false, executionError: error.message };
@@ -492,7 +493,7 @@ function makeRouter(broadcastLobby, { onApproved = null, onEnded = null, dbPath 
         status: result.engagement_status,
         reason,
       });
-      if (typeof onEnded === 'function') onEnded(result, { reason, operator });
+      if (typeof onEnded === 'function') onEnded(result, { reason, operator, sessionId: getSessionId(req) });
       res.json(result);
     } catch (error) {
       res.status(error.statusCode || 500).json({ ok: false, error: error.message });

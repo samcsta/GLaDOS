@@ -120,6 +120,7 @@ test('plan approval invokes the automatic execution handoff for all and selected
   app.use(express.json());
   app.use('/api/plans', makePlanRouter(() => {}, {
     dbPath,
+    getSessionId: () => 'session-a',
     onApproved: payload => {
       handedOff.push(payload);
       return { executionQueued: true };
@@ -142,6 +143,7 @@ test('plan approval invokes the automatic execution handoff for all and selected
       { id: 'plan-all', decision: 'approve_all', vectors: null },
       { id: 'plan-selected', decision: 'approve_selected', vectors: ['CWE-89'] },
     ]);
+    assert.deepEqual(handedOff.map(row => row.sessionId), ['session-a', 'session-a']);
   } finally {
     await new Promise(resolve => server.close(resolve));
   }

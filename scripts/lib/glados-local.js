@@ -350,8 +350,15 @@ function sqliteTableColumns(dbPath, table) {
 function ensureBlackboardDb(paths) {
   runSql(paths.blackboardDb, `
 PRAGMA foreign_keys=ON;
+CREATE TABLE IF NOT EXISTS investigation_projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS investigation_sessions (
   id TEXT PRIMARY KEY,
+  project_id TEXT REFERENCES investigation_projects(id) ON DELETE SET NULL,
   name TEXT NOT NULL,
   state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'archived')),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -623,6 +630,11 @@ CREATE INDEX IF NOT EXISTS idx_replan_state ON replan_proposals(state);
       VALUES ('legacy', 'Unassigned session', 'active', '{"unassigned":true,"legacy":true}');
     `);
   }
+  const sessionCols = sqliteTableColumns(paths.blackboardDb, 'investigation_sessions');
+  if (!sessionCols.has('project_id')) {
+    runSql(paths.blackboardDb, `ALTER TABLE investigation_sessions ADD COLUMN project_id TEXT REFERENCES investigation_projects(id) ON DELETE SET NULL;`);
+  }
+  runSql(paths.blackboardDb, `CREATE INDEX IF NOT EXISTS idx_investigation_sessions_project ON investigation_sessions(project_id, updated_at DESC);`);
   const engagementCols = sqliteTableColumns(paths.blackboardDb, 'engagements');
   if (!engagementCols.has('session_id')) {
     runSql(paths.blackboardDb, `ALTER TABLE engagements ADD COLUMN session_id TEXT NOT NULL DEFAULT 'legacy' REFERENCES investigation_sessions(id);`);

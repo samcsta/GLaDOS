@@ -25,6 +25,14 @@ test('clean-machine packaged verification cannot fall back to Homebrew mitmdump'
   assert.match(verifier, /GLADOS_PROXY_REQUIRE_BUNDLED: '1'/);
   assert.match(verifier, /delete cleanEnvironment\.GLADOS_MITMPROXY_BIN/);
   assert.match(verifier, /PATH: '\/usr\/bin:\/bin:\/usr\/sbin:\/sbin'/);
+  assert.match(verifier, /GLADOS_PACKAGED_FULL_ACCESS_TOOLS_OK/);
+  assert.match(verifier, /desktop_snapshot/);
+});
+
+test('macOS Full Access build declares Apple Events automation transparently', () => {
+  const entitlements = fs.readFileSync(path.join(desktopDir, 'build', 'entitlements.mac.plist'), 'utf8');
+  assert.match(entitlements, /com\.apple\.security\.automation\.apple-events/);
+  assert.match(pkg.build.mac.extendInfo.NSAppleEventsUsageDescription, /enable Full Access/i);
 });
 
 test('DMG contains a native uninstaller app instead of a quarantined command script', () => {

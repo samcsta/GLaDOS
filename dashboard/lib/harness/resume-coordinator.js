@@ -35,6 +35,7 @@ class ResumeCoordinator {
     if (!id) return null;
     const snapshot = {
       agentId: id,
+      investigationSessionId: work.investigationSessionId || null,
       parentAgentId: work.parentAgentId || 'glados',
       taskPrompt: String(work.taskPrompt || '').trim(),
       taskDescription: String(work.taskDescription || '').trim(),

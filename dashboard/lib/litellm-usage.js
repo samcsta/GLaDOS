@@ -60,16 +60,23 @@ function normalizedModelName(value) {
   return bareModelAlias(raw, { fallback: raw });
 }
 
-function aggregateDailyActivity(payload, { now = new Date(), days = DEFAULT_DAYS } = {}) {
+function keyMetricsForRow(row, keyAlias) {
+  if (!keyAlias) return null;
+  const entries = Object.values(row?.breakdown?.api_keys || {});
+  const match = entries.find(entry => String(entry?.metadata?.key_alias || '') === keyAlias);
+  return match?.metrics || {};
+}
+
+function aggregateDailyActivity(payload, { now = new Date(), days = DEFAULT_DAYS, keyAlias = null } = {}) {
   const period = usageWindow(now, days);
   const rowsByDate = new Map((payload?.results || []).map(row => [row.date, row]));
   const totals = metricShape();
   const models = new Map();
   const daily = period.dates.map(date => {
     const row = rowsByDate.get(date) || {};
-    const metrics = metricShape(row.metrics);
+    const metrics = metricShape(keyAlias ? keyMetricsForRow(row, keyAlias) : row.metrics);
     addMetrics(totals, metrics);
-    for (const [rawName, modelRow] of Object.entries(row.breakdown?.models || {})) {
+    for (const [rawName, modelRow] of Object.entries(keyAlias ? {} : (row.breakdown?.models || {}))) {
       const name = normalizedModelName(rawName);
       const aggregate = models.get(name) || { name, ...metricShape() };
       addMetrics(aggregate, metricShape(modelRow?.metrics || modelRow));
@@ -90,6 +97,8 @@ function aggregateDailyActivity(payload, { now = new Date(), days = DEFAULT_DAYS
   return {
     available: true,
     source: 'LiteLLM',
+    scope: keyAlias ? 'virtual-key' : 'gateway-user',
+    keyAlias,
     period: { days: period.days, startDate: period.startDate, endDate: period.endDate },
     totals,
     daily,
@@ -126,15 +135,30 @@ async function fetchLiteLlmUsage(options = {}) {
   const now = options.now || new Date();
   const days = options.days || DEFAULT_DAYS;
   const period = usageWindow(now, days);
-  const query = new URLSearchParams({ start_date: period.startDate, end_date: period.endDate });
-  const url = `${gatewayBaseUrl(env)}/user/daily/activity?${query}`;
+  const baseUrl = gatewayBaseUrl(env);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs || DEFAULT_TIMEOUT_MS);
   try {
-    const response = await (options.fetchImpl || global.fetch)(url, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-      signal: controller.signal,
+    const fetchImpl = options.fetchImpl || global.fetch;
+    const request = endpoint => fetchImpl(endpoint, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, signal: controller.signal,
     });
+    const keyResponse = await request(`${baseUrl}/key/info`);
+    let keyPayload = null;
+    try { keyPayload = JSON.parse(await keyResponse.text()); } catch {}
+    if (!keyResponse.ok || !keyPayload?.info?.key_alias || !keyPayload?.key) {
+      return unavailable('key-info-unavailable', 'LiteLLM could not identify the configured virtual key for key-only usage reporting.', { status: keyResponse.status });
+    }
+
+    // LiteLLM key aliases are labels, not stable usage identifiers. Filtering the
+    // activity query by the server-issued key ID keeps totals scoped to the
+    // configured credential even after that key is rotated or renamed.
+    const query = new URLSearchParams({
+      start_date: period.startDate,
+      end_date: period.endDate,
+      api_key: String(keyPayload.key),
+    });
+    const response = await request(`${baseUrl}/user/daily/activity?${query}`);
     let payload = null;
     try { payload = JSON.parse(await response.text()); } catch {}
     if (!response.ok) {
@@ -146,6 +170,13 @@ async function fetchLiteLlmUsage(options = {}) {
       return unavailable('gateway-error', message, { status: response.status });
     }
     const result = aggregateDailyActivity(payload, { now, days });
+    result.scope = 'virtual-key';
+    result.keyAlias = String(keyPayload.info.key_alias);
+    result.budget = {
+      max: number(keyPayload.info.max_budget),
+      duration: keyPayload.info.budget_duration || null,
+      resetAt: keyPayload.info.budget_reset_at || null,
+    };
     result.fetchedAt = new Date().toISOString();
     return result;
   } catch (error) {

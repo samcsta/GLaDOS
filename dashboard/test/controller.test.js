@@ -93,6 +93,40 @@ test('security reviews have no wall-clock deadline unless the operator sets one'
   controller.close();
 });
 
+test('queues an expedited portfolio as one breadth-then-depth campaign', () => {
+  const { dir, dbPath } = tempEnv();
+  const portfolio = path.join(dir, 'repos');
+  fs.mkdirSync(portfolio);
+  for (const name of ['service-b', 'service-a']) {
+    const repo = path.join(portfolio, name);
+    fs.mkdirSync(repo);
+    initRepo(repo);
+  }
+  const controller = new ControllerLite({ dbPath, getInvestigationSessionId: () => 'legacy' });
+  const job = controller.enqueueSecurityReviewPath(portfolio, {
+    reviewProfile: 'expedited',
+    campaignMode: true,
+  });
+  const artifactRoot = path.join(path.dirname(path.dirname(dbPath)), 'investigations', job.engagement_id, 'security-review');
+  const run = JSON.parse(fs.readFileSync(path.join(artifactRoot, 'run.json'), 'utf8'));
+  const campaign = JSON.parse(fs.readFileSync(path.join(artifactRoot, 'portfolio', 'repositories.json'), 'utf8'));
+  assert.equal(run.reviewProfile, 'expedited');
+  assert.equal(run.campaign.repositoryCount, 2);
+  assert.equal(controller.getGoal(job.goal_id).metadata.campaign, true);
+  assert.equal(run.deepScan.minDiscoveryRuns, 3);
+  assert.equal(run.deepScan.stopAfterNoNew, 3);
+  assert.equal(run.deepScan.maxDiscoveryRuns, null);
+  assert.equal(run.deepScan.maxDurationMinutes, null);
+  assert.deepEqual(campaign.repositories.map(repo => repo.name), ['service-a', 'service-b']);
+  assert.match(job.prompt, /EXPEDITED MULTI-REPOSITORY CAMPAIGN CONTRACT/);
+  assert.match(job.prompt, /worker-001=repo-001:service-a/);
+  assert.match(job.prompt, /no fixed discovery-attempt ceiling/);
+  const progress = controller.status({ sessionId: 'legacy' }).securityReviews[0].progress;
+  assert.equal(progress.reviewProfile, 'expedited');
+  assert.equal(progress.repositoryCount, 2);
+  controller.close();
+});
+
 test('security-review progress advances from discovery through sealing artifacts', () => {
   const { dir, dbPath } = tempEnv();
   const repo = path.join(dir, 'repo');
@@ -153,6 +187,44 @@ test('reconciles stale running jobs on startup', () => {
   assert.equal(controller.reconcileStaleRunning(), 1);
   assert.equal(controller.getJob(job.id).status, 'failed');
   controller.close();
+});
+
+test('dashboard restart resumes the same durable security-review campaign artifacts', async () => {
+  const { dir, dbPath } = tempEnv();
+  const portfolio = path.join(dir, 'repos');
+  fs.mkdirSync(portfolio);
+  for (const name of ['api', 'web']) {
+    const repo = path.join(portfolio, name);
+    fs.mkdirSync(repo);
+    initRepo(repo);
+  }
+  const first = new ControllerLite({ dbPath });
+  const job = first.enqueueSecurityReviewPath(portfolio, { reviewProfile: 'expedited', campaignMode: true });
+  first.db.prepare("UPDATE controller_jobs SET status='running' WHERE id=?").run(job.id);
+  first.close();
+
+  const tracked = [];
+  const resumed = new ControllerLite({
+    dbPath,
+    sendMessageToAgentTracked(_agentId, prompt) {
+      const item = pendingTracked();
+      item.prompt = prompt;
+      tracked.push(item);
+      return { child: item.child, promise: item.promise };
+    },
+  });
+  resumed.start();
+  const continued = resumed.getJob(job.id);
+  assert.equal(continued.status, 'running');
+  assert.equal(continued.attempts, 1);
+  assert.match(continued.prompt, /DURABLE COORDINATOR CONTINUATION/);
+  assert.match(continued.prompt, /Do not initialize a new run/);
+  assert.equal(tracked.length, 1);
+  resumed.cancelJob(job.id);
+  tracked[0].resolve({});
+  await new Promise(resolve => setTimeout(resolve, 20));
+  resumed.stop();
+  resumed.close();
 });
 
 test('security-review jobs cannot succeed when deterministic completion gates fail', () => {

@@ -25,6 +25,21 @@ const { activeTurnConflict } = require('./lib/chat-turn-admission');
 const { isKickoffApproval, isKickoffCancel, isNetReconRequested, resolveKickoffResources } = require('./lib/kickoff-intent');
 const { getLiteLlmUsage } = require('./lib/litellm-usage');
 const { cleanupLooseInvestigationArtifacts, resetMutableAgentStatus } = require('./lib/runtime-reset');
+const { readFullAccessState, writeFullAccessState } = require('./lib/full-access');
+const {
+  EFFORT_LEVELS,
+  effortForAgent,
+  operatorInitials,
+  readChatPreferences,
+  writeChatPreferences,
+} = require('./lib/chat-preferences');
+const {
+  MIME_EXTENSIONS,
+  attachmentPath,
+  attachmentsRoot,
+  publicAttachment,
+  storeChatAttachments,
+} = require('./lib/chat-attachments');
 const { engagementMetrics } = require('../tools/glados-ops-mcp/lib/engagement-metrics');
 const { normalizeActionTarget } = require('../tools/glados-ops-mcp/lib/operator-action-approval');
 const slash = require('./lib/slash');
@@ -57,6 +72,7 @@ const watchdogHealth = require('glados-watchdog/lib/health');
 const watchdogHalt = require('glados-watchdog/lib/halt');
 
 const app = express();
+app.use('/api/chat', express.json({ limit: '25mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/vendor/marked', express.static(path.join(__dirname, 'node_modules', 'marked')));
@@ -177,27 +193,107 @@ app.get('/api/version', (req, res) => {
   res.json(getVersionInfo());
 });
 
+app.get('/api/settings/full-access', (req, res) => {
+  try {
+    const { file: _file, ...state } = readFullAccessState(process.env);
+    res.json({
+      ok: true,
+      available: process.platform === 'darwin' && process.env.GLADOS_DESKTOP === '1',
+      platform: process.platform,
+      ...state,
+    });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/settings/full-access', (req, res) => {
+  try {
+    if (process.platform !== 'darwin' || process.env.GLADOS_DESKTOP !== '1') {
+      return res.status(409).json({ ok: false, error: 'Full Access can only be changed from the GLaDOS macOS desktop app.' });
+    }
+    const enabled = req.body?.enabled;
+    if (typeof enabled !== 'boolean') return res.status(400).json({ ok: false, error: 'enabled must be true or false' });
+    const { file: _file, ...state } = writeFullAccessState(enabled, { env: process.env });
+    broadcastLobby('full-access-changed', { enabled: state.enabled, updatedAt: state.updatedAt });
+    return res.json({ ok: true, available: true, platform: process.platform, ...state });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+function investigationNavigationPayload() {
+  const runningBySession = new Map();
+  const add = (sessionId, agentId) => {
+    if (!sessionId || !agentId) return;
+    const agents = runningBySession.get(sessionId) || new Set();
+    agents.add(agentId);
+    runningBySession.set(sessionId, agents);
+  };
+  for (const turn of activeChatTurns.values()) add(turn.sessionId, turn.agentId);
+  for (const turn of activeSubagentTurns.values()) add(turn.investigationSessionId, turn.agentId);
+  const sessions = investigationSessions.list().map(session => {
+    const agents = [...(runningBySession.get(session.id) || [])].sort();
+    return {
+      ...session,
+      runningAgents: agents,
+      runningCount: Math.max(Number(session.runningCount || 0), agents.length),
+    };
+  });
+  return {
+    activeId: activeInvestigationSession().id,
+    projects: investigationSessions.listProjects(),
+    sessions,
+  };
+}
+
 app.get('/api/investigation-sessions', (req, res) => {
-  res.json({ ok: true, activeId: activeInvestigationSession().id, sessions: investigationSessions.list() });
+  res.json({ ok: true, ...investigationNavigationPayload() });
+});
+
+app.post('/api/investigation-projects', (req, res) => {
+  try {
+    const project = investigationSessions.createProject(req.body?.name);
+    broadcastLobby('investigation-projects-changed', { project });
+    res.status(201).json({ ok: true, project, ...investigationNavigationPayload() });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message });
+  }
+});
+
+app.patch('/api/investigation-projects/:id', (req, res) => {
+  try {
+    const project = investigationSessions.renameProject(req.params.id, req.body?.name);
+    broadcastLobby('investigation-projects-changed', { project });
+    res.json({ ok: true, project, ...investigationNavigationPayload() });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message });
+  }
+});
+
+app.delete('/api/investigation-projects/:id', (req, res) => {
+  try {
+    const project = investigationSessions.deleteProject(req.params.id);
+    broadcastLobby('investigation-projects-changed', { projectId: project.id, deleted: true });
+    res.json({ ok: true, project, ...investigationNavigationPayload() });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message });
+  }
 });
 
 app.post('/api/investigation-sessions', (req, res) => {
-  if (activeChatTurns.size || activeSubagentTurns.size) return res.status(409).json({ ok: false, error: 'stop active agent turns before creating a new investigation' });
-  const agentStatusReset = resetMutableAgentStatus(GLADOS_AGENT_WORKSPACES);
+  const hasBackgroundWork = activeChatTurns.size > 0 || activeSubagentTurns.size > 0;
+  const agentStatusReset = hasBackgroundWork
+    ? { reset: 0, errors: [], skipped: true, reason: 'background sessions are still running' }
+    : resetMutableAgentStatus(GLADOS_AGENT_WORKSPACES);
   if (agentStatusReset.errors.length) return res.status(500).json({ ok: false, error: `could not isolate mutable agent status: ${agentStatusReset.errors.join('; ')}` });
-  const session = investigationSessions.create({ name: req.body?.name, metadata: req.body?.metadata, activate: req.body?.activate !== false });
-  pendingGladosKickoff = null;
-  resumeContinuationQueue.length = 0;
-  approvedPlanQueue.length = 0;
-  approvedPlanQueueIds.clear();
+  const session = investigationSessions.create({ name: req.body?.name, metadata: req.body?.metadata, activate: req.body?.activate !== false, projectId: req.body?.projectId });
   broadcastLobby('investigation-session-changed', { activeId: session.id, session });
-  res.status(201).json({ ok: true, session, sessions: investigationSessions.list(), agentStatusReset });
+  res.status(201).json({ ok: true, session, ...investigationNavigationPayload(), agentStatusReset });
 });
 
 app.post('/api/investigation-sessions/:id/archive', (req, res) => {
   try {
     const session = investigationSessions.archive(req.params.id);
-    res.json({ ok: true, session, sessions: investigationSessions.list() });
+    res.json({ ok: true, session, ...investigationNavigationPayload() });
   } catch (error) {
     res.status(409).json({ ok: false, error: error.message });
   }
@@ -205,9 +301,12 @@ app.post('/api/investigation-sessions/:id/archive', (req, res) => {
 
 app.patch('/api/investigation-sessions/:id', (req, res) => {
   try {
-    const session = investigationSessions.rename(req.params.id, req.body?.name);
+    let session = investigationSessions.get(req.params.id);
+    if (!session) throw new Error(`investigation session not found: ${req.params.id}`);
+    if (req.body?.name !== undefined) session = investigationSessions.rename(req.params.id, req.body.name);
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'projectId')) session = investigationSessions.moveToProject(req.params.id, req.body.projectId);
     broadcastLobby('investigation-session-updated', { session });
-    res.json({ ok: true, session, activeId: activeInvestigationSession().id, sessions: investigationSessions.list() });
+    res.json({ ok: true, session, ...investigationNavigationPayload() });
   } catch (error) {
     res.status(400).json({ ok: false, error: error.message });
   }
@@ -222,6 +321,8 @@ app.delete('/api/investigation-sessions/:id', (req, res) => {
   try {
     const result = investigationSessions.delete(sessionId);
     sdkSessionRegistry.clearSession(sessionId);
+    try { fs.rmSync(path.join(attachmentsRoot(process.env), sessionId), { recursive: true, force: true }); }
+    catch (error) { console.warn('[attachments] could not remove deleted session images:', error.message); }
     for (const key of [...buffers.keys()]) if (key.startsWith(prefix)) buffers.delete(key);
     for (const [key, clients] of [...sseClients.entries()]) {
       if (!key.startsWith(prefix)) continue;
@@ -230,7 +331,7 @@ app.delete('/api/investigation-sessions/:id', (req, res) => {
       }
       sseClients.delete(key);
     }
-    if (pendingGladosKickoff?.sessionId === sessionId) pendingGladosKickoff = null;
+    pendingGladosKickoffs.delete(sessionId);
     for (let index = approvedPlanQueue.length - 1; index >= 0; index--) {
       if (approvedPlanQueue[index].sessionId !== sessionId) continue;
       approvedPlanQueueIds.delete(approvedPlanQueue[index].id);
@@ -238,21 +339,22 @@ app.delete('/api/investigation-sessions/:id', (req, res) => {
     }
     const activeId = result.replacement?.id || activeInvestigationSession().id;
     broadcastLobby('investigation-session-deleted', { sessionId, activeId });
-    res.json({ ok: true, ...result, activeId, sessions: investigationSessions.list() });
+    res.json({ ok: true, ...result, ...investigationNavigationPayload(), activeId });
   } catch (error) {
     res.status(409).json({ ok: false, error: error.message });
   }
 });
 
 app.post('/api/investigation-sessions/:id/activate', (req, res) => {
-  if (activeChatTurns.size || activeSubagentTurns.size) return res.status(409).json({ ok: false, error: 'stop active agent turns before switching investigations' });
   try {
-    const agentStatusReset = resetMutableAgentStatus(GLADOS_AGENT_WORKSPACES);
+    const hasBackgroundWork = activeChatTurns.size > 0 || activeSubagentTurns.size > 0;
+    const agentStatusReset = hasBackgroundWork
+      ? { reset: 0, errors: [], skipped: true, reason: 'background sessions are still running' }
+      : resetMutableAgentStatus(GLADOS_AGENT_WORKSPACES);
     if (agentStatusReset.errors.length) return res.status(500).json({ ok: false, error: `could not isolate mutable agent status: ${agentStatusReset.errors.join('; ')}` });
     const session = investigationSessions.activate(req.params.id);
-    pendingGladosKickoff = null;
     broadcastLobby('investigation-session-changed', { activeId: session.id, session });
-    res.json({ ok: true, session, sessions: investigationSessions.list(), agentStatusReset });
+    res.json({ ok: true, session, ...investigationNavigationPayload(), agentStatusReset });
   } catch (error) {
     res.status(404).json({ ok: false, error: error.message });
   }
@@ -263,8 +365,8 @@ const BUFFER_LIMIT = 500;
 const buffers = new Map(); // agentId -> array of events (newest last)
 const sseClients = new Map(); // agentId -> Set<{ res, includeStream }>
 const lobbyClients = new Set(); // /api/agents SSE subscribers
-const activeChatTurns = new Map(); // agentId -> { turnId, startedAt, messagePreview, message, abortController, interrupt }
-const activeSubagentTurns = new Map(); // session/tool-call -> { agentId, sessionId, startedAt, parentAgentId, parentTurnId, toolCallId, taskPrompt }
+const activeChatTurns = new Map(); // investigation session + agent -> active turn
+const activeSubagentTurns = new Map(); // investigation session + tool call -> active subagent turn
 const activeTaskToolIds = new Map(); // toolCallId -> agentId
 const resumeCoordinator = new ResumeCoordinator({
   filePath: path.join(GLADOS_RUNTIME_DIR, 'state', 'paused-agent-work.json'),
@@ -274,7 +376,7 @@ let resumeContinuationRunning = false;
 const approvedPlanQueue = [];
 const approvedPlanQueueIds = new Set();
 let approvedPlanQueueRunning = false;
-let pendingGladosKickoff = null;
+const pendingGladosKickoffs = new Map();
 const BLACKBOARD_STATE_TABLES = [
   'controller_events',
   'controller_jobs',
@@ -596,9 +698,15 @@ function finishChatTurn(sessionId, agentId, turnId) {
   }
 }
 
-function stopInvestigationRuntime(result, { reason = 'operator ended investigation' } = {}) {
-  for (const turn of [...activeChatTurns.values()]) stopChatTurn(turn.sessionId, turn.agentId, reason);
+function stopInvestigationRuntime(result, { reason = 'operator ended investigation', sessionId = activeInvestigationSession().id } = {}) {
+  let stoppedAgents = 0;
+  for (const turn of [...activeChatTurns.values()]) {
+    if (turn.sessionId !== sessionId) continue;
+    stopChatTurn(turn.sessionId, turn.agentId, reason);
+    stoppedAgents += 1;
+  }
   for (const turn of [...activeSubagentTurns.values()]) {
+    if (turn.investigationSessionId !== sessionId) continue;
     const task = activeTaskToolIds.get(turn.toolCallId);
     if (task) finishSubagentTurn(task.sessionId, task.agentId, { toolCallId: turn.toolCallId, reason });
   }
@@ -610,9 +718,11 @@ function stopInvestigationRuntime(result, { reason = 'operator ended investigati
       approvedPlanQueue.splice(index, 1);
     }
   }
-  resumeContinuationQueue.splice(0, resumeContinuationQueue.length);
-  pendingGladosKickoff = null;
-  return { stoppedAgents: true, queuedApprovalsRemoved: endedPlans.size };
+  for (let index = resumeContinuationQueue.length - 1; index >= 0; index -= 1) {
+    if (resumeContinuationQueue[index].investigationSessionId === sessionId) resumeContinuationQueue.splice(index, 1);
+  }
+  pendingGladosKickoffs.delete(sessionId);
+  return { stoppedAgents, queuedApprovalsRemoved: endedPlans.size };
 }
 
 function transcriptEvent(sessionId, agentId, kind, text, extra = {}) {
@@ -641,7 +751,7 @@ function recordUserTranscript(sessionId, agentId, text, extra = {}) {
   });
 }
 
-function admitUserTranscript(sessionId, agentId, text, clientId) {
+function admitUserTranscript(sessionId, agentId, text, clientId, extra = {}) {
   const safeClientId = String(clientId || '')
     .replace(/[^a-zA-Z0-9._:-]/g, '')
     .slice(0, 160) || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -654,6 +764,7 @@ function admitUserTranscript(sessionId, agentId, text, clientId) {
     clientId: safeClientId,
     runtime: 'agent-sdk',
     admitted: true,
+    ...extra,
   });
   pushBuffer(sessionId, agentId, ev);
   broadcastTranscript(sessionId, agentId, ev);
@@ -668,6 +779,8 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
   engagementId = null,
   controllerJobId = null,
   modelOverride = null,
+  attachments = [],
+  reasoningEffort = null,
 } = {}) {
   if (recordPrompt) recordUserTranscript(sessionId, agentId, message, {
     runtime: 'agent-sdk', engagementId, controllerJobId,
@@ -839,6 +952,9 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
       options: {
         cwd: sdkCwd, env: turnEnv, investigationSessionId: sessionId,
         engagementId, controllerJobId, model: modelOverride || undefined, modelOverride: modelOverride || undefined,
+        attachments,
+        effort: reasoningEffort || effortForAgent(agentId, process.env),
+        autoCompact: readChatPreferences(process.env).autoCompact,
         reviewKey: securityReviewArtifactRoot ? `${engagementId || sessionId}:${controllerJobId || securityReviewArtifactRoot}` : null,
         reviewConcurrencyLimit: loadPolicy().harness?.securityReviewMaxExecutions ?? 3,
         maxTurns: securityReviewMaxTurns,
@@ -884,12 +1000,14 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
   };
 }
 
-function queueAcceptedChatTurn({ sessionId, agentId, message, turnId, onSuccess = null, onFailure = null }) {
+function queueAcceptedChatTurn({ sessionId, agentId, message, turnId, attachments = [], reasoningEffort = null, onSuccess = null, onFailure = null }) {
   setImmediate(async () => {
     try {
       const result = await sendMessageToAgentRuntime(sessionId, agentId, message, {
         turnId,
         recordPrompt: false,
+        attachments,
+        reasoningEffort,
       });
       const resultError = harnessResultError(result);
       if (resultError) throw new Error(resultError);
@@ -921,10 +1039,14 @@ function queueResumeContinuation(snapshot) {
 }
 
 async function drainResumeContinuations() {
-  const sessionId = activeInvestigationSession().id;
-  if (resumeContinuationRunning || approvedPlanQueueRunning || activeChatTurns.has(runtimeKey(sessionId, 'glados'))) return;
-  const snapshot = resumeContinuationQueue.shift();
-  if (!snapshot) return;
+  if (resumeContinuationRunning || approvedPlanQueueRunning) return;
+  const runnableIndex = resumeContinuationQueue.findIndex(row => {
+    const rowSessionId = row.investigationSessionId || activeInvestigationSession().id;
+    return !activeChatTurns.has(runtimeKey(rowSessionId, 'glados'));
+  });
+  if (runnableIndex < 0) return;
+  const [snapshot] = resumeContinuationQueue.splice(runnableIndex, 1);
+  const sessionId = snapshot.investigationSessionId || activeInvestigationSession().id;
   resumeContinuationRunning = true;
   const prompt = resumeCoordinator.buildContinuationPrompt(snapshot);
   const turnId = startChatTurn(sessionId, 'glados', prompt);
@@ -955,7 +1077,7 @@ async function drainResumeContinuations() {
   }
 }
 
-function queueApprovedPlanExecution({ id, engagement_id: engagementId, decision, vectors } = {}) {
+function queueApprovedPlanExecution({ id, engagement_id: engagementId, decision, vectors, sessionId = activeInvestigationSession().id } = {}) {
   const planId = String(id || '').trim();
   if (!planId) return { executionQueued: false, error: 'plan id missing' };
   if (approvedPlanQueueIds.has(planId)) return { executionQueued: true, duplicate: true };
@@ -965,21 +1087,18 @@ function queueApprovedPlanExecution({ id, engagement_id: engagementId, decision,
     engagementId: String(engagementId || '').trim(),
     decision: String(decision || 'approve_all'),
     vectors: Array.isArray(vectors) ? vectors.map(String) : [],
-    sessionId: activeInvestigationSession().id,
+    sessionId,
   });
   setImmediate(drainApprovedPlanExecutions);
   return { executionQueued: true, queueDepth: approvedPlanQueue.length };
 }
 
 async function drainApprovedPlanExecutions() {
-  const activeSessionId = activeInvestigationSession().id;
-  if (approvedPlanQueueRunning || resumeContinuationRunning || activeChatTurns.has(runtimeKey(activeSessionId, 'glados'))) return;
-  const approval = approvedPlanQueue.shift();
-  if (!approval) return;
-  if (approval.sessionId !== activeSessionId) {
-    approvedPlanQueueIds.delete(approval.id);
-    return;
-  }
+  if (approvedPlanQueueRunning || resumeContinuationRunning) return;
+  const runnableIndex = approvedPlanQueue.findIndex(row => !activeChatTurns.has(runtimeKey(row.sessionId, 'glados')));
+  if (runnableIndex < 0) return;
+  const [approval] = approvedPlanQueue.splice(runnableIndex, 1);
+  const executionSessionId = approval.sessionId;
   approvedPlanQueueRunning = true;
   const prompt = [
     'AUTOMATED PLAN-APPROVAL HANDOFF',
@@ -994,25 +1113,25 @@ async function drainApprovedPlanExecutions() {
   ].join('\n');
   let turnId = null;
   try {
-    turnId = startChatTurn(activeSessionId, 'glados', prompt);
-    transcriptEvent(activeSessionId, 'glados', 'operator-event', `Plan ${approval.id} approved; automatically starting the next phase.`, {
+    turnId = startChatTurn(executionSessionId, 'glados', prompt);
+    transcriptEvent(executionSessionId, 'glados', 'operator-event', `Plan ${approval.id} approved; automatically starting the next phase.`, {
       planId: approval.id,
       engagementId: approval.engagementId || null,
       approvalDecision: approval.decision,
       approvedVectors: approval.vectors,
       automatedApprovalHandoff: true,
     });
-    const result = await sendMessageToAgentRuntime(activeSessionId, 'glados', prompt, { turnId });
+    const result = await sendMessageToAgentRuntime(executionSessionId, 'glados', prompt, { turnId });
     const error = harnessResultError(result);
     if (error) throw new Error(error);
   } catch (error) {
-    transcriptEvent(activeSessionId, 'glados', 'prompt-error', `Automatic execution of approved plan ${approval.id} failed: ${error.message}`, {
+    transcriptEvent(executionSessionId, 'glados', 'prompt-error', `Automatic execution of approved plan ${approval.id} failed: ${error.message}`, {
       planId: approval.id,
       automatedApprovalHandoff: true,
       isError: true,
     });
   } finally {
-    if (turnId) finishChatTurn(activeSessionId, 'glados', turnId);
+    if (turnId) finishChatTurn(executionSessionId, 'glados', turnId);
     approvedPlanQueueIds.delete(approval.id);
     approvedPlanQueueRunning = false;
     if (approvedPlanQueue.length) setImmediate(drainApprovedPlanExecutions);
@@ -1071,7 +1190,7 @@ function kickoffApprovalPrompt(target) {
 }
 
 function createPendingGladosKickoff(target, originalMessage, extra = {}) {
-  const sessionId = activeInvestigationSession().id;
+  const sessionId = String(extra.sessionId || activeInvestigationSession().id);
   let goalId = extra.goalId || null;
   if (!goalId) {
     try {
@@ -1081,13 +1200,14 @@ function createPendingGladosKickoff(target, originalMessage, extra = {}) {
       console.warn('[controller] could not record web goal:', e.message);
     }
   }
-  pendingGladosKickoff = {
+  const pendingGladosKickoff = {
     sessionId,
     target,
     originalMessage,
     goalId,
     createdAt: Date.now(),
   };
+  pendingGladosKickoffs.set(sessionId, pendingGladosKickoff);
   const ev = transcriptEvent(sessionId, 'glados', 'assistant-text', kickoffApprovalPrompt(target), { gated: true });
   return {
     ok: true,
@@ -1239,7 +1359,7 @@ function clearAllRuntimeSessions(reason = 'runtime restart') {
   approvedPlanQueueIds.clear();
   approvedPlanQueueRunning = false;
   buffers.clear();
-  pendingGladosKickoff = null;
+  pendingGladosKickoffs.clear();
   for (const agentId of agentIds) {
     broadcastLobby('session-reset', { investigationSessionId: activeInvestigationSession().id, agentId, runtime: 'agent-sdk', hadSession: true, reason });
   }
@@ -1448,6 +1568,85 @@ app.get('/api/agents/:id/transcript', (req, res) => {
   req.on('close', () => { set.delete(client); if (!set.size) sseClients.delete(key); });
 });
 
+function chatComposerState(sessionId, agentId) {
+  const agent = agentDetails.listSettingsAgents().find(row => row.id === agentId);
+  if (!agent) return null;
+  const preferences = readChatPreferences(process.env);
+  const { file: _fullAccessFile, ...fullAccess } = readFullAccessState(process.env);
+  return {
+    agentId,
+    model: agent.model || null,
+    effort: effortForAgent(agentId, process.env),
+    effortLevels: [...EFFORT_LEVELS],
+    autoCompact: preferences.autoCompact,
+    fullAccess: agentId === 'glados' ? {
+      enabled: fullAccess.enabled,
+      available: process.platform === 'darwin' && process.env.GLADOS_DESKTOP === '1',
+    } : null,
+  };
+}
+
+app.get('/api/chat/:agent/composer', (req, res) => {
+  const session = requireSession(req, res);
+  if (!session) return;
+  const state = chatComposerState(session.id, String(req.params.agent || ''));
+  if (!state) return res.status(404).json({ ok: false, error: 'agent not found' });
+  res.json({ ok: true, ...state });
+});
+
+app.get('/api/settings/operator-profile', (_req, res) => {
+  const preferences = readChatPreferences(process.env);
+  res.json({
+    ok: true,
+    name: preferences.operatorName,
+    initials: operatorInitials(preferences.operatorName),
+  });
+});
+
+app.patch('/api/settings/operator-profile', (req, res) => {
+  try {
+    const preferences = writeChatPreferences({ operatorName: req.body?.name }, process.env);
+    const profile = { name: preferences.operatorName, initials: operatorInitials(preferences.operatorName) };
+    broadcastLobby('operator-profile-changed', profile);
+    res.json({ ok: true, ...profile });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message });
+  }
+});
+
+app.patch('/api/chat/:agent/composer', (req, res) => {
+  const session = requireSession(req, res, { writable: true });
+  if (!session) return;
+  const agentId = String(req.params.agent || '');
+  if (!agentDetails.listSettingsAgents().some(row => row.id === agentId)) {
+    return res.status(404).json({ ok: false, error: 'agent not found' });
+  }
+  try {
+    writeChatPreferences({ agentId, effort: req.body?.effort }, process.env);
+    const state = chatComposerState(session.id, agentId);
+    broadcastLobby('agent-reasoning-changed', { agentId, effort: state.effort });
+    res.json({ ok: true, ...state });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message });
+  }
+});
+
+app.get('/api/chat/attachments/:id', (req, res) => {
+  const session = requireSession(req, res);
+  if (!session) return;
+  const file = attachmentPath(session.id, req.params.id, process.env);
+  if (!file || !fs.existsSync(file)) return res.status(404).end();
+  const extension = path.extname(file).toLowerCase();
+  const mimeType = Object.entries(MIME_EXTENSIONS).find(([, ext]) => ext === extension)?.[0] || 'application/octet-stream';
+  res.set({
+    'Content-Type': mimeType,
+    'Cache-Control': 'private, max-age=31536000, immutable',
+    'Content-Security-Policy': "default-src 'none'; sandbox",
+    'X-Content-Type-Options': 'nosniff',
+  });
+  fs.createReadStream(file).pipe(res);
+});
+
 // GLaDOS chat — POST message; reply arrives via the normal transcript stream.
 app.post('/api/chat/glados', async (req, res) => {
   const session = requireSession(req, res, { writable: true });
@@ -1462,11 +1661,15 @@ app.post('/api/chat/glados', async (req, res) => {
   }
   const conflict = activeTurnConflict(activeChatTurns, runtimeKey(session.id, 'glados'));
   if (conflict) return res.status(409).json(conflict);
+  let attachments = [];
+  try { attachments = storeChatAttachments(session.id, req.body?.attachments, process.env); }
+  catch (error) { return res.status(400).json({ ok: false, error: error.message }); }
+  const attachmentMetadata = attachments.map(row => publicAttachment(row, session.id));
   let admittedEvent;
   try {
     // Persist before starting the SDK. A renderer/app restart can no longer
     // erase a message that was sitting in an hours-long HTTP request.
-    admittedEvent = admitUserTranscript(session.id, 'glados', message, req.body?.client_id);
+    admittedEvent = admitUserTranscript(session.id, 'glados', message, req.body?.client_id, { attachments: attachmentMetadata });
   } catch (error) {
     return res.status(503).json({ ok: false, error: `message was not admitted: ${error.message}` });
   }
@@ -1474,22 +1677,23 @@ app.post('/api/chat/glados', async (req, res) => {
   // These are dashboard-owned facts, not assessment work. Answer them without
   // starting the large coordinator prompt or booting MCP servers.
   const normalizedMessage = message.trim().toLowerCase();
-  if (/\bwhat\s+(?:model|llm)\b|\bwhich\s+model\b|\bmodel\s+(?:are|r)\b/.test(normalizedMessage)) {
+  if (!attachments.length && /\bwhat\s+(?:model|llm)\b|\bwhich\s+model\b|\bmodel\s+(?:are|r)\b/.test(normalizedMessage)) {
     const glados = loadAgentRegistry().find(agent => agent.id === 'glados');
     const text = `I'm running ${glados?.model || 'the configured GLaDOS model'} for this session.`;
     const ev = transcriptEvent(session.id, 'glados', 'assistant-text', text, { fastPath: 'model' });
     return res.json({ ok: true, fastPath: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
   }
-  if (/\b(?:what\s+)?version\b.*\bglados\b|\bglados\b.*\bversion\b/.test(normalizedMessage)) {
+  if (!attachments.length && /\b(?:what\s+)?version\b.*\bglados\b|\bglados\b.*\bversion\b/.test(normalizedMessage)) {
     const text = `This is GLaDOS ${getVersionInfo().version}.`;
     const ev = transcriptEvent(session.id, 'glados', 'assistant-text', text, { fastPath: 'version' });
     return res.json({ ok: true, fastPath: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
   }
 
-  if (pendingGladosKickoff?.sessionId === session.id) {
+  const pendingGladosKickoff = pendingGladosKickoffs.get(session.id) || null;
+  if (pendingGladosKickoff) {
     if (isKickoffCancel(message)) {
       const cancelled = pendingGladosKickoff;
-      pendingGladosKickoff = null;
+      pendingGladosKickoffs.delete(session.id);
       if (cancelled.goalId) controller.updateGoalStatus(cancelled.goalId, 'cancelled');
       const ev = transcriptEvent(session.id, 'glados', 'assistant-text', `Cancelled the pending investigation kickoff for \`${cancelled.target}\`. No resources were checked and no agents were dispatched.`);
       return res.json({ ok: true, gated: true, cancelled: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
@@ -1505,7 +1709,7 @@ app.post('/api/chat/glados', async (req, res) => {
     }
 
     const approved = pendingGladosKickoff;
-    pendingGladosKickoff = null;
+    pendingGladosKickoffs.delete(session.id);
     if (approved.goalId) controller.updateGoalStatus(approved.goalId, 'running');
     const approvedMessage = buildApprovedKickoffMessage(approved, message);
     const turnId = startChatTurn(session.id, 'glados', approvedMessage);
@@ -1526,12 +1730,12 @@ app.post('/api/chat/glados', async (req, res) => {
     return;
   }
 
-  if (isFreshSessionQuestion(message)) {
+  if (!attachments.length && isFreshSessionQuestion(message)) {
     const counts = blackboardRowCounts();
     const rows = counts ? Object.values(counts).reduce((sum, n) => sum + Number(n || 0), 0) : null;
     const activeAgents = (() => {
       try {
-        return loadAgentRegistry().filter(a => currentSessionForAgent(a.id)?.live).length;
+        return loadAgentRegistry().filter(a => currentSessionForAgent(a.id, session.id)?.live).length;
       } catch { return 0; }
     })();
     const stateText = rows === 0 && activeAgents === 0
@@ -1547,7 +1751,14 @@ app.post('/api/chat/glados', async (req, res) => {
 
   const turnId = startChatTurn(session.id, 'glados', message);
   res.status(202).json({ ok: true, accepted: true, turnId, eventId: admittedEvent.sseId });
-  queueAcceptedChatTurn({ sessionId: session.id, agentId: 'glados', message, turnId });
+  queueAcceptedChatTurn({
+    sessionId: session.id,
+    agentId: 'glados',
+    message,
+    turnId,
+    attachments,
+    reasoningEffort: effortForAgent('glados', process.env),
+  });
 });
 
 // Direct specialist chat is the authoritative operator-to-worker handoff for
@@ -1567,16 +1778,27 @@ app.post('/api/chat/:agent', async (req, res) => {
   if (conflict) return res.status(409).json(conflict);
   const subagentConflict = activeSubagentConflict(session.id, agentId);
   if (subagentConflict) return res.status(409).json(subagentConflict);
+  let attachments = [];
+  try { attachments = storeChatAttachments(session.id, req.body?.attachments, process.env); }
+  catch (error) { return res.status(400).json({ ok: false, error: error.message }); }
+  const attachmentMetadata = attachments.map(row => publicAttachment(row, session.id));
   let admittedEvent;
   try {
-    admittedEvent = admitUserTranscript(session.id, agentId, message, req.body?.client_id);
+    admittedEvent = admitUserTranscript(session.id, agentId, message, req.body?.client_id, { attachments: attachmentMetadata });
   } catch (error) {
     return res.status(503).json({ ok: false, error: `message was not admitted: ${error.message}` });
   }
 
   const turnId = startChatTurn(session.id, agentId, message);
   res.status(202).json({ ok: true, accepted: true, direct: true, agentId, turnId, eventId: admittedEvent.sseId });
-  queueAcceptedChatTurn({ sessionId: session.id, agentId, message, turnId });
+  queueAcceptedChatTurn({
+    sessionId: session.id,
+    agentId,
+    message,
+    turnId,
+    attachments,
+    reasoningEffort: effortForAgent(agentId, process.env),
+  });
 });
 
 app.post('/api/chat/:agent/stop', (req, res) => {
@@ -1602,16 +1824,16 @@ app.get('/api/chat/status/:agent', (req, res) => {
   });
 });
 
-async function haltAgent(agentId, reason = 'dashboard halt', initiator = 'dashboard') {
+async function haltAgent(agentId, reason = 'dashboard halt', initiator = 'dashboard', sessionId = activeInvestigationSession().id) {
   if (!assessmentAgentIds().includes(agentId)) throw new Error(`unknown GLaDOS agent: ${agentId}`);
   const result = await watchdogHalt.agentHalt(agentId, reason, { initiator });
   let interruptedParent = null;
-  const sessionId = activeInvestigationSession().id;
   const direct = activeChatTurns.get(runtimeKey(sessionId, agentId));
   const subagent = [...activeSubagentTurns.values()].find(row => row.investigationSessionId === sessionId && row.agentId === agentId);
   if (subagent) {
     const parentTurn = activeChatTurns.get(runtimeKey(sessionId, subagent.parentAgentId));
     resumeCoordinator.capture(agentId, {
+      investigationSessionId: sessionId,
       parentAgentId: subagent.parentAgentId,
       taskPrompt: subagent.taskPrompt,
       taskDescription: subagent.messagePreview,
@@ -1637,7 +1859,7 @@ async function haltAgent(agentId, reason = 'dashboard halt', initiator = 'dashbo
   return { ...result, interruptedParent };
 }
 
-async function resumeAgent(agentId, initiator = 'dashboard') {
+async function resumeAgent(agentId, initiator = 'dashboard', sessionId = activeInvestigationSession().id) {
   if (!assessmentAgentIds().includes(agentId)) throw new Error(`unknown GLaDOS agent: ${agentId}`);
   const result = await watchdogHalt.agentResume(agentId, { initiator });
   const pausedWork = resumeCoordinator.take(agentId);
@@ -1645,7 +1867,6 @@ async function resumeAgent(agentId, initiator = 'dashboard') {
   const notice = pausedWork
     ? `Operator resumed ${agentId}. The halt gate is clear and GLaDOS will re-dispatch the saved task context to continue its work.`
     : `Operator resumed ${agentId}. New turns and tool calls are permitted by the per-agent halt gate.`;
-  const sessionId = activeInvestigationSession().id;
   transcriptEvent(sessionId, agentId, 'operator-event', notice, { halted: false, initiator });
   if (agentId !== 'glados') transcriptEvent(sessionId, 'glados', 'operator-event', notice, { haltedAgentId: agentId, halted: false, initiator });
   broadcastLobby('resume', { investigationSessionId: sessionId, agentId, haltActive: false });
@@ -1680,12 +1901,30 @@ function configuredReplayProxyUrl() {
   return '';
 }
 
-function activeAgentStatus() {
+function activeAgentStatus(sessionId = null) {
   try {
+    if (!sessionId) {
+      const running = new Map();
+      for (const turn of activeChatTurns.values()) {
+        running.set(runtimeKey(turn.sessionId, turn.agentId), {
+          agentId: turn.agentId,
+          sessionId: turn.turnId,
+          investigationSessionId: turn.sessionId,
+        });
+      }
+      for (const turn of activeSubagentTurns.values()) {
+        running.set(runtimeKey(turn.investigationSessionId, turn.agentId), {
+          agentId: turn.agentId,
+          sessionId: turn.sessionId,
+          investigationSessionId: turn.investigationSessionId,
+        });
+      }
+      return [...running.values()];
+    }
     return loadAgentRegistry()
-      .map(a => ({ agentId: a.id, session: currentSessionForAgent(a.id) }))
+      .map(a => ({ agentId: a.id, session: currentSessionForAgent(a.id, sessionId) }))
       .filter(a => a.session && a.session.live)
-      .map(a => ({ agentId: a.agentId, sessionId: a.session.sessionId }));
+      .map(a => ({ agentId: a.agentId, sessionId: a.session.sessionId, investigationSessionId: sessionId }));
   } catch {
     return [];
   }
@@ -1705,6 +1944,7 @@ function overviewPayload(sessionId = activeInvestigationSession().id) {
     };
   });
   const proxy = currentProxyHealth();
+  const { file: _fullAccessFile, ...fullAccessState } = readFullAccessState(process.env);
   let db;
   let engagement = null;
   let goal = null;
@@ -1838,6 +2078,11 @@ function overviewPayload(sessionId = activeInvestigationSession().id) {
       error: proxy.error || null,
       processStatus: proxy.processStatus,
     },
+    fullAccess: {
+      available: process.platform === 'darwin' && process.env.GLADOS_DESKTOP === '1',
+      enabled: fullAccessState.enabled === true,
+      updatedAt: fullAccessState.updatedAt || null,
+    },
   };
 }
 
@@ -1864,13 +2109,14 @@ function planSummary(sessionId = activeInvestigationSession().id) {
 }
 
 function controllerStatusPayload(sessionId = activeInvestigationSession().id) {
+  const pendingGladosKickoff = pendingGladosKickoffs.get(sessionId) || null;
   return controller.status({
     pendingKickoff: pendingGladosKickoff ? {
       target: pendingGladosKickoff.target,
       goalId: pendingGladosKickoff.goalId || null,
       createdAt: pendingGladosKickoff.createdAt,
     } : null,
-    activeAgents: activeAgentStatus(),
+    activeAgents: activeAgentStatus(sessionId),
     targetHealth: watchdogHealth.listHealth(),
     plans: planSummary(sessionId),
     sessionId,
@@ -1902,10 +2148,10 @@ async function runSlash(raw, sessionId = activeInvestigationSession().id) {
     emit(agents.map(a => `  ${a.active ? '●' : '○'} ${a.id.padEnd(18)} ${a.model || '?'}`).join('\n'));
   } else if (cmd === '/halt') {
     if (!arg) emit('usage: /halt <agent>');
-    else emit(JSON.stringify(await haltAgent(arg, 'slash command', 'slash'), null, 2));
+    else emit(JSON.stringify(await haltAgent(arg, 'slash command', 'slash', sessionId), null, 2));
   } else if (cmd === '/resume') {
     if (!arg) emit('usage: /resume <agent>');
-    else emit(JSON.stringify(await resumeAgent(arg, 'slash'), null, 2));
+    else emit(JSON.stringify(await resumeAgent(arg, 'slash', sessionId), null, 2));
   } else if (cmd === '/probe') {
     if (!arg) emit('usage: /probe <url>');
     else emit(JSON.stringify(await probeTarget(arg), null, 2));
@@ -1919,17 +2165,27 @@ async function runSlash(raw, sessionId = activeInvestigationSession().id) {
     } else {
       const target = normalizeTarget(arg);
       const goal = controller.createWebGoal(target, { source: cmd });
-      const kickoff = createPendingGladosKickoff(target, raw, { goalId: goal.id, source: 'slash' });
+      const kickoff = createPendingGladosKickoff(target, raw, { goalId: goal.id, source: 'slash', sessionId });
       if (kickoff.event) events.push(kickoff.event);
     }
   } else if (cmd === '/security-review') {
     const review = slash.parseSecurityReviewArg(arg);
     if (!review.ok) {
-      emit(`${review.error}\nusage: /security-review [--blind|--regression|--informed] [--time-limit 60m] [--single-model alias] <url|domain|local-path>`);
+      emit(`${review.error}\nusage: /security-review [--full] [--blind|--regression|--informed] [--time-limit 60m] [--single-model alias] <local-path>`);
     } else if (review.isLocalPath) {
+      const campaignMode = review.campaign || (() => {
+        try {
+          const root = path.resolve(review.target);
+          if (fs.existsSync(path.join(root, '.git'))) return false;
+          return fs.readdirSync(root, { withFileTypes: true })
+            .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+            .filter(entry => fs.existsSync(path.join(root, entry.name, '.git'))).length >= 2;
+        } catch { return false; }
+      })();
       const goal = controller.createSecurityReviewGoal(path.resolve(review.target), {
         source: cmd, target_kind: 'local_path', context_mode: review.mode,
         max_duration_minutes: review.maxDurationMinutes, single_model: review.singleModel,
+        review_profile: review.reviewProfile, campaign: campaignMode,
       });
       const job = controller.enqueueSecurityReviewPath(review.target, {
         goalId: goal.id,
@@ -1941,8 +2197,11 @@ async function runSlash(raw, sessionId = activeInvestigationSession().id) {
         allowedModels: review.singleModel ? [review.singleModel] : [],
         requireModelDiversity: !review.singleModel,
         modelDiversityWaiver: review.singleModel ? `Operator approved a single-model review using ${review.singleModel} in this slash command.` : null,
+        reviewProfile: review.reviewProfile,
+        campaignMode,
       });
-      emit(`Queued deep source-code security review for \`${job.target}\`.\nJob: ${job.id}\nContext mode: ${review.mode}.\nTime ceiling: ${review.maxDurationMinutes ? `${review.maxDurationMinutes} minutes` : 'none; completion is saturation and gate driven'}.\nConcurrency: up to ${loadPolicy().harness?.securityReviewDiscoveryConcurrency ?? 3} blind workers and ${loadPolicy().harness?.securityReviewSpecialistConcurrency ?? 3} specialists per batch.\nModel policy: ${review.singleModel ? `${review.singleModel} only (operator-approved diversity waiver)` : 'configured review models with diversity required'}.\nWorkflow: threat model, durable repeated discovery workers, centralized deduplication, six specialist tracks, candidate validation, attack-path analysis, omission-focused validation, and sealed hard completion gates${review.mode === 'blind' ? '; prior-report lookup and regression are prohibited for this run' : '; historical regression follows the selected context policy'}.`);
+      const queuedRun = JSON.parse(fs.readFileSync(path.join(path.dirname(path.dirname(controller.db.name)), 'investigations', job.engagement_id, 'security-review', 'run.json'), 'utf8'));
+      emit(`Queued ${campaignMode ? `${queuedRun.campaign.repositoryCount}-repository expedited security-review campaign` : `${review.reviewProfile} source-code security review`} for \`${job.target}\`.\nJob: ${job.id}\nContext mode: ${review.mode}.\nProfile: ${review.reviewProfile}${campaignMode ? ' portfolio breadth first, then risk-ranked depth' : ''}.\nTime ceiling: ${review.maxDurationMinutes ? `${review.maxDurationMinutes} minutes` : 'none; completion is saturation and gate driven'}.\nDiscovery policy: at least ${queuedRun.deepScan.minDiscoveryRuns} successful passes, stop only after ${queuedRun.deepScan.stopAfterNoNew} consecutive no-new passes, ${queuedRun.deepScan.maxDiscoveryRuns == null ? 'no fixed attempt ceiling' : `maximum ${queuedRun.deepScan.maxDiscoveryRuns}`}; up to ${queuedRun.deepScan.discoveryConcurrency} workers per batch.\nModel policy: ${review.singleModel ? `${review.singleModel} only (operator-approved diversity waiver)` : 'configured review models with diversity required'}.\nQuality gates: deterministic inventory, ${campaignMode ? 'one broad pass per campaign repository, ' : ''}risk-ranked specialist review, centralized deduplication, candidate closure, independent High/Critical validation, omission-focused validation, and sealed evidence artifacts${review.mode === 'blind' ? '; prior-report lookup and regression are prohibited for this run' : '; historical regression follows the selected context policy'}.`);
     } else if (review.isUrlOrDomain) {
       const target = normalizeTarget(review.target);
       const goal = controller.createGoal({
@@ -1951,10 +2210,10 @@ async function runSlash(raw, sessionId = activeInvestigationSession().id) {
         status: 'pending_approval',
         metadata: { source: cmd, target_kind: 'url_or_domain', context_mode: review.mode },
       });
-      const kickoff = createPendingGladosKickoff(target, raw, { goalId: goal.id, source: 'slash-security-review' });
+      const kickoff = createPendingGladosKickoff(target, raw, { goalId: goal.id, source: 'slash-security-review', sessionId });
       if (kickoff.event) events.push(kickoff.event);
     } else {
-      emit('usage: /security-review [--blind|--regression|--informed] [--time-limit 60m] [--single-model alias] <url|domain|local-path>');
+      emit('usage: /security-review [--blind|--regression|--informed] [--expedited [--campaign]] [--time-limit 60m] [--single-model alias] <url|domain|local-path>');
     }
   } else if (cmd === '/clear') {
     return { ok: true, events, action: { type: 'clear-local-transcript' } };
@@ -1986,7 +2245,8 @@ app.get('/api/overview', async (req, res) => {
   const session = requireSession(req, res);
   if (!session) return;
   try {
-    const llmUsage = await getLiteLlmUsage({ force: req.query.usage === 'refresh' });
+    const usagePeriod = req.query.usage_period === 'daily' ? 'daily' : 'weekly';
+    const llmUsage = await getLiteLlmUsage({ force: req.query.usage === 'refresh', days: usagePeriod === 'daily' ? 1 : 7 });
     res.set('Cache-Control', 'no-store');
     res.json({ ok: true, session, ...overviewPayload(session.id), llmUsage });
   }
@@ -2015,13 +2275,17 @@ app.post('/api/controller/jobs/:id/cancel', (req, res) => {
 
 // --- Halt controls (wired to watchdog lib) ---
 app.post('/api/halt/:id', async (req, res) => {
+  const session = requireSession(req, res);
+  if (!session) return;
   try {
-    res.json(await haltAgent(req.params.id, req.body?.reason || 'dashboard halt', 'dashboard'));
+    res.json(await haltAgent(req.params.id, req.body?.reason || 'dashboard halt', 'dashboard', session.id));
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/resume/:id', async (req, res) => {
+  const session = requireSession(req, res);
+  if (!session) return;
   try {
-    res.json(await resumeAgent(req.params.id, 'dashboard'));
+    res.json(await resumeAgent(req.params.id, 'dashboard', session.id));
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -2230,7 +2494,7 @@ app.post('/api/agents/:id/reset-session', (req, res) => {
     let memories = null;
     let looseArtifacts = null;
     if (agentId === 'glados') {
-      pendingGladosKickoff = null;
+      pendingGladosKickoffs.delete(session.id);
       blackboard = { ok: true, preserved: true };
       memories = { ok: true, preserved: true };
       looseArtifacts = { ok: true, preserved: true };
@@ -2364,7 +2628,7 @@ app.post('/api/engagements/:id/end', (req, res) => {
       operator,
       reason,
     });
-    stopInvestigationRuntime(result, { reason });
+    stopInvestigationRuntime(result, { reason, sessionId: session.id });
     broadcastLobby('engagement-ended', {
       engagement_id: result.engagement_id,
       status: result.engagement_status,
