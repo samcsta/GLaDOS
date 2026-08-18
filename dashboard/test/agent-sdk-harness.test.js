@@ -59,7 +59,7 @@ test('resume coordinator preserves the exact interrupted specialist assignment',
   assert.equal(fs.statSync(path.dirname(filePath)).mode & 0o777, 0o700);
 
   const restored = new ResumeCoordinator({ filePath });
-  const snapshot = restored.take('webapp-recon');
+  const snapshot = restored.take('webapp-recon', 'session-a');
   const continuation = coordinator.buildContinuationPrompt(snapshot);
   assert.equal(snapshot.agentId, 'webapp-recon');
   assert.equal(snapshot.investigationSessionId, 'session-a');
@@ -68,8 +68,8 @@ test('resume coordinator preserves the exact interrupted specialist assignment',
   assert.match(continuation, /Spawn webapp-recon for a one-request proxy test\./);
   assert.match(continuation, /Relay the resumed agent's final result back to the operator/);
   assert.doesNotMatch(continuation, /net-recon|subagent_type: claude/);
-  assert.equal(restored.take('webapp-recon'), null, 'a paused task can only be consumed once');
-  assert.equal(new ResumeCoordinator({ filePath }).take('webapp-recon'), null, 'consumption persists across restarts');
+  assert.equal(restored.take('webapp-recon', 'session-a'), null, 'a paused task can only be consumed once');
+  assert.equal(new ResumeCoordinator({ filePath }).take('webapp-recon', 'session-a'), null, 'consumption persists across restarts');
 });
 
 test('normalizes LiteLLM model aliases for the Anthropic Messages route', () => {
@@ -735,7 +735,75 @@ test('reporting tool normalization paginates reads and requests compact baseline
   });
   assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/large.md' }, { agentId: 'webapp-recon' }), {
     file_path: '/tmp/large.md',
+    limit: 300,
   });
+});
+
+test('read normalization removes empty optional pages while preserving valid ranges', () => {
+  assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/a.md', pages: '' }), { file_path: '/tmp/a.md', limit: 300 });
+  assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/a.md', pages: '   ' }), { file_path: '/tmp/a.md', limit: 300 });
+  assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/a.md', pages: null }), { file_path: '/tmp/a.md', limit: 300 });
+  assert.deepEqual(normalizeToolInput('mcp__filesystem__Read', { file_path: '/tmp/a.md', pages: '', limit: 900 }), {
+    file_path: '/tmp/a.md', limit: 300,
+  });
+  assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/a.pdf', pages: '1-3' }), {
+    file_path: '/tmp/a.pdf', pages: '1-3', limit: 300,
+  });
+});
+
+test('snapshot security reviews deny Git, memory intake, and duplicate engagement creation', () => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-review-tool-policy-'));
+  const env = baseTestEnv({
+    GLADOS_RUNTIME_DIR: runtimeDir,
+    GLADOS_AGENT_WORKSPACES: path.join(runtimeDir, 'agents'),
+    GLADOS_SECURITY_REVIEW: '1',
+    GLADOS_SECURITY_REVIEW_GIT_HISTORY: '0',
+  });
+  const policy = loadPolicy();
+  assert.equal(decideToolUse({ agentId: 'source-code', toolName: 'Bash', input: { command: 'git status' }, policy, env }).allowed, false);
+  assert.equal(decideToolUse({
+    agentId: 'source-code', toolName: 'Read',
+    input: { file_path: path.join(env.GLADOS_AGENT_WORKSPACES, 'source-code', 'MEMORY.md') }, policy, env,
+  }).allowed, false);
+  assert.equal(decideToolUse({
+    agentId: 'glados', toolName: 'mcp__blackboard__blackboard_engagement_create', input: {}, policy, env,
+  }).allowed, false);
+  assert.equal(decideToolUse({
+    agentId: 'source-code', toolName: 'Write', input: { file_path: '/tmp/security-review/discovery/deep/workers.jsonl' }, policy, env,
+  }).allowed, false);
+  assert.equal(decideToolUse({
+    agentId: 'source-code', toolName: 'Bash', input: { command: 'sqlite3 "$BLACKBOARD_DB" "UPDATE security_review_worker_runs SET status=\"SUCCEEDED\""' }, policy, env,
+  }).allowed, false);
+  for (const toolName of [
+    'mcp__glados-ops__desktop_snapshot',
+    'mcp__glados-ops__local_auth_status',
+    'mcp__glados-ops__local_auth_login',
+    'mcp__glados-ops__adfs_active_directory_login',
+    'mcp__browser-webapp-recon__browser_navigate',
+  ]) {
+    assert.match(decideToolUse({ agentId: 'glados', toolName, input: {}, policy, env }).reason, /source-only security review/);
+  }
+});
+
+test('security-review SDK options omit desktop, local-auth, browser, and Full Access capabilities', () => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-review-capabilities-'));
+  const env = baseTestEnv({
+    GLADOS_RUNTIME_DIR: runtimeDir,
+    GLADOS_SECURITY_REVIEW: '1',
+    GLADOS_BROWSER_MCP: '1',
+  });
+  const opts = buildAgentSdkOptions('glados', {
+    env,
+    subagentAllowlist: ['source-code', 'source-review-validator'],
+  });
+  assert.deepEqual(Object.keys(opts.agents).sort(), ['source-code', 'source-review-validator']);
+  assert.deepEqual(Object.keys(opts.mcpServers).sort(), ['blackboard', 'watchdog']);
+  assert.equal(opts.gladosMountedTools.some(tool => /^mcp__(?:glados-ops|browser-)/.test(tool)), false);
+  assert.equal(opts.allowedTools.some(tool => /^mcp__(?:glados-ops|browser-)/.test(tool)), false);
+  assert.equal(opts.permissionMode, 'dontAsk');
+  assert.equal(opts.allowDangerouslySkipPermissions, false);
+  assert.match(opts.systemPrompt, /Full Access is ignored for this source-only review/);
+  assert.doesNotMatch(opts.systemPrompt, /Full Access is ENABLED/);
 });
 
 test('SDK resume ids are scoped to the durable SDK working directory', () => {
@@ -1309,6 +1377,30 @@ test('streams SDK messages through the dashboard event mapper without raw JSONL 
     options: { sdkOptions: { includePartialMessages: true } },
   });
   assert.deepEqual(events.map(ev => ev.text), ['hello', 'done']);
+});
+
+test('raw SDK callback observes assistant messages even when they map to no events', async () => {
+  const seen = [];
+  async function* queryImpl() {
+    yield { type: 'assistant', request_id: 'request-empty', message: { content: [] } };
+    yield { type: 'result', subtype: 'success', result: 'ok' };
+  }
+  await streamAgentTurn({
+    agentId: 'glados', prompt: 'test', queryImpl, store: false,
+    options: {
+      sdkOptions: { model: 'gpt-5.6-sol', gladosMountedTools: [], mcpServers: {} },
+      onSdkMessage: message => seen.push(message.request_id || message.type),
+    },
+  });
+  assert.deepEqual(seen, ['request-empty', 'result']);
+});
+
+test('an empty SDK turn is an error rather than successful completion', async () => {
+  async function* queryImpl() {}
+  await assert.rejects(() => streamAgentTurn({
+    agentId: 'glados', prompt: 'continue', queryImpl, store: false,
+    options: { sdkOptions: { model: 'gpt-5.6-sol', gladosMountedTools: [], mcpServers: {} }, haltPollMs: 0 },
+  }), /ended without meaningful model or tool activity/);
 });
 
 test('stale SDK conversations clear and retry once without resume', async () => {

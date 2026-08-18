@@ -5,18 +5,17 @@ const Database = require('better-sqlite3');
 const {
   securityReviewArtifactRoot,
   securityReviewCoordinatorPrompt,
-  sourceReviewGateStatus,
 } = require('./security-review/workflow');
-const { generateSecurityReviewInventory } = require('./security-review/inventory');
+const { generateSecurityReviewInventory, verifySecurityReviewInventory } = require('./security-review/inventory');
 const {
   buildSecurityReviewCampaign,
   expeditedDeepScanConfig,
 } = require('./security-review/campaign');
-const { IDLE_AGENT_STATUS } = require('./runtime-reset');
 const {
   initializeDeepScanRun,
   markDeepScanCapped,
 } = require('./security-review/deep-scan');
+const { finalizeSecurityReview, invalidateSecurityReviewSeal } = require('./security-review/finalize');
 
 const RUNNING_STATUSES = ['running', 'cancelling'];
 // Security-review coordinator turns are finite, but the durable workflow is
@@ -25,16 +24,47 @@ const RUNNING_STATUSES = ['running', 'cancelling'];
 const SECURITY_REVIEW_MAX_CONTINUATIONS = null;
 
 function isRecoverableCoordinatorInterruption(error) {
-  return /maximum number of turns|reached max(?:imum)? turns|dashboard restarted before worker-owned job finished/i
+  return /maximum number of turns|reached max(?:imum)? turns|dashboard restarted before worker-owned job finished|security review incomplete|Agent SDK ended without meaningful model or tool activity/i
     .test(String(error || ''));
+}
+
+function activeSecurityReviewRun(artifactRoot) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(artifactRoot, 'run.json'), 'utf8'))?.deepScan?.terminalState === 'RUNNING';
+  } catch { return false; }
+}
+
+function securityReviewCheckpoint(db, engagementId, artifactRoot) {
+  const files = [
+    'run.json',
+    'discovery/deep/manifest.json',
+    'discovery/deep/workers.jsonl',
+    'discovery/deep/dedupe.json',
+    'validation/candidate-closure.jsonl',
+    'validation/challenge-matrix.json',
+  ].map(relative => {
+    try {
+      const bytes = fs.readFileSync(path.join(artifactRoot, relative));
+      return [relative, crypto.createHash('sha256').update(bytes).digest('hex')];
+    } catch { return [relative, null]; }
+  });
+  const workers = db.prepare(`
+    SELECT status, COUNT(*) AS n FROM security_review_worker_runs
+    WHERE engagement_id=? GROUP BY status ORDER BY status
+  `).all(engagementId);
+  const roles = db.prepare(`
+    SELECT DISTINCT review_role FROM security_review_model_observations
+    WHERE engagement_id=? AND review_role IS NOT NULL ORDER BY review_role
+  `).all(engagementId).map(row => row.review_role);
+  return crypto.createHash('sha256').update(JSON.stringify({ files, workers, roles })).digest('hex');
 }
 
 function securityReviewContinuationPrompt(prompt, { artifactRoot, reason }) {
   const text = String(prompt || '');
-  const contractAt = text.indexOf('SOURCE SECURITY REVIEW WORKFLOW v3');
+  const contractAt = text.indexOf('SOURCE SECURITY REVIEW WORKFLOW v4');
   const contract = contractAt >= 0 ? text.slice(contractAt) : text;
   return [
-    'SECURITY REVIEW WORKFLOW v3 — DURABLE COORDINATOR CONTINUATION',
+    'SECURITY REVIEW WORKFLOW v4 — DURABLE COORDINATOR CONTINUATION',
     `artifact_root: ${artifactRoot}`,
     `continuation_reason: ${reason}`,
     '',
@@ -123,20 +153,21 @@ class ControllerLite {
       VALUES (?, ?, ?, ?, ?)
     `);
     this.activeGoalsStmt = this.db.prepare(`
-      SELECT * FROM controller_goals
-      WHERE status IN ('active','pending_approval','queued','running')
-      ORDER BY updated_at DESC, created_at DESC
+      SELECT g.* FROM controller_goals g JOIN engagements e ON e.id=g.engagement_id
+      WHERE g.status IN ('active','pending_approval','queued','running') AND e.session_id=?
+      ORDER BY g.updated_at DESC, g.created_at DESC
       LIMIT 50
     `);
     this.recentGoalsStmt = this.db.prepare(`
-      SELECT * FROM controller_goals
-      ORDER BY updated_at DESC, created_at DESC
+      SELECT g.* FROM controller_goals g JOIN engagements e ON e.id=g.engagement_id
+      WHERE e.session_id=?
+      ORDER BY g.updated_at DESC, g.created_at DESC
       LIMIT 20
     `);
     this.activeJobsStmt = this.db.prepare(`
-      SELECT * FROM controller_jobs
-      WHERE status IN ('queued','running','cancelling')
-      ORDER BY created_at ASC
+      SELECT j.* FROM controller_jobs j JOIN engagements e ON e.id=j.engagement_id
+      WHERE j.status IN ('queued','running','cancelling') AND e.session_id=?
+      ORDER BY j.created_at ASC
       LIMIT 100
     `);
     this.activeSecurityReviewsBySession = this.db.prepare(`
@@ -149,18 +180,24 @@ class ControllerLite {
       ORDER BY j.created_at ASC
     `);
     this.recentFailuresStmt = this.db.prepare(`
-      SELECT * FROM controller_jobs
-      WHERE status = 'failed'
-      ORDER BY updated_at DESC
+      SELECT j.* FROM controller_jobs j JOIN engagements e ON e.id=j.engagement_id
+      WHERE j.status = 'failed' AND e.session_id=?
+      ORDER BY j.updated_at DESC
       LIMIT 10
     `);
     this.eventsSinceStmt = this.db.prepare(`
-      SELECT * FROM controller_events
-      WHERE id > ?
-      ORDER BY id ASC
+      SELECT event.* FROM controller_events event
+      LEFT JOIN controller_jobs job ON job.id=event.job_id
+      LEFT JOIN controller_goals goal ON goal.id=event.goal_id
+      LEFT JOIN engagements e ON e.id=COALESCE(job.engagement_id, goal.engagement_id)
+      WHERE event.id > ? AND e.session_id=?
+      ORDER BY event.id ASC
       LIMIT ?
     `);
     this.jobById = this.db.prepare('SELECT * FROM controller_jobs WHERE id = ?');
+    this.jobByIdAndSession = this.db.prepare(`
+      SELECT j.* FROM controller_jobs j JOIN engagements e ON e.id=j.engagement_id WHERE j.id=? AND e.session_id=?
+    `);
     this.engagementSession = this.db.prepare('SELECT session_id FROM engagements WHERE id = ?');
     this.authoritativeWorkerRuns = this.db.prepare(`
       SELECT * FROM security_review_worker_runs WHERE engagement_id=? ORDER BY sequence
@@ -197,13 +234,18 @@ class ControllerLite {
       SELECT COUNT(*) AS n FROM controller_jobs WHERE status IN ('running','cancelling')
     `);
     this.nextQueued = this.db.prepare(`
-      SELECT *
+      SELECT q.*
       FROM controller_jobs AS q
+      JOIN engagements AS queued_engagement ON queued_engagement.id=q.engagement_id
       WHERE q.status='queued'
         AND q.cancel_requested=0
         AND NOT EXISTS (
-          SELECT 1 FROM controller_jobs AS r
-          WHERE r.agent_id=q.agent_id AND r.status IN ('running','cancelling')
+          SELECT 1
+          FROM controller_jobs AS r
+          JOIN engagements AS running_engagement ON running_engagement.id=r.engagement_id
+          WHERE r.agent_id=q.agent_id
+            AND r.status IN ('running','cancelling')
+            AND running_engagement.session_id=queued_engagement.session_id
         )
       ORDER BY q.created_at ASC
       LIMIT 1
@@ -266,6 +308,11 @@ class ControllerLite {
       UPDATE engagements SET status=?, completed_at=COALESCE(completed_at, ?)
       WHERE id=? AND status='active'
     `);
+    this.lastContinuation = this.db.prepare(`
+      SELECT data_json FROM controller_events
+      WHERE job_id=? AND event_type='job_continuation_queued'
+      ORDER BY id DESC LIMIT 1
+    `);
   }
 
   reconcileStaleRunning() {
@@ -312,6 +359,11 @@ class ControllerLite {
       this.running.delete(job.id);
     }
     const reason = String(error || 'recoverable coordinator interruption');
+    const checkpoint = securityReviewCheckpoint(this.db, job.engagement_id, artifactRoot);
+    let previousCheckpoint = null;
+    try { previousCheckpoint = JSON.parse(this.lastContinuation.get(job.id)?.data_json || '{}').checkpoint || null; } catch {}
+    if (previousCheckpoint == null && Number(job.attempts || 0) > 1) return false;
+    if (previousCheckpoint === checkpoint) return false;
     const prompt = securityReviewContinuationPrompt(job.prompt, { artifactRoot, reason });
     const stamp = nowIso();
     const queued = this.requeueInterruptedSecurityReview.run(prompt, stamp, job.id);
@@ -322,6 +374,7 @@ class ControllerLite {
       artifact_root: artifactRoot,
       deadline_at: Number.isFinite(deadlineMs) ? new Date(deadlineMs).toISOString() : null,
       next_attempt: Number(job.attempts || 0) + 1,
+      checkpoint,
     });
     setImmediate(() => this.tick());
     return true;
@@ -341,10 +394,10 @@ class ControllerLite {
     return resumed;
   }
 
-  ensureEngagement(target) {
-    const sessionId = this.getInvestigationSessionId();
+  ensureEngagement(target, sessionId = null) {
+    const ownedSessionId = sessionId || this.getInvestigationSessionId();
     const engagementId = `${engagementIdForTarget(target)}-${crypto.randomBytes(3).toString('hex')}`;
-    this.insertEngagement.run(engagementId, sessionId, target, JSON.stringify([target]));
+    this.insertEngagement.run(engagementId, ownedSessionId, target, JSON.stringify([target]));
     return engagementId;
   }
 
@@ -373,10 +426,12 @@ class ControllerLite {
     discoveryConcurrency = 3,
     specialistConcurrency = 3,
     allowedModels = [],
+    expectedModels = {},
     requireModelDiversity = true,
     modelDiversityWaiver = null,
     reviewProfile = 'comprehensive',
     campaignMode = false,
+    sessionId = null,
   } = {}) {
     const abs = path.resolve(localPath);
     if (!fs.existsSync(abs)) throw new Error(`local path not found: ${abs}`);
@@ -387,7 +442,7 @@ class ControllerLite {
       source: 'slash',
       review_profile: profile,
       campaign: campaignMode,
-    });
+    }, sessionId);
     const jobId = id('job');
     const engId = engagementId || goal.engagement_id || this.ensureEngagement(abs);
     const runtimeDir = path.dirname(path.dirname(this.db.name));
@@ -403,11 +458,13 @@ class ControllerLite {
     const run = initializeDeepScanRun(artifactRoot, {
       config: scanConfig,
       allowedModels,
+      expectedModels,
       requireModelDiversity,
       modelDiversityWaiver,
       reviewProfile: profile,
       campaign,
     });
+    writeInventoryVerification(artifactRoot, verifySecurityReviewInventory({ repositoryPath: abs, artifactRoot }));
     const prompt = securityReviewCoordinatorPrompt({
       repositoryPath: abs,
       engagementId: engId,
@@ -528,6 +585,7 @@ class ControllerLite {
   }
 
   status({ pendingKickoff = null, activeAgents = [], targetHealth = [], plans = null, sessionId = null } = {}) {
+    const scopedSessionId = sessionId || this.getInvestigationSessionId();
     const securityReviews = sessionId
       ? this.activeSecurityReviewsBySession.all(sessionId).map(row => {
           const job = decodeRow(row);
@@ -535,11 +593,11 @@ class ControllerLite {
         })
       : [];
     return {
-      goals: this.activeGoalsStmt.all().map(decodeRow),
-      recentGoals: this.recentGoalsStmt.all().map(decodeRow),
-      jobs: this.activeJobsStmt.all().map(decodeRow),
+      goals: this.activeGoalsStmt.all(scopedSessionId).map(decodeRow),
+      recentGoals: this.recentGoalsStmt.all(scopedSessionId).map(decodeRow),
+      jobs: this.activeJobsStmt.all(scopedSessionId).map(decodeRow),
       securityReviews,
-      recentFailures: this.recentFailuresStmt.all().map(decodeRow),
+      recentFailures: this.recentFailuresStmt.all(scopedSessionId).map(decodeRow),
       pendingPrecheckApproval: pendingKickoff || null,
       activeAgents,
       targetHealth,
@@ -547,12 +605,13 @@ class ControllerLite {
     };
   }
 
-  eventsSince(since = 0, limit = 100) {
-    return this.eventsSinceStmt.all(Number(since) || 0, Math.max(1, Math.min(500, Number(limit) || 100))).map(decodeRow);
+  eventsSince(since = 0, limit = 100, sessionId = null) {
+    return this.eventsSinceStmt.all(Number(since) || 0, sessionId || this.getInvestigationSessionId(), Math.max(1, Math.min(500, Number(limit) || 100))).map(decodeRow);
   }
 
-  cancelJob(jobId) {
-    const job = this.getJob(jobId);
+  cancelJob(jobId, { sessionId = null } = {}) {
+    const job = sessionId ? this.jobByIdAndSession.get(jobId, sessionId) : this.getJob(jobId);
+    if (!job) return { ok: false, error: 'job not found' };
     const queued = this.cancelQueued.run(nowIso(), nowIso(), jobId);
     if (queued.changes) {
       if (job?.job_type === 'security_review_workflow_v3') this._terminalizeSecurityReview(job, 'cancelled', 'cancelled by operator');
@@ -693,30 +752,33 @@ class ControllerLite {
       const runtimeDir = path.dirname(path.dirname(this.db.name));
       const artifactRoot = securityReviewArtifactRoot(runtimeDir, job.engagement_id);
       const goal = job.goal_id ? this.getGoal(job.goal_id) : null;
-      gate = sourceReviewGateStatus(artifactRoot, {
-        authoritativeWorkerRuns: this.authoritativeWorkerRuns.all(job.engagement_id),
-        authoritativeModelObservations: this.authoritativeModelObservations.all(job.engagement_id),
+      const finalized = finalizeSecurityReview({
+        db: this.db,
+        artifactRoot,
+        engagementId: job.engagement_id,
         campaignExpected: goal?.metadata?.campaign === true,
       });
+      gate = finalized.gate || { passed: false, missing: [], invalid: finalized.blockers || [] };
+      if (finalized.passed && typeof process.send === 'function') {
+        try { process.send({ type: 'glados-security-review-deliverables-ready', engagementId: job.engagement_id }); } catch {}
+      }
       finalResult = result && typeof result === 'object'
         ? { ...result, securityReviewGate: gate }
         : { result: result || null, securityReviewGate: gate };
       if (!gate.passed) {
-        finalStatus = 'failed';
         const failures = [...gate.missing.map(item => `missing ${item}`), ...gate.invalid].slice(0, 8);
-        finalError = `security-review hard gates failed: ${failures.join('; ')}`;
+        const gateError = `security-review hard gates failed: ${failures.join('; ')}`;
+        if ((finalized.recoverable || activeSecurityReviewRun(artifactRoot))
+            && this._resumeInterruptedSecurityReview(current || job, `security review incomplete: ${gateError}`)) {
+          return this.getJob(job.id);
+        }
+        finalStatus = 'failed';
+        finalError = gateError;
       }
     }
     const stamp = nowIso();
     this.markDone.run(finalStatus, finalResult ? JSON.stringify(finalResult) : null, finalError, stamp, stamp, job.id);
     if (job.job_type === 'security_review_workflow_v3') this._terminalizeSecurityReview(job, finalStatus, finalError);
-    if (job.job_type === 'security_review_workflow_v3') {
-      const runtimeDir = path.dirname(path.dirname(this.db.name));
-      const statusFile = path.join(runtimeDir, 'workspaces', 'agents', 'glados', 'AGENT-STATUS.md');
-      try {
-        if (fs.existsSync(statusFile)) fs.writeFileSync(statusFile, IDLE_AGENT_STATUS, { mode: 0o600 });
-      } catch {}
-    }
     if (job.goal_id) {
       const goalStatus = finalStatus === 'succeeded' ? 'complete' : finalStatus === 'cancelled' ? 'cancelled' : 'failed';
       this.updateGoalStatus(job.goal_id, goalStatus);
@@ -739,7 +801,11 @@ class ControllerLite {
       if (status === 'failed' && artifactState === 'RUNNING' && cappedFailure) {
         markDeepScanCapped(artifactRoot, reason || 'security-review terminated before completion');
         artifactState = 'CAPPED';
+      } else if (status === 'failed' && artifactState === 'RUNNING') {
+        markDeepScanFailed(artifactRoot, reason || 'security-review orchestration failed');
+        artifactState = 'FAILED';
       }
+      if (status !== 'succeeded') invalidateSecurityReviewSeal(artifactRoot);
     } catch {}
     const engagementStatus = status === 'succeeded' ? 'complete'
       : artifactState === 'CAPPED' || String(reason || '').includes('wall-clock limit') ? 'capped'
@@ -755,6 +821,28 @@ class ControllerLite {
     this.stop();
     try { this.db.close(); } catch {}
   }
+}
+
+function markDeepScanFailed(artifactRoot, reason) {
+  const stamp = nowIso();
+  for (const relative of ['run.json', 'discovery/deep/manifest.json']) {
+    const file = path.join(artifactRoot, relative);
+    let document;
+    try { document = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { continue; }
+    if (relative === 'run.json') {
+      document.deepScan = { ...(document.deepScan || {}), terminalState: 'FAILED', completedAt: stamp, failureReason: reason };
+    } else {
+      document.status = 'FAILED';
+      document.completed_at = stamp;
+      document.failure_reason = reason;
+    }
+    fs.writeFileSync(file, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
+  }
+}
+
+function writeInventoryVerification(artifactRoot, receipt) {
+  const file = path.join(artifactRoot, 'inventory', 'verification.json');
+  fs.writeFileSync(file, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
 }
 
 function decodeRow(row) {

@@ -11,15 +11,20 @@ const {
   securityReviewCoordinatorPrompt,
   sourceReviewGateStatus,
 } = require('../lib/security-review/workflow');
-const { generateSecurityReviewInventory } = require('../lib/security-review/inventory');
+const { generateSecurityReviewInventory, verifySecurityReviewInventory } = require('../lib/security-review/inventory');
 const {
   REQUIRED_MODEL_ROLES,
   appendRuntimeModelObservation,
+  bindRuntimeModelObservationToWorker,
+  reconcileRuntimeModelObservationsToWorkers,
   claimDiscoveryWorker,
   discoveryDispatchCheckpoint,
   discoverySaturationCheckpoint,
   finalizeDiscoveryWorker,
   normalizeDeepScanConfig,
+  reconcileActiveSecurityReviewWorkers,
+  reconcileCompletedDiscoveryWorker,
+  reconcileInvalidSuccessfulDiscoveryWorkers,
 } = require('../lib/security-review/deep-scan');
 const { ensureBlackboardDb } = require('../../scripts/lib/glados-local');
 
@@ -55,6 +60,159 @@ test('runtime model ledger rejects SDK lifecycle placeholders', () => {
     worker_id: 'worker-001',
   });
   assert.equal(valid.model, 'gpt-5.6-luna');
+});
+
+test('harness binds a settled runtime observation to the terminal discovery worker', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-worker-model-binding-'));
+  writeJsonLines(root, 'discovery/deep/workers.jsonl', [{
+    worker_id: 'worker-001', sequence: 1, status: 'SUCCEEDED', requested_model: 'gpt-5.6-terra',
+    actual_model: 'unknown', model_observation_ids: [],
+  }, {
+    worker_id: 'worker-002', sequence: 2, status: 'FAILED', requested_model: 'gpt-5.6-terra',
+    actual_model: 'gpt-5.6-terra', model_observation_ids: [],
+  }]);
+  assert.equal(bindRuntimeModelObservationToWorker(root, {
+    workerId: 'worker-001', observationId: 'model-observation-1', actualModel: 'gpt-5.6-terra',
+  }), true);
+  const rows = fs.readFileSync(path.join(root, 'discovery/deep/workers.jsonl'), 'utf8')
+    .trim().split(/\n/).map(JSON.parse);
+  assert.equal(rows[0].actual_model, 'gpt-5.6-terra');
+  assert.deepEqual(rows[0].model_observation_ids, ['model-observation-1']);
+  assert.deepEqual(rows[1].model_observation_ids, []);
+  assert.equal(bindRuntimeModelObservationToWorker(root, {
+    workerId: 'worker-001', observationId: 'model-observation-1', actualModel: 'gpt-5.6-terra',
+  }), false);
+});
+
+test('next discovery gate reconciles receipts that settled before coordinator worker rows', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-worker-model-reconcile-'));
+  writeJsonLines(root, 'discovery/deep/workers.jsonl', [{
+    worker_id: 'worker-001', sequence: 1, status: 'SUCCEEDED', requested_model: 'gpt-5.6-terra',
+    actual_model: 'unknown', model_observation_ids: [],
+  }]);
+  writeJsonLines(root, 'validation/runtime-model-observations.jsonl', [{
+    observation_id: 'model-observation-1', agent_id: 'source-code', model: 'gpt-5.6-terra',
+    source: 'litellm:response-headers', request_id: 'request-1', gateway_model_id: 'deployment-1',
+    review_role: 'source-code-primary', worker_id: 'worker-001', observed_at: '2026-08-14T12:00:00.000Z',
+  }]);
+  assert.equal(reconcileRuntimeModelObservationsToWorkers(root), 1);
+  const worker = JSON.parse(fs.readFileSync(path.join(root, 'discovery/deep/workers.jsonl'), 'utf8').trim());
+  assert.equal(worker.actual_model, 'gpt-5.6-terra');
+  assert.deepEqual(worker.model_observation_ids, ['model-observation-1']);
+  assert.equal(reconcileRuntimeModelObservationsToWorkers(root), 0);
+});
+
+test('controller projection overwrites model-authored ledgers from authoritative database state', () => {
+  const { ensureBlackboardDb } = require('../../scripts/lib/glados-local');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-controller-projection-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath);
+  db.prepare("INSERT OR IGNORE INTO engagements (id, session_id, target_name, scope) VALUES ('eng-projection','legacy','fixture','[]')").run();
+  db.prepare(`INSERT INTO security_review_worker_runs
+    (engagement_id, worker_id, sequence, tool_call_id, status, started_at, completed_at, requested_model)
+    VALUES ('eng-projection','worker-001',1,'tool-1','SUCCEEDED','2026-08-14T12:00:00Z','2026-08-14T12:01:00Z','gpt-5.6-terra')`).run();
+  db.prepare(`INSERT INTO security_review_model_observations
+    (observation_id, engagement_id, agent_id, review_role, worker_id, requested_model, actual_model,
+     billed_model_name, source, request_id, gateway_model_id, observed_at, logical_model_alias, attestation_level, gateway_call_id)
+    VALUES ('obs-1','eng-projection','source-code','source-code-primary','worker-001','gpt-5.6-terra','deployment-1',
+      'gpt-5.6-terra','litellm:response-headers','local-1','deployment-1','2026-08-14T12:00:30Z','gpt-5.6-terra','deployment','gateway-1')`).run();
+  db.close();
+  writeJsonLines(root, 'discovery/deep/workers.jsonl', [{ worker_id: 'fabricated' }]);
+  const { projectSecurityReviewLedgers } = require('../lib/security-review/deep-scan');
+  projectSecurityReviewLedgers({ dbPath, artifactRoot: root, engagementId: 'eng-projection' });
+  const worker = JSON.parse(fs.readFileSync(path.join(root, 'discovery/deep/workers.jsonl'), 'utf8').trim());
+  assert.equal(worker.worker_id, 'worker-001');
+  assert.equal(worker.actual_model, 'deployment-1');
+  assert.deepEqual(worker.model_observation_ids, ['obs-1']);
+});
+
+test('durable receipt and observation reconcile a canceled worker after late completion', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-late-worker-reconcile-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath);
+  db.prepare("INSERT OR IGNORE INTO engagements (id, session_id, target_name, scope) VALUES ('eng-late','legacy','fixture','[]')").run();
+  db.prepare(`INSERT INTO security_review_worker_runs
+    (engagement_id,worker_id,sequence,tool_call_id,status,started_at,completed_at,error,requested_model)
+    VALUES ('eng-late','worker-001',1,'tool-late','CANCELED','2026-08-14T12:00:00Z','2026-08-14T12:01:00Z','parent ended','gpt-5.6-terra')`).run();
+  db.prepare(`INSERT INTO security_review_worker_attempts
+    (engagement_id,worker_id,sequence,attempt,tool_call_id,status,started_at,completed_at,error)
+    VALUES ('eng-late','worker-001',1,1,'tool-late','CANCELED','2026-08-14T12:00:00Z','2026-08-14T12:01:00Z','parent ended')`).run();
+  db.prepare(`INSERT INTO security_review_model_observations
+    (observation_id,engagement_id,agent_id,review_role,worker_id,requested_model,actual_model,billed_model_name,source,request_id,gateway_model_id,observed_at)
+    VALUES ('obs-late','eng-late','source-code','source-code-primary','worker-001','gpt-5.6-terra','deployment-terra','gpt-5.6-terra','litellm:response-headers','request-late','deployment-terra','2026-08-14T12:00:30Z')`).run();
+  db.close();
+  writeJsonLines(root, 'discovery/deep/worker-001/candidates.jsonl', []);
+  writeJson(root, 'discovery/deep/worker-001/receipt.json', {
+    worker_id: 'worker-001', status: 'SUCCEEDED', candidate_count: 0,
+    candidates_sha256: sha256(root, 'discovery/deep/worker-001/candidates.jsonl'),
+  });
+  assert.equal(reconcileCompletedDiscoveryWorker({
+    dbPath, artifactRoot: root, engagementId: 'eng-late', toolCallId: 'tool-late',
+  }), true);
+  const check = new Database(dbPath, { readonly: true });
+  assert.equal(check.prepare("SELECT status FROM security_review_worker_runs WHERE engagement_id='eng-late'").get().status, 'SUCCEEDED');
+  check.close();
+});
+
+test('worker reconciliation accepts the legacy discovery/workers artifact location', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-legacy-worker-reconcile-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath);
+  db.prepare("INSERT OR IGNORE INTO engagements (id, session_id, target_name, scope) VALUES ('eng-legacy','legacy','fixture','[]')").run();
+  db.prepare(`INSERT INTO security_review_worker_runs
+    (engagement_id,worker_id,sequence,tool_call_id,status,started_at,error,requested_model)
+    VALUES ('eng-legacy','worker-001',1,'tool-legacy','CANCELED','2026-08-14T12:00:00Z','parent ended','gpt-5.6-terra')`).run();
+  db.prepare(`INSERT INTO security_review_worker_attempts
+    (engagement_id,worker_id,sequence,attempt,tool_call_id,status,started_at,error)
+    VALUES ('eng-legacy','worker-001',1,1,'tool-legacy','CANCELED','2026-08-14T12:00:00Z','parent ended')`).run();
+  db.prepare(`INSERT INTO security_review_model_observations
+    (observation_id,engagement_id,agent_id,review_role,worker_id,requested_model,actual_model,billed_model_name,source,request_id,gateway_model_id,observed_at)
+    VALUES ('obs-legacy','eng-legacy','source-code','source-code-primary','worker-001','gpt-5.6-terra','deployment-terra','gpt-5.6-terra','litellm:response-headers','request-legacy','deployment-terra','2026-08-14T12:00:30Z')`).run();
+  db.close();
+  writeJsonLines(root, 'discovery/workers/worker-001/candidates.jsonl', []);
+  writeJson(root, 'discovery/workers/worker-001/receipt.json', {
+    worker_id: 'worker-001', status: 'SUCCEEDED', candidate_count: 0,
+    candidates_sha256: sha256(root, 'discovery/workers/worker-001/candidates.jsonl'),
+  });
+  assert.equal(reconcileCompletedDiscoveryWorker({
+    dbPath, artifactRoot: root, engagementId: 'eng-legacy', toolCallId: 'tool-legacy',
+  }), true);
+  const workers = fs.readFileSync(path.join(root, 'discovery/deep/workers.jsonl'), 'utf8').trim().split(/\r?\n/).map(JSON.parse);
+  assert.equal(workers[0].status, 'SUCCEEDED');
+  assert.equal(workers[0].candidates_artifact, 'discovery/workers/worker-001/candidates.jsonl');
+});
+
+test('startup reconciliation recovers durable completed workers for active reviews', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-startup-worker-reconcile-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  const investigationsDir = path.join(root, 'investigations');
+  const artifactRoot = path.join(investigationsDir, 'eng-startup', 'security-review');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath);
+  db.prepare("INSERT OR IGNORE INTO engagements (id,session_id,target_name,scope,status) VALUES ('eng-startup','legacy','fixture','[]','active')").run();
+  db.prepare(`INSERT INTO security_review_worker_runs
+    (engagement_id,worker_id,sequence,tool_call_id,status,started_at,requested_model)
+    VALUES ('eng-startup','worker-001',1,'tool-startup','STARTED','2026-08-14T12:00:00Z','gpt-5.6-terra')`).run();
+  db.prepare(`INSERT INTO security_review_worker_attempts
+    (engagement_id,worker_id,sequence,attempt,tool_call_id,status,started_at)
+    VALUES ('eng-startup','worker-001',1,1,'tool-startup','STARTED','2026-08-14T12:00:00Z')`).run();
+  db.prepare(`INSERT INTO security_review_model_observations
+    (observation_id,engagement_id,agent_id,review_role,worker_id,requested_model,actual_model,billed_model_name,source,request_id,gateway_model_id,observed_at)
+    VALUES ('obs-startup','eng-startup','source-code','source-code-primary','worker-001','gpt-5.6-terra','deployment-terra','gpt-5.6-terra','litellm:response-headers','request-startup','deployment-terra','2026-08-14T12:00:30Z')`).run();
+  db.close();
+  writeJsonLines(artifactRoot, 'discovery/deep/worker-001/candidates.jsonl', []);
+  writeJson(artifactRoot, 'discovery/deep/worker-001/receipt.json', {
+    worker_id: 'worker-001', status: 'SUCCEEDED', candidate_count: 0,
+    candidates_sha256: sha256(artifactRoot, 'discovery/deep/worker-001/candidates.jsonl'),
+  });
+  assert.deepEqual(reconcileActiveSecurityReviewWorkers({ dbPath, investigationsDir }), { checked: 1, reconciled: 1 });
 });
 
 test('completion-driven discovery preserves a null attempt ceiling', () => {
@@ -100,16 +258,63 @@ test('controller-owned worker claims allow three-wide discovery and reject overf
     dbPath, artifactRoot, engagementId, workerId: 'worker-004', toolCallId: 'tool-4',
   }).reason, /concurrency limit 3/);
   assert.equal(finalizeDiscoveryWorker({
-    dbPath, engagementId, toolCallId: 'tool-1', status: 'SUCCEEDED',
+    dbPath, engagementId, toolCallId: 'tool-1', status: 'FAILED', error: 'fixture failure',
   }), true);
-  assert.match(claimDiscoveryWorker({
+  assert.deepEqual(claimDiscoveryWorker({
     dbPath, artifactRoot, engagementId, workerId: 'worker-001', toolCallId: 'tool-repeat',
-  }).reason, /out of sequence|already dispatched/);
+  }), { claimed: true });
+});
+
+test('successful tool results cannot finalize discovery without durable artifacts', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-worker-finalize-artifacts-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath);
+  db.prepare("INSERT INTO engagements (id, target_name) VALUES ('eng-finalize', 'fixture')").run();
+  db.prepare(`INSERT INTO security_review_worker_runs
+    (engagement_id,worker_id,sequence,tool_call_id,status,started_at,requested_model)
+    VALUES ('eng-finalize','worker-001',1,'tool-finalize','STARTED','2026-08-14T12:00:00Z','gpt-5.6-terra')`).run();
+  db.prepare(`INSERT INTO security_review_worker_attempts
+    (engagement_id,worker_id,sequence,attempt,tool_call_id,status,started_at)
+    VALUES ('eng-finalize','worker-001',1,1,'tool-finalize','STARTED','2026-08-14T12:00:00Z')`).run();
+  db.close();
+
+  assert.equal(finalizeDiscoveryWorker({
+    dbPath, artifactRoot: root, engagementId: 'eng-finalize', toolCallId: 'tool-finalize', status: 'SUCCEEDED',
+  }), false);
+  const check = new Database(dbPath, { readonly: true });
+  assert.equal(check.prepare("SELECT status FROM security_review_worker_runs WHERE engagement_id='eng-finalize'").get().status, 'STARTED');
+  check.close();
+});
+
+test('recovery demotes legacy successful workers that have no durable artifacts', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-worker-demote-invalid-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath);
+  db.prepare("INSERT INTO engagements (id, target_name) VALUES ('eng-invalid', 'fixture')").run();
+  db.prepare(`INSERT INTO security_review_worker_runs
+    (engagement_id,worker_id,sequence,tool_call_id,status,started_at,completed_at,requested_model)
+    VALUES ('eng-invalid','worker-001',1,'tool-invalid','SUCCEEDED','2026-08-14T12:00:00Z','2026-08-14T12:01:00Z','gpt-5.6-terra')`).run();
+  db.prepare(`INSERT INTO security_review_worker_attempts
+    (engagement_id,worker_id,sequence,attempt,tool_call_id,status,started_at,completed_at)
+    VALUES ('eng-invalid','worker-001',1,1,'tool-invalid','SUCCEEDED','2026-08-14T12:00:00Z','2026-08-14T12:01:00Z')`).run();
+  db.close();
+
+  assert.deepEqual(reconcileInvalidSuccessfulDiscoveryWorkers({
+    dbPath, artifactRoot: root, engagementId: 'eng-invalid',
+  }), ['worker-001']);
+  const check = new Database(dbPath, { readonly: true });
+  assert.equal(check.prepare("SELECT status FROM security_review_worker_runs WHERE engagement_id='eng-invalid'").get().status, 'FAILED');
+  assert.equal(check.prepare("SELECT status FROM security_review_worker_attempts WHERE engagement_id='eng-invalid'").get().status, 'FAILED');
+  check.close();
 });
 
 function completeDeepArtifacts(root) {
   const run = JSON.parse(fs.readFileSync(path.join(root, 'run.json'), 'utf8'));
-  run.workflowVersion = 3;
+  run.workflowVersion = 4;
   run.deepScan = {
     minDiscoveryRuns: 3,
     stopAfterNoNew: 6,
@@ -225,6 +430,7 @@ function completeDeepArtifacts(root) {
     };
   }));
   writeJson(root, 'findings.json', { findings: [] });
+  writeJson(root, 'observations.json', { observations: [] });
   writeJson(root, 'coverage.json', { files: [{ path: 'main.go', disposition: 'REVIEWED', review_method: 'deep-file-review' }] });
   const sealed = [
     'run.json', 'context/threat-model.json', 'discovery/deep/workers.jsonl', 'discovery/deep/dedupe.json',
@@ -276,6 +482,11 @@ function completeReviewArtifacts(root, { classLevelCoverage = false, omitSemanti
   }]);
   writeJson(root, 'inventory/secrets-head.json', { mode: 'HEAD', completed: true, head: 'snapshot:test', findings: [] });
   writeJson(root, 'inventory/secrets-history.json', { mode: 'history', completed: true, head: 'snapshot:test', findings: [] });
+  for (const relative of ['inventory/sensitive-data-head.json', 'inventory/pii-head.json']) {
+    writeJson(root, relative, { schema_version: 1, engine: 'glados-sensitive-data/v1', mode: 'HEAD', completed: true, head: 'snapshot:test', candidates: [] });
+  }
+  writeJson(root, 'inventory/pii-history.json', { schema_version: 1, engine: 'glados-sensitive-data/v1', mode: 'history', completed: true, head: 'snapshot:test', candidates: [] });
+  writeJsonLines(root, 'validation/sensitive-data-verifications.jsonl', []);
   writeJsonLines(root, 'discovery/findings.jsonl', []);
   writeJsonLines(root, 'discovery/coverage-ledger.jsonl', [{
     key: 'main.go',
@@ -287,6 +498,7 @@ function completeReviewArtifacts(root, { classLevelCoverage = false, omitSemanti
   writeJsonLines(root, 'tracks/authorization-access-control/route-authz-matrix.jsonl', []);
   writeJsonLines(root, 'tracks/data-flow-injection/source-sink-matrix.jsonl', []);
   writeJson(root, 'tracks/secrets-history/history-receipt.json', { completed: true });
+  writeJsonLines(root, 'tracks/secrets-history/sensitive-data-dispositions.jsonl', []);
   writeJsonLines(root, 'tracks/resilience-error-handling/http-client-matrix.jsonl', []);
   writeJsonLines(root, 'tracks/iac-config-manifests/disposition-matrix.jsonl', []);
   writeJsonLines(root, 'tracks/cryptography-suppressions/crypto-matrix.jsonl', []);
@@ -346,14 +558,14 @@ test('source review coordinator contract requires staged analysis and hard gates
   ]) assert.match(prompt, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
   for (const track of SPECIALIST_TRACKS) assert.match(prompt, new RegExp(track));
   for (const exactField of [
-    '"completed_at":"ISO-8601"',
-    '"candidates_artifact":"discovery/deep/worker-NNN/candidates.jsonl"',
     '"input_worker_ids":["worker-001"]',
     '"worker_id":"worker-001","source_candidate_id":"worker-001-C0001"',
     '"new_candidate_counts":{"worker-001":1}',
     '"no_new_streak":0',
   ]) assert.equal(prompt.includes(exactField), true, `missing exact coordinator field contract: ${exactField}`);
   assert.match(prompt, /Never invent, predict, alias, or use a placeholder observation ID/);
+  assert.match(prompt, /Never pause for operator approval between batches/);
+  assert.match(prompt, /Neither workers nor the coordinator may create or edit discovery\/deep\/workers\.jsonl/);
   assert.match(prompt, /three standalone machine-readable lines exactly/);
   assert.match(prompt, /Preserve the harness-created discovery\/deep\/manifest\.json fields/);
 });
@@ -516,6 +728,17 @@ test('source review gate rejects model receipts not proven by SDK runtime observ
   assert.equal(result.invalid.some(item => /actual model is not proven by an authoritative gateway observation/.test(item)), true);
 });
 
+test('source review gate rejects a role that does not use its configured model', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-source-review-expected-model-'));
+  completeReviewArtifacts(root);
+  const run = JSON.parse(fs.readFileSync(path.join(root, 'run.json'), 'utf8'));
+  run.modelPolicy.expectedModels = { 'source-code-primary': 'gpt-5.6-terra' };
+  writeJson(root, 'run.json', run);
+  const result = sourceReviewGateStatus(root, authoritativeDeepOptions(root));
+  assert.equal(result.passed, false);
+  assert.equal(result.invalid.some(item => /does not match configured model gpt-5\.6-terra/.test(item)), true);
+});
+
 test('source review gate binds each discovery worker to its own harness model observation', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-source-review-worker-observation-'));
   completeReviewArtifacts(root);
@@ -526,6 +749,62 @@ test('source review gate binds each discovery worker to its own harness model ob
   const result = sourceReviewGateStatus(root, authoritativeDeepOptions(root));
   assert.equal(result.passed, false);
   assert.equal(result.invalid.some(item => /actual model is not proven by an authoritative gateway observation|not present unchanged/.test(item)), true);
+});
+
+test('validator-origin candidates join closure without fabricating worker dedupe mappings', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-source-review-validator-candidate-'));
+  completeReviewArtifacts(root);
+  const candidate = {
+    candidate_id: 'NEW-001', cwe_ids: ['CWE-20'],
+    locations: [{ path: 'main.go', start_line: 1, end_line: 1, role: 'source' }],
+    summary: 'Validator candidate', evidence: 'Evidence', control: 'Control', sink: 'Sink',
+    reachability: 'Reachable', counterevidence: 'None', proof_gaps: [], confidence: 'high',
+  };
+  writeJsonLines(root, 'validation/new-candidates.jsonl', [candidate]);
+  const closure = fs.readFileSync(path.join(root, 'validation/candidate-closure.jsonl'), 'utf8').trim().split(/\r?\n/).map(JSON.parse);
+  closure.push({ candidate_id: 'NEW-001', disposition: 'NOT_APPLICABLE', validation_method: 'validator review', evidence: 'Evidence', counterevidence: 'None', proof_gaps: [] });
+  writeJsonLines(root, 'validation/candidate-closure.jsonl', closure);
+  const attacks = fs.readFileSync(path.join(root, 'validation/attack-paths.jsonl'), 'utf8').trim().split(/\r?\n/).map(JSON.parse);
+  attacks.push({ candidate_id: 'NEW-001', disposition: 'NOT_APPLICABLE', rationale: 'Not applicable', reachability: 'Blocked' });
+  writeJsonLines(root, 'validation/attack-paths.jsonl', attacks);
+  const result = sourceReviewGateStatus(root, authoritativeDeepOptions(root));
+  assert.equal(result.invalid.some(item => /validator candidates vs validation closure|validator candidates vs attack-path/.test(item)), false);
+});
+
+test('source review gate accepts evidence-backed observations outside the vulnerability count', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-source-review-observation-'));
+  completeReviewArtifacts(root);
+  const closureFile = path.join(root, 'validation/candidate-closure.jsonl');
+  const closure = fs.readFileSync(closureFile, 'utf8').trim().split(/\r?\n/).map(JSON.parse);
+  closure[0] = {
+    candidate_id: closure[0].candidate_id,
+    disposition: 'OBSERVATION',
+    validation_method: 'independent source review',
+    evidence: 'Source pattern exists but exploitability is not established.',
+    counterevidence: 'External control is unavailable.',
+    proof_gaps: ['Inspect external policy.'],
+    observation_ids: [closure[0].candidate_id],
+    observation_category: 'conditional-security-observation',
+    reportability_rationale: 'Attacker capability and runtime reachability are unproven.',
+  };
+  writeJsonLines(root, 'validation/candidate-closure.jsonl', closure);
+  const attacks = fs.readFileSync(path.join(root, 'validation/attack-paths.jsonl'), 'utf8').trim().split(/\r?\n/).map(JSON.parse);
+  attacks[0].disposition = 'OBSERVATION';
+  writeJsonLines(root, 'validation/attack-paths.jsonl', attacks);
+  const findings = JSON.parse(fs.readFileSync(path.join(root, 'findings.json'), 'utf8'));
+  findings.findings = [];
+  writeJson(root, 'findings.json', findings);
+  writeJson(root, 'observations.json', {
+    schema_version: 1, producer: 'glados-security-review/v1', engagement_id: 'eng', repository_head: 'snapshot:test',
+    observations: [{
+      id: closure[0].candidate_id, title: 'Conditional observation', category: 'conditional-security-observation',
+      rationale: closure[0].reportability_rationale, recommendation: 'Validate the inherited control.',
+      evidence: closure[0].evidence, reachability: 'Build time only.', counterevidence: closure[0].counterevidence,
+      locations: [{ path: 'main.go', start_line: 1, end_line: 5, role: 'evidence' }], proof_gaps: closure[0].proof_gaps,
+    }],
+  });
+  const result = sourceReviewGateStatus(root, authoritativeDeepOptions(root));
+  assert.equal(result.invalid.some(item => /OBSERVATION|observations\.json|reportable candidate findings/.test(item)), false);
 });
 
 test('discovery dispatch checkpoint blocks a new worker until the prior worker is durably reconciled', () => {
@@ -593,6 +872,19 @@ test('discovery dispatch checkpoint blocks a new worker until the prior worker i
   const blocked = discoveryDispatchCheckpoint(root, { nextWorkerId: 'worker-002' });
   assert.equal(blocked.passed, false);
   assert.equal(blocked.invalid.some(item => /legacy ledger field names/.test(item)), true);
+});
+
+test('dedupe first introductions use worker sequence rather than mapping row order', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-dedupe-order-'));
+  completeReviewArtifacts(root);
+  const dedupeFile = path.join(root, 'discovery/deep/dedupe.json');
+  const dedupe = JSON.parse(fs.readFileSync(dedupeFile, 'utf8'));
+  dedupe.mappings.reverse();
+  writeJson(root, 'discovery/deep/dedupe.json', dedupe);
+  const next = `worker-${String(dedupe.input_worker_ids.length + 1).padStart(3, '0')}`;
+  const checkpoint = discoveryDispatchCheckpoint(root, { nextWorkerId: next, saturationProbe: true });
+  assert.equal(checkpoint.invalid.some(item => /one-to-one raw candidate closure|new_candidate_counts/.test(item)), false);
+  assert.deepEqual(discoverySaturationCheckpoint(root), { passed: true, invalid: [] });
 });
 
 test('source review gate rejects noncanonical worker receipt and location schemas', () => {
@@ -680,4 +972,20 @@ test('security review inventory accepts extracted non-Git source snapshots', () 
   assert.equal(history.unavailable, true);
   assert.match(history.reason, /no Git metadata/);
   assert.match(fs.readFileSync(path.join(artifacts, 'inventory', 'files.jsonl'), 'utf8'), /pkg\/api\.go/);
+});
+
+test('canonical inventory verification detects source snapshot drift', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-inventory-verifier-'));
+  const repo = path.join(root, 'repo');
+  const artifacts = path.join(root, 'artifacts');
+  fs.mkdirSync(repo);
+  fs.writeFileSync(path.join(repo, 'main.go'), 'package main\n');
+  generateSecurityReviewInventory({ repositoryPath: repo, artifactRoot: artifacts });
+  assert.equal(verifySecurityReviewInventory({ repositoryPath: repo, artifactRoot: artifacts }).verified, true);
+  fs.writeFileSync(path.join(repo, 'main.go'), 'package changed\n');
+  fs.writeFileSync(path.join(repo, 'added.txt'), 'added\n');
+  const drift = verifySecurityReviewInventory({ repositoryPath: repo, artifactRoot: artifacts });
+  assert.equal(drift.verified, false);
+  assert.deepEqual(drift.changed, ['main.go']);
+  assert.deepEqual(drift.added, ['added.txt']);
 });

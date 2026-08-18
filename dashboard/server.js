@@ -16,14 +16,18 @@ const {
 } = require('./lib/transcript-store');
 const { ControllerLite } = require('./lib/controller');
 const {
-  appendRuntimeModelObservation,
   discoveryWorkerIdFromPrompt,
   finalizeDiscoveryWorker,
+  projectSecurityReviewLedgers,
+  reconcileActiveSecurityReviewWorkers,
+  reconcileCompletedDiscoveryWorker,
 } = require('./lib/security-review/deep-scan');
 const { fetchLiteLlmAttestation, observationId } = require('./lib/litellm-attestation');
+const { LiteLlmResponseRelay } = require('./lib/litellm-relay');
 const { activeTurnConflict } = require('./lib/chat-turn-admission');
 const { isKickoffApproval, isKickoffCancel, isNetReconRequested, resolveKickoffResources } = require('./lib/kickoff-intent');
 const { getLiteLlmUsage } = require('./lib/litellm-usage');
+const { sdkUsageForPeriod } = require('./lib/sdk-usage');
 const { cleanupLooseInvestigationArtifacts, resetMutableAgentStatus } = require('./lib/runtime-reset');
 const { readFullAccessState, writeFullAccessState } = require('./lib/full-access');
 const {
@@ -89,6 +93,11 @@ try {
 const transcriptStore = new DashboardTranscriptStore(BLACKBOARD_DB);
 const investigationSessions = new InvestigationSessionStore(BLACKBOARD_DB);
 const sdkSessionRegistry = new SdkSessionRegistry();
+const liteLlmResponseRelay = new LiteLlmResponseRelay({ env: process.env });
+if (!process.env.GLADOS_LITELLM_UPSTREAM_BASE_URL) {
+  process.env.GLADOS_LITELLM_UPSTREAM_BASE_URL = liteLlmResponseRelay.upstream;
+}
+const investigationActivationGenerations = new Map();
 let proxyRuntime = {
   status: 'stopped',
   child: null,
@@ -347,6 +356,19 @@ app.delete('/api/investigation-sessions/:id', (req, res) => {
 
 app.post('/api/investigation-sessions/:id/activate', (req, res) => {
   try {
+    const clientId = String(req.body?.clientId || '').trim().slice(0, 160);
+    const generation = Number(req.body?.generation);
+    if (clientId && Number.isSafeInteger(generation) && generation > 0) {
+      const lastGeneration = investigationActivationGenerations.get(clientId) || 0;
+      if (generation < lastGeneration) {
+        const session = activeInvestigationSession();
+        return res.json({ ok: true, stale: true, session, ...investigationNavigationPayload() });
+      }
+      investigationActivationGenerations.set(clientId, generation);
+      while (investigationActivationGenerations.size > 100) {
+        investigationActivationGenerations.delete(investigationActivationGenerations.keys().next().value);
+      }
+    }
     const hasBackgroundWork = activeChatTurns.size > 0 || activeSubagentTurns.size > 0;
     const agentStatusReset = hasBackgroundWork
       ? { reset: 0, errors: [], skipped: true, reason: 'background sessions are still running' }
@@ -561,11 +583,12 @@ function securityReviewRoleFromDispatch(agentId, prompt = '') {
   if (agentId !== 'source-code') return null;
   const text = String(prompt || '');
   const explicit = text.match(/security_review_role:\s*([a-z0-9-]+)/i)?.[1]?.toLowerCase();
+  if (explicit === 'blind-discovery') return 'source-code-primary';
   if (SECURITY_REVIEW_TRACK_ROLES.includes(explicit)) return explicit;
   const namedTrack = SECURITY_REVIEW_TRACK_ROLES.find(role => new RegExp(`(?:track|security_review_role)[:=\\s]+${role}`, 'i').test(text));
   if (namedTrack) return namedTrack;
   if (explicit === 'historical-regression') return explicit;
-  return 'source-code-primary';
+  return null;
 }
 
 function sendMessageToAgentTrackedRuntime(agentId, message, sessionId = activeInvestigationSession().id, context = {}) {
@@ -808,8 +831,33 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
           db.prepare("UPDATE security_review_llm_requests SET status='CONFLICT', last_error='request ID reused across engagements' WHERE request_id=?").run(request.requestId);
           return null;
         }
+        const identity = db.prepare(`
+          SELECT agent_id, review_role, worker_id, requested_model, controller_job_id
+          FROM security_review_llm_requests WHERE request_id=?
+        `).get(request.requestId);
+        if (identity && (identity.agent_id !== request.agentId
+            || (identity.review_role || null) !== (request.reviewRole || null)
+            || (identity.worker_id || null) !== (request.workerId || null)
+            || (identity.requested_model || null) !== (request.requestedModel || null)
+            || (identity.controller_job_id || null) !== (controllerJobId || null))) {
+          db.prepare("UPDATE security_review_llm_requests SET status='CONFLICT', last_error='request ID reused for a different work unit' WHERE request_id=?").run(request.requestId);
+          return null;
+        }
       } finally { db.close(); }
-      const evidence = await fetchLiteLlmAttestation(request.requestId, { env: process.env });
+      const headerReceipt = liteLlmResponseRelay.receipt(request.requestId);
+      const evidence = headerReceipt?.gatewayModelId
+        ? {
+            available: true,
+            attempts: 0,
+            ...headerReceipt,
+            actualModel: headerReceipt.providerModel || headerReceipt.gatewayModelId,
+            billedModelName: headerReceipt.logicalModelAlias,
+            attestationLevel: headerReceipt.providerModel ? 'provider' : 'deployment',
+          }
+        : await fetchLiteLlmAttestation(request.requestId, {
+            env: process.env,
+            gatewayCallId: headerReceipt?.gatewayCallId || request.requestId,
+          });
       if (!evidence.available) {
         const unresolved = new Database(BLACKBOARD_DB);
         try {
@@ -821,6 +869,7 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
         } finally { unresolved.close(); }
         return null;
       }
+      const requestedModel = request.requestedModel || evidence.requestedModel;
       const id = observationId({
         engagementId, requestId: request.requestId, role: request.reviewRole,
         workerId: request.workerId, gatewayModelId: evidence.gatewayModelId,
@@ -831,32 +880,36 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
         settled.prepare(`
           INSERT INTO security_review_model_observations
             (observation_id, engagement_id, controller_job_id, agent_id, review_role, worker_id,
-             requested_model, actual_model, billed_model_name, source, request_id, gateway_model_id, cost_usd, observed_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'litellm:spend-log', ?, ?, ?, ?)
+             requested_model, actual_model, billed_model_name, source, request_id, gateway_model_id, cost_usd,
+             logical_model_alias, provider_model, attestation_level, gateway_call_id, observed_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(observation_id) DO NOTHING
         `).run(id, engagementId, controllerJobId, request.agentId, request.reviewRole, request.workerId,
-          request.requestedModel, evidence.actualModel, evidence.billedModelName, request.requestId,
-          evidence.gatewayModelId, evidence.costUsd, settledAt);
+          requestedModel, evidence.actualModel, evidence.billedModelName, evidence.source || 'litellm:spend-log', request.requestId,
+          evidence.gatewayModelId, evidence.costUsd, evidence.logicalModelAlias || requestedModel,
+          evidence.providerModel || null, evidence.attestationLevel || 'deployment', evidence.gatewayCallId || request.requestId, settledAt);
         settled.prepare(`
           UPDATE security_review_llm_requests
           SET status='SETTLED', lookup_attempts=?, last_error=NULL, settled_at=?
           WHERE request_id=? AND engagement_id=?
         `).run(Number(evidence.attempts || 1), settledAt, request.requestId, engagementId);
       } finally { settled.close(); }
-      appendRuntimeModelObservation(securityReviewArtifactRoot, {
-        observation_id: id,
-        agent_id: request.agentId,
-        review_role: request.reviewRole,
-        worker_id: request.workerId,
-        requested_model: request.requestedModel,
-        model: evidence.actualModel,
-        billed_model_name: evidence.billedModelName,
-        source: 'litellm:spend-log',
-        request_id: request.requestId,
-        gateway_model_id: evidence.gatewayModelId,
-        cost_usd: evidence.costUsd,
-        observed_at: settledAt,
-      });
+      projectSecurityReviewLedgers({ dbPath: BLACKBOARD_DB, artifactRoot: securityReviewArtifactRoot, engagementId });
+      if (headerReceipt?.gatewayCallId) {
+        setTimeout(async () => {
+          try {
+            const finalEvidence = await fetchLiteLlmAttestation(request.requestId, {
+              env: process.env,
+              gatewayCallId: headerReceipt.gatewayCallId,
+              attempts: 6,
+            });
+            if (!finalEvidence.available) return;
+            liteLlmResponseRelay.reconcile(request.requestId, finalEvidence);
+          } catch (error) {
+            console.warn('[security-review] late LiteLLM reconciliation failed:', error.message);
+          }
+        }, 1000).unref?.();
+      }
       return id;
     })();
     securityReviewAttestations.set(request.requestId, pending);
@@ -865,6 +918,16 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
   try {
     const sdkCwd = resolveSdkWorkingDirectory({ env: process.env });
     const turnEnv = { ...process.env, GLADOS_SESSION_ID: sessionId };
+    if (securityReviewArtifactRoot) {
+      let run = null;
+      try { run = JSON.parse(fs.readFileSync(path.join(securityReviewArtifactRoot, 'run.json'), 'utf8')); } catch {}
+      turnEnv.GLADOS_SECURITY_REVIEW = '1';
+      turnEnv.GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT = securityReviewArtifactRoot;
+      turnEnv.GLADOS_SECURITY_REVIEW_REPOSITORY = run?.repositoryPath || '';
+      turnEnv.GLADOS_SECURITY_REVIEW_SOURCE_TYPE = run?.sourceType || '';
+      turnEnv.GLADOS_SECURITY_REVIEW_GIT_HISTORY = run?.gitHistoryAvailable ? '1' : '0';
+      turnEnv.ANTHROPIC_BASE_URL = await liteLlmResponseRelay.ensureStarted();
+    }
     const securityReviewMaxTurns = securityReviewArtifactRoot
       ? (loadPolicy().harness?.securityReviewCoordinatorMaxTurns ?? 1000)
       : undefined;
@@ -880,19 +943,6 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
           securityReviewRolesByToolCall.set(ev.toolCallId, securityReviewRoleFromDispatch(child, dispatchPrompt));
           const workerId = discoveryWorkerIdFromPrompt(dispatchPrompt);
           if (workerId) securityReviewWorkersByToolCall.set(ev.toolCallId, workerId);
-        }
-        if (securityReviewArtifactRoot && sdkMessage?.type === 'assistant' && sdkMessage.request_id) {
-          persistAttestation({
-            requestId: sdkMessage.request_id,
-            agentId: targetAgent,
-            requestedModel: sdkMessage?.message?.model ? bareModelAlias(sdkMessage.message.model, { fallback: null }) : null,
-            workerId: targetAgent === agentId ? null : securityReviewWorkersByToolCall.get(ev.parentToolUseId)
-              || discoveryWorkerIdFromPrompt([...activeSubagentTurns.values()].find(row => row.toolCallId === ev.parentToolUseId)?.taskPrompt || '')
-              || null,
-            reviewRole: targetAgent === agentId
-              ? securityReviewRoleFromDispatch(agentId, message)
-              : securityReviewRolesByToolCall.get(ev.parentToolUseId) || securityReviewRoleFromDispatch(targetAgent, ''),
-          }).catch(error => console.warn('[security-review] LiteLLM attestation failed:', error.message));
         }
         if (targetAgent !== agentId && !isAllowedSubagentDispatch(agentId, targetAgent)) return;
         if (ev.kind === 'tool-call' && isTaskDispatchToolName(ev.toolName)) {
@@ -915,7 +965,8 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
               });
             }
           }
-        } else if (ev.kind === 'tool-result' && ev.toolCallId && activeTaskToolIds.has(ev.toolCallId)) {
+        } else if (ev.kind === 'tool-result' && ev.toolCallId
+            && (activeTaskToolIds.has(ev.toolCallId) || securityReviewWorkersByToolCall.has(ev.toolCallId))) {
           // A background Task first returns a launch acknowledgement. Its real
           // completion arrives later as task_notification and must own the
           // liveness transition; ending here creates a false idle/active flicker.
@@ -925,12 +976,13 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
             if (workerId && engagementId) {
               try {
                 finalizeDiscoveryWorker({
-                  dbPath: BLACKBOARD_DB, engagementId, toolCallId: ev.toolCallId,
+                  dbPath: BLACKBOARD_DB, artifactRoot: securityReviewArtifactRoot,
+                  engagementId, toolCallId: ev.toolCallId,
                   status: ev.isError ? 'FAILED' : 'SUCCEEDED', error: ev.isError ? ev.text : null,
                 });
               } catch (error) { console.warn('[security-review] could not finalize worker dispatch:', error.message); }
             }
-            finishSubagentTurn(task.sessionId, task.agentId, { toolCallId: ev.toolCallId });
+            if (task) finishSubagentTurn(task.sessionId, task.agentId, { toolCallId: ev.toolCallId });
           }
         } else if (isAllowedSubagentDispatch(agentId, targetAgent) && (ev.kind === 'thinking-stream' || ev.kind === 'text-stream' || ev.kind === 'assistant-text' || ev.kind === 'tool-call')) {
           startSubagentTurn(sessionId, agentId, targetAgent, {
@@ -942,6 +994,19 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
         pushBuffer(sessionId, targetAgent, ev);
         broadcastTranscript(sessionId, targetAgent, ev);
         if (ev.kind === 'liveness') {
+          if (!ev.live && securityReviewArtifactRoot && engagementId && ev.toolCallId) {
+            try {
+              reconcileCompletedDiscoveryWorker({
+                dbPath: BLACKBOARD_DB,
+                artifactRoot: securityReviewArtifactRoot,
+                engagementId,
+                toolCallId: ev.toolCallId,
+                completedAt: ev.ts || new Date().toISOString(),
+              });
+            } catch (error) {
+              console.warn('[security-review] could not reconcile completed worker liveness:', error.message);
+            }
+          }
           if (isAllowedSubagentDispatch(agentId, targetAgent)) {
             if (ev.live) startSubagentTurn(sessionId, agentId, targetAgent, { toolCallId: ev.parentToolUseId || ev.toolCallId || null, parentTurnId: turnId, messagePreview: ev.text || ev.state || '' });
             else finishSubagentTurn(sessionId, targetAgent, { toolCallId: ev.parentToolUseId || ev.toolCallId || null, reason: ev.state || 'liveness ended' });
@@ -957,6 +1022,7 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
         autoCompact: readChatPreferences(process.env).autoCompact,
         reviewKey: securityReviewArtifactRoot ? `${engagementId || sessionId}:${controllerJobId || securityReviewArtifactRoot}` : null,
         reviewConcurrencyLimit: loadPolicy().harness?.securityReviewMaxExecutions ?? 3,
+        subagentAllowlist: securityReviewArtifactRoot ? ['source-code', 'source-review-validator'] : undefined,
         maxTurns: securityReviewMaxTurns,
         abortSignal: turn?.turnId === turnId ? turn.abortController?.signal : abortSignal || undefined,
         onInterruptReady: interrupt => attachChatTurnInterrupt(sessionId, agentId, turnId, interrupt),
@@ -972,6 +1038,24 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
             reasonCode: error?.code || null,
           });
         },
+        onSdkMessage: async (sdkMessage, sdkContext) => {
+          if (!securityReviewArtifactRoot || sdkMessage?.type !== 'assistant' || !sdkMessage.request_id) return;
+          const parentToolUseId = sdkMessage.parent_tool_use_id || null;
+          const targetAgent = sdkMessage.subagent_type
+            || sdkContext?.subagentByParentToolUseId?.get(parentToolUseId)
+            || agentId;
+          await persistAttestation({
+            requestId: sdkMessage.request_id,
+            agentId: targetAgent,
+            requestedModel: sdkMessage?.message?.model ? bareModelAlias(sdkMessage.message.model, { fallback: null }) : null,
+            workerId: targetAgent === agentId ? null : securityReviewWorkersByToolCall.get(parentToolUseId)
+              || discoveryWorkerIdFromPrompt([...activeSubagentTurns.values()].find(row => row.toolCallId === parentToolUseId)?.taskPrompt || '')
+              || null,
+            reviewRole: targetAgent === agentId
+              ? securityReviewRoleFromDispatch(agentId, message)
+              : securityReviewRolesByToolCall.get(parentToolUseId) || securityReviewRoleFromDispatch(targetAgent, ''),
+          });
+        },
       },
     });
   } finally {
@@ -979,9 +1063,13 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
       await Promise.all([...securityReviewAttestations.values()]);
       for (const [toolCallId, workerId] of securityReviewWorkersByToolCall) {
         try {
-          finalizeDiscoveryWorker({ dbPath: BLACKBOARD_DB, engagementId, toolCallId, status: 'CANCELED', error: 'parent turn ended before worker reconciliation' });
+          const recovered = reconcileCompletedDiscoveryWorker({
+            dbPath: BLACKBOARD_DB, artifactRoot: securityReviewArtifactRoot, engagementId, toolCallId,
+          });
+          if (!recovered) finalizeDiscoveryWorker({ dbPath: BLACKBOARD_DB, engagementId, toolCallId, status: 'CANCELED', error: 'parent turn ended before worker reconciliation' });
         } catch (error) { console.warn(`[security-review] could not cancel ${workerId}:`, error.message); }
       }
+      projectSecurityReviewLedgers({ dbPath: BLACKBOARD_DB, artifactRoot: securityReviewArtifactRoot, engagementId });
     }
     finishSubagentsForTurn(sessionId, agentId, turnId);
   }
@@ -1145,6 +1233,15 @@ const controller = new ControllerLite({
   currentSessionForAgent,
   getInvestigationSessionId: () => activeInvestigationSession().id,
 });
+try {
+  const recovery = reconcileActiveSecurityReviewWorkers({
+    dbPath: BLACKBOARD_DB,
+    investigationsDir: GLADOS_INVESTIGATIONS_DIR,
+  });
+  if (recovery.reconciled) console.log(`[security-review] reconciled ${recovery.reconciled} completed worker(s) during startup`);
+} catch (error) {
+  console.warn('[security-review] startup worker reconciliation failed:', error.message);
+}
 if (process.env.GLADOS_CONTROLLER_WORKER !== '0') controller.start();
 
 function blackboardRowCounts() {
@@ -1288,7 +1385,7 @@ function resetAgentSession(sessionId, agentId) {
   const key = runtimeKey(sessionId, agentId);
   const hadSession = !!currentSessionForAgent(agentId, sessionId);
   if (agentId === 'glados') resumeCoordinator.clearAll();
-  else resumeCoordinator.clear(agentId);
+  else resumeCoordinator.clear(agentId, sessionId);
   const turn = activeChatTurns.get(key);
   if (turn) {
     turn.stopRequested = true;
@@ -1514,7 +1611,7 @@ app.get('/api/agents', (req, res) => {
       runtime: a.runtime || 'agent-sdk',
       active: !!(snap && snap.live),
       session: snap,
-      halted: watchdogHalt.agentStatus(a.id).haltActive,
+      halted: watchdogHalt.agentStatus(a.id, { sessionId: session.id }).haltActive,
     };
   });
   res.json({ agents: out, sessionId: session.id });
@@ -1826,7 +1923,7 @@ app.get('/api/chat/status/:agent', (req, res) => {
 
 async function haltAgent(agentId, reason = 'dashboard halt', initiator = 'dashboard', sessionId = activeInvestigationSession().id) {
   if (!assessmentAgentIds().includes(agentId)) throw new Error(`unknown GLaDOS agent: ${agentId}`);
-  const result = await watchdogHalt.agentHalt(agentId, reason, { initiator });
+  const result = await watchdogHalt.agentHalt(agentId, reason, { initiator, sessionId });
   let interruptedParent = null;
   const direct = activeChatTurns.get(runtimeKey(sessionId, agentId));
   const subagent = [...activeSubagentTurns.values()].find(row => row.investigationSessionId === sessionId && row.agentId === agentId);
@@ -1861,8 +1958,8 @@ async function haltAgent(agentId, reason = 'dashboard halt', initiator = 'dashbo
 
 async function resumeAgent(agentId, initiator = 'dashboard', sessionId = activeInvestigationSession().id) {
   if (!assessmentAgentIds().includes(agentId)) throw new Error(`unknown GLaDOS agent: ${agentId}`);
-  const result = await watchdogHalt.agentResume(agentId, { initiator });
-  const pausedWork = resumeCoordinator.take(agentId);
+  const result = await watchdogHalt.agentResume(agentId, { initiator, sessionId });
+  const pausedWork = resumeCoordinator.take(agentId, sessionId);
   if (pausedWork) queueResumeContinuation(pausedWork);
   const notice = pausedWork
     ? `Operator resumed ${agentId}. The halt gate is clear and GLaDOS will re-dispatch the saved task context to continue its work.`
@@ -1939,7 +2036,7 @@ function overviewPayload(sessionId = activeInvestigationSession().id) {
       name: agent.name,
       model: agent.model,
       active: !!session?.live,
-      halted: watchdogHalt.agentStatus(agent.id).haltActive,
+      halted: watchdogHalt.agentStatus(agent.id, { sessionId }).haltActive,
       sessionId: session?.sessionId || null,
     };
   });
@@ -2164,7 +2261,7 @@ async function runSlash(raw, sessionId = activeInvestigationSession().id) {
       emit(`${slash.targetUsage(cmd)}\nTarget must be a URL or domain.`);
     } else {
       const target = normalizeTarget(arg);
-      const goal = controller.createWebGoal(target, { source: cmd });
+      const goal = controller.createWebGoal(target, { source: cmd }, sessionId);
       const kickoff = createPendingGladosKickoff(target, raw, { goalId: goal.id, source: 'slash', sessionId });
       if (kickoff.event) events.push(kickoff.event);
     }
@@ -2186,7 +2283,21 @@ async function runSlash(raw, sessionId = activeInvestigationSession().id) {
         source: cmd, target_kind: 'local_path', context_mode: review.mode,
         max_duration_minutes: review.maxDurationMinutes, single_model: review.singleModel,
         review_profile: review.reviewProfile, campaign: campaignMode,
-      });
+      }, sessionId);
+      const configuredModels = new Map(loadHarnessRegistry({ env: process.env }).map(agent => [agent.id, agent.model]));
+      const sourceModel = review.singleModel || configuredModels.get('source-code');
+      const validatorModel = review.singleModel || configuredModels.get('source-review-validator');
+      const expectedModels = {
+        coordinator: review.singleModel || configuredModels.get('glados'),
+        'source-code-primary': sourceModel,
+        'authorization-access-control': sourceModel,
+        'data-flow-injection': sourceModel,
+        'secrets-history': sourceModel,
+        'resilience-error-handling': sourceModel,
+        'iac-config-manifests': sourceModel,
+        'cryptography-suppressions': sourceModel,
+        'source-review-validator': validatorModel,
+      };
       const job = controller.enqueueSecurityReviewPath(review.target, {
         goalId: goal.id,
         engagementId: goal.engagement_id,
@@ -2194,11 +2305,13 @@ async function runSlash(raw, sessionId = activeInvestigationSession().id) {
         maxDurationMinutes: review.maxDurationMinutes,
         discoveryConcurrency: loadPolicy().harness?.securityReviewDiscoveryConcurrency ?? 3,
         specialistConcurrency: loadPolicy().harness?.securityReviewSpecialistConcurrency ?? 3,
-        allowedModels: review.singleModel ? [review.singleModel] : [],
+        allowedModels: [...new Set(Object.values(expectedModels).filter(Boolean))],
+        expectedModels,
         requireModelDiversity: !review.singleModel,
         modelDiversityWaiver: review.singleModel ? `Operator approved a single-model review using ${review.singleModel} in this slash command.` : null,
         reviewProfile: review.reviewProfile,
         campaignMode,
+        sessionId,
       });
       const queuedRun = JSON.parse(fs.readFileSync(path.join(path.dirname(path.dirname(controller.db.name)), 'investigations', job.engagement_id, 'security-review', 'run.json'), 'utf8'));
       emit(`Queued ${campaignMode ? `${queuedRun.campaign.repositoryCount}-repository expedited security-review campaign` : `${review.reviewProfile} source-code security review`} for \`${job.target}\`.\nJob: ${job.id}\nContext mode: ${review.mode}.\nProfile: ${review.reviewProfile}${campaignMode ? ' portfolio breadth first, then risk-ranked depth' : ''}.\nTime ceiling: ${review.maxDurationMinutes ? `${review.maxDurationMinutes} minutes` : 'none; completion is saturation and gate driven'}.\nDiscovery policy: at least ${queuedRun.deepScan.minDiscoveryRuns} successful passes, stop only after ${queuedRun.deepScan.stopAfterNoNew} consecutive no-new passes, ${queuedRun.deepScan.maxDiscoveryRuns == null ? 'no fixed attempt ceiling' : `maximum ${queuedRun.deepScan.maxDiscoveryRuns}`}; up to ${queuedRun.deepScan.discoveryConcurrency} workers per batch.\nModel policy: ${review.singleModel ? `${review.singleModel} only (operator-approved diversity waiver)` : 'configured review models with diversity required'}.\nQuality gates: deterministic inventory, ${campaignMode ? 'one broad pass per campaign repository, ' : ''}risk-ranked specialist review, centralized deduplication, candidate closure, independent High/Critical validation, omission-focused validation, and sealed evidence artifacts${review.mode === 'blind' ? '; prior-report lookup and regression are prohibited for this run' : '; historical regression follows the selected context policy'}.`);
@@ -2247,6 +2360,10 @@ app.get('/api/overview', async (req, res) => {
   try {
     const usagePeriod = req.query.usage_period === 'daily' ? 'daily' : 'weekly';
     const llmUsage = await getLiteLlmUsage({ force: req.query.usage === 'refresh', days: usagePeriod === 'daily' ? 1 : 7 });
+    const period = llmUsage.period || require('./lib/litellm-usage').usageWindow(new Date(), usagePeriod === 'daily' ? 1 : 7);
+    const usageDb = new Database(BLACKBOARD_DB, { readonly: true, fileMustExist: true });
+    try { llmUsage.sdkObserved = sdkUsageForPeriod(usageDb, period); }
+    finally { usageDb.close(); }
     res.set('Cache-Control', 'no-store');
     res.json({ ok: true, session, ...overviewPayload(session.id), llmUsage });
   }
@@ -2254,22 +2371,28 @@ app.get('/api/overview', async (req, res) => {
 });
 
 app.get('/api/controller/events', (req, res) => {
-  try { res.json({ ok: true, events: controller.eventsSince(req.query.since, req.query.limit) }); }
+  const session = requireSession(req, res);
+  if (!session) return;
+  try { res.json({ ok: true, events: controller.eventsSince(req.query.since, req.query.limit, session.id) }); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 app.post('/api/controller/goals', (req, res) => {
+  const session = requireSession(req, res, { writable: true });
+  if (!session) return;
   try {
     const { type = 'webapp_goal', target, metadata = {} } = req.body || {};
     if (!target) return res.status(400).json({ ok: false, error: 'target required' });
-    if (type === 'webapp_goal') return res.json({ ok: true, goal: controller.createWebGoal(target, metadata) });
-    if (type === 'security_review') return res.json({ ok: true, goal: controller.createSecurityReviewGoal(target, metadata) });
+    if (type === 'webapp_goal') return res.json({ ok: true, goal: controller.createWebGoal(target, metadata, session.id) });
+    if (type === 'security_review') return res.json({ ok: true, goal: controller.createSecurityReviewGoal(target, metadata, session.id) });
     return res.status(400).json({ ok: false, error: 'unsupported goal type' });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 app.post('/api/controller/jobs/:id/cancel', (req, res) => {
-  try { res.json(controller.cancelJob(req.params.id)); }
+  const session = requireSession(req, res);
+  if (!session) return;
+  try { res.json(controller.cancelJob(req.params.id, { sessionId: session.id })); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -2423,8 +2546,14 @@ app.get('/api/reports/raw', (req, res) => {
   catch (e) { res.status(400).json({ error: e.message }); }
 });
 app.delete('/api/reports/file', (req, res) => {
-  try { res.json(reports.deleteFile(String(req.query.path || ''))); }
+  try { res.json(reports.deletePath(String(req.query.path || ''))); }
   catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+app.patch('/api/reports/file', (req, res) => {
+  try {
+    const { path: reportPath, name } = req.body || {};
+    res.json(reports.renamePath(String(reportPath || ''), String(name || '')));
+  } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 });
 app.put('/api/reports/file', (req, res) => {
   try {
@@ -2770,6 +2899,7 @@ async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   try { server.close(); } catch {}
+  try { await liteLlmResponseRelay.close(); } catch {}
   await stopDesktopProxy();
   try { controller.close(); } catch {}
   try { transcriptStore.close(); } catch {}

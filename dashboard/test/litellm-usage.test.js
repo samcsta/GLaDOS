@@ -104,3 +104,21 @@ test('returns a sanitized unavailable state when spend-route access is denied', 
   assert.match(result.message, /cannot read/);
   assert.equal(JSON.stringify(result).includes('sensitive gateway detail'), false);
 });
+
+test('usage reporting bypasses a loopback Agent SDK relay', async () => {
+  const calls = [];
+  const reportingCredential = ['server', 'only', 'fixture'].join('-');
+  const response = payload => ({ ok: true, status: 200, text: async () => JSON.stringify(payload) });
+  const result = await fetchLiteLlmUsage({
+    env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:44444' },
+    token: reportingCredential,
+    now: new Date('2026-08-14T12:00:00Z'),
+    fetchImpl: async url => {
+      calls.push(url);
+      if (url.endsWith('/key/info')) return response({ info: { key_alias: 'fixture', max_budget: 10 }, key: 'key-id' });
+      return response({ results: [] });
+    },
+  });
+  assert.equal(result.available, true);
+  assert.equal(calls.every(url => url.startsWith('https://llmapi.redteamstuff.com/')), true);
+});

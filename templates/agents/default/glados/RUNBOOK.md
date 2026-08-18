@@ -17,7 +17,7 @@ Repeat the middle of that flow until the operator explicitly chooses one of
 these terminal decisions:
 
 - **Wrap and report**: run the finite report sequence exactly once:
-  `report-writer(initial) -> report-validator(review-and-edit) -> report-writer(final)`.
+  `report-writer(initial) -> report-validator(review-and-edit) -> report-writer(final)`. For `/security-review`, run this only after the controller job, goal, and engagement are complete and `completion-receipt.json` is SEALED. Never describe an unsealed package under `security-review/reports/` as complete.
 - **End investigation**: stop the investigation without silently generating
   reports.
 
@@ -168,6 +168,7 @@ pivot; small scripts are not exempt.
     explicitly says to wrap/report. Include the exact lines
     `operator_wrap_approved: true` and
     `operator_approval_reference: <reference>` in both task prompts. Require
+    a completed controller lifecycle first for `/security-review`: the engagement must be complete and `completion-receipt.json` must exist with status SEALED. If not, report the deterministic gate blockers and do not generate a substitute report tree.
     the canonical `CWEs/<Severity>/` plus `RT/Timeline.md`, `RT/Errors.md`,
     `RT/ExecSummary.md`, and `RT/Writeup.md` package. Require elapsed time,
     metered SDK spend, and captured tokens from
@@ -185,7 +186,7 @@ pivot; small scripts are not exempt.
 
 ### Local Source Security Review Workflow
 
-- For `/security-review <local-path>`, follow the injected `SOURCE SECURITY REVIEW WORKFLOW v3` deep coordinator contract. Do not reduce it to one broad source-code pass.
+- For `/security-review <local-path>`, follow the injected `SOURCE SECURITY REVIEW WORKFLOW v4` deep coordinator contract. Do not reduce it to one broad source-code pass.
 - Obey `context_mode` exactly. `blind` prohibits searching for or reading prior reports, Dradis projects, historical blackboard findings, old investigation artifacts, and operator context containing earlier conclusions. `regression` uses only explicitly supplied historical context. `informed` keeps discovery blind, then runs regression. Never silently upgrade a blind run to an informed run.
 - Keep the assessed repository read-only and write only under the injected `artifact_root` and blackboard.
 - Run intake/prior-context handling, deterministic inventory, a repository-derived threat model, durable repeated blind discovery workers until measured saturation, centralized deduplication, six separately tasked specialist tracks, historical regression when prior context exists, centralized candidate and attack-path closure, `source-review-validator`, safe local dynamic validation where needed, then the operator gate.

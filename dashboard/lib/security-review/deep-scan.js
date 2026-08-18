@@ -5,7 +5,7 @@ const Database = require('better-sqlite3');
 
 const DEEP_SCAN_DEFAULTS = Object.freeze({
   minDiscoveryRuns: 3,
-  stopAfterNoNew: 6,
+  stopAfterNoNew: 3,
   maxDiscoveryRuns: 60,
   maxDurationMinutes: null,
   discoveryConcurrency: 3,
@@ -52,8 +52,8 @@ const MODEL_ROLE_AGENTS = Object.freeze({
 });
 
 const WORKER_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'CANCELED']);
-const CANDIDATE_DISPOSITIONS = new Set(['REPORTABLE', 'SUPPRESSED', 'NOT_APPLICABLE', 'DEFERRED']);
-const ATTACK_PATH_DISPOSITIONS = new Set(['REPORTABLE', 'IGNORE', 'NOT_APPLICABLE', 'DEFERRED']);
+const CANDIDATE_DISPOSITIONS = new Set(['REPORTABLE', 'OBSERVATION', 'SUPPRESSED', 'NOT_APPLICABLE', 'DEFERRED']);
+const ATTACK_PATH_DISPOSITIONS = new Set(['REPORTABLE', 'OBSERVATION', 'IGNORE', 'NOT_APPLICABLE', 'DEFERRED']);
 
 function discoveryWorkerIdFromPrompt(prompt = '') {
   return String(prompt).match(/^worker_id:\s*(worker-\d{3})\s*$/im)?.[1] || null;
@@ -63,7 +63,7 @@ function engagementIdFromArtifactRoot(artifactRoot) {
   return path.basename(path.dirname(path.resolve(artifactRoot)));
 }
 
-function claimDiscoveryWorker({ dbPath, artifactRoot, engagementId, workerId, toolCallId, startedAt = new Date().toISOString() }) {
+function claimDiscoveryWorker({ dbPath, artifactRoot, engagementId, workerId, toolCallId, requestedModel = null, startedAt = new Date().toISOString() }) {
   if (!dbPath || !engagementId || !/^worker-\d{3}$/.test(String(workerId || '')) || !toolCallId) {
     return { claimed: false, reason: 'discovery worker claim requires database, engagement, canonical worker_id, and tool_call_id' };
   }
@@ -114,9 +114,9 @@ function claimDiscoveryWorker({ dbPath, artifactRoot, engagementId, workerId, to
         } else {
           db.prepare(`
             INSERT INTO security_review_worker_runs
-              (engagement_id, worker_id, sequence, tool_call_id, status, started_at)
-            VALUES (?, ?, ?, ?, 'STARTED', ?)
-          `).run(engagementId, workerId, sequence, toolCallId, startedAt);
+              (engagement_id, worker_id, sequence, tool_call_id, status, started_at, requested_model, attempt)
+            VALUES (?, ?, ?, ?, 'STARTED', ?, ?, ?)
+          `).run(engagementId, workerId, sequence, toolCallId, startedAt, requestedModel, attempt);
         }
       } catch (error) {
         return { claimed: false, reason: `discovery worker ${workerId} was already dispatched` };
@@ -129,12 +129,26 @@ function claimDiscoveryWorker({ dbPath, artifactRoot, engagementId, workerId, to
   }
 }
 
-function finalizeDiscoveryWorker({ dbPath, engagementId, toolCallId, status, error = null, completedAt = new Date().toISOString() }) {
+function finalizeDiscoveryWorker({ dbPath, artifactRoot = null, engagementId, toolCallId, status, error = null, completedAt = new Date().toISOString() }) {
   if (!dbPath || !engagementId || !toolCallId) return false;
   const terminal = String(status || '').toUpperCase();
   if (!WORKER_STATUSES.has(terminal)) return false;
   const db = new Database(dbPath);
   try {
+    if (terminal === 'SUCCEEDED') {
+      if (!artifactRoot) return false;
+      const worker = db.prepare(`
+        SELECT worker_id FROM security_review_worker_runs
+        WHERE engagement_id=? AND tool_call_id=? AND status='STARTED'
+      `).get(engagementId, toolCallId);
+      if (!worker || !validateWorkerArtifacts(artifactRoot, worker.worker_id).valid) return false;
+      const observations = db.prepare(`
+        SELECT DISTINCT actual_model
+        FROM security_review_model_observations
+        WHERE engagement_id=? AND worker_id=? AND agent_id='source-code' AND review_role='source-code-primary'
+      `).all(engagementId, worker.worker_id).map(row => row.actual_model).filter(Boolean);
+      if (observations.length !== 1) return false;
+    }
     const result = db.prepare(`
       UPDATE security_review_worker_runs
       SET status=?, completed_at=?, error=?
@@ -149,6 +163,192 @@ function finalizeDiscoveryWorker({ dbPath, engagementId, toolCallId, status, err
   } finally {
     db.close();
   }
+}
+
+function reconcileCompletedDiscoveryWorker({ dbPath, artifactRoot, engagementId, toolCallId, completedAt = new Date().toISOString() }) {
+  if (!dbPath || !artifactRoot || !engagementId || !toolCallId) return false;
+  const db = new Database(dbPath);
+  try {
+    db.pragma('busy_timeout = 5000');
+    const worker = db.prepare(`
+      SELECT * FROM security_review_worker_runs WHERE engagement_id=? AND tool_call_id=?
+    `).get(engagementId, toolCallId);
+    if (!worker) return false;
+    const artifacts = validateWorkerArtifacts(artifactRoot, worker.worker_id);
+    if (!artifacts.valid) return false;
+    const observations = db.prepare(`
+      SELECT DISTINCT actual_model
+      FROM security_review_model_observations
+      WHERE engagement_id=? AND worker_id=? AND agent_id='source-code' AND review_role='source-code-primary'
+    `).all(engagementId, worker.worker_id).map(row => row.actual_model).filter(Boolean);
+    if (observations.length !== 1) return false;
+    const tx = db.transaction(() => {
+      db.prepare(`
+        UPDATE security_review_worker_runs
+        SET status='SUCCEEDED', completed_at=COALESCE(completed_at, ?), error=NULL
+        WHERE engagement_id=? AND tool_call_id=? AND status IN ('STARTED','CANCELED')
+      `).run(completedAt, engagementId, toolCallId);
+      db.prepare(`
+        UPDATE security_review_worker_attempts
+        SET status='SUCCEEDED', completed_at=COALESCE(completed_at, ?), error=NULL
+        WHERE engagement_id=? AND tool_call_id=? AND status IN ('STARTED','CANCELED')
+      `).run(completedAt, engagementId, toolCallId);
+    });
+    tx();
+    projectSecurityReviewLedgers({ db, artifactRoot, engagementId });
+    return true;
+  } finally { db.close(); }
+}
+
+function workerArtifactPaths(artifactRoot, workerId) {
+  for (const directory of [`discovery/deep/${workerId}`, `discovery/workers/${workerId}`]) {
+    const candidatesRelative = `${directory}/candidates.jsonl`;
+    const receiptRelative = `${directory}/receipt.json`;
+    if (fs.existsSync(path.join(artifactRoot, candidatesRelative))
+        && fs.existsSync(path.join(artifactRoot, receiptRelative))) {
+      return { candidatesRelative, receiptRelative };
+    }
+  }
+  return {
+    candidatesRelative: `discovery/deep/${workerId}/candidates.jsonl`,
+    receiptRelative: `discovery/deep/${workerId}/receipt.json`,
+  };
+}
+
+function reconcileActiveSecurityReviewWorkers({ dbPath, investigationsDir }) {
+  if (!dbPath || !investigationsDir) return { checked: 0, reconciled: 0 };
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  let rows;
+  try {
+    rows = db.prepare(`
+      SELECT run.engagement_id, run.tool_call_id
+      FROM security_review_worker_runs run
+      JOIN engagements engagement ON engagement.id=run.engagement_id
+      WHERE engagement.status='active' AND run.status IN ('STARTED','CANCELED')
+      ORDER BY run.engagement_id, run.sequence
+    `).all();
+  } finally { db.close(); }
+  let reconciled = 0;
+  for (const row of rows) {
+    const artifactRoot = path.join(investigationsDir, row.engagement_id, 'security-review');
+    if (!fs.existsSync(artifactRoot)) continue;
+    if (reconcileCompletedDiscoveryWorker({
+      dbPath, artifactRoot, engagementId: row.engagement_id, toolCallId: row.tool_call_id,
+    })) reconciled += 1;
+  }
+  return { checked: rows.length, reconciled };
+}
+
+function reconcileInvalidSuccessfulDiscoveryWorkers({ dbPath, artifactRoot, engagementId, completedAt = new Date().toISOString() }) {
+  if (!dbPath || !artifactRoot || !engagementId) return [];
+  const db = new Database(dbPath);
+  try {
+    db.pragma('busy_timeout = 5000');
+    const invalid = db.prepare(`
+      SELECT worker_id, tool_call_id FROM security_review_worker_runs
+      WHERE engagement_id=? AND status='SUCCEEDED' ORDER BY sequence
+    `).all(engagementId).flatMap(worker => {
+      const artifacts = validateWorkerArtifacts(artifactRoot, worker.worker_id);
+      return artifacts.valid ? [] : [{ ...worker, error: artifacts.error }];
+    });
+    if (!invalid.length) return [];
+    db.transaction(() => {
+      for (const worker of invalid) {
+        const error = `invalid legacy success reconciliation: ${worker.error}`;
+        db.prepare(`
+          UPDATE security_review_worker_runs SET status='FAILED', completed_at=?, error=?
+          WHERE engagement_id=? AND tool_call_id=? AND status='SUCCEEDED'
+        `).run(completedAt, error, engagementId, worker.tool_call_id);
+        db.prepare(`
+          UPDATE security_review_worker_attempts SET status='FAILED', completed_at=?, error=?
+          WHERE engagement_id=? AND tool_call_id=? AND status='SUCCEEDED'
+        `).run(completedAt, error, engagementId, worker.tool_call_id);
+      }
+    })();
+    return invalid.map(worker => worker.worker_id);
+  } finally { db.close(); }
+}
+
+function validateWorkerArtifacts(artifactRoot, workerId) {
+  const { candidatesRelative, receiptRelative } = workerArtifactPaths(artifactRoot, workerId);
+  const candidatesFile = path.join(artifactRoot, candidatesRelative);
+  const receiptFile = path.join(artifactRoot, receiptRelative);
+  let candidates;
+  let receipt;
+  try {
+    candidates = fs.readFileSync(candidatesFile, 'utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse);
+    receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  } catch (error) {
+    return { valid: false, error: `worker artifacts are missing or invalid: ${error.message}` };
+  }
+  if (candidates.some(candidate => !new RegExp(`^${workerId}-C\\d{4}$`).test(String(candidate?.candidate_id || '')))) {
+    return { valid: false, error: `worker candidate ID is not owned by ${workerId}` };
+  }
+  if (receipt.worker_id !== workerId || receipt.status !== 'SUCCEEDED'
+      || receipt.candidate_count !== candidates.length || receipt.candidates_sha256 !== sha256File(candidatesFile)) {
+    return { valid: false, error: 'worker receipt is not identity/count/hash bound to its candidate artifact' };
+  }
+  return { valid: true, candidatesRelative, receiptRelative };
+}
+
+function atomicWriteJsonLines(file, rows) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const fd = fs.openSync(temporary, 'w', 0o600);
+  try {
+    fs.writeFileSync(fd, rows.length ? `${rows.map(row => JSON.stringify(row)).join('\n')}\n` : '');
+    fs.fsyncSync(fd);
+  } finally { fs.closeSync(fd); }
+  fs.renameSync(temporary, file);
+}
+
+function projectSecurityReviewLedgers({ dbPath = null, db = null, artifactRoot, engagementId }) {
+  if (!artifactRoot || !engagementId || (!db && !dbPath)) return { workers: 0, observations: 0 };
+  const connection = db || new Database(dbPath);
+  try {
+    const observations = connection.prepare(`
+      SELECT observation_id, agent_id, review_role, worker_id, requested_model,
+             actual_model AS model, billed_model_name, source, request_id, gateway_model_id,
+             cost_usd, observed_at, logical_model_alias, provider_model, attestation_level, gateway_call_id
+      FROM security_review_model_observations
+      WHERE engagement_id=?
+      ORDER BY observed_at, observation_id
+    `).all(engagementId);
+    const byWorker = new Map();
+    for (const observation of observations) {
+      if (!observation.worker_id) continue;
+      const list = byWorker.get(observation.worker_id) || [];
+      list.push(observation);
+      byWorker.set(observation.worker_id, list);
+    }
+    const workers = connection.prepare(`
+      SELECT * FROM security_review_worker_runs WHERE engagement_id=? ORDER BY sequence
+    `).all(engagementId).filter(row => row.status !== 'STARTED').map(row => {
+      const workerObservations = byWorker.get(row.worker_id) || [];
+      const models = [...new Set(workerObservations.map(item => item.model).filter(Boolean))];
+      const projected = {
+        worker_id: row.worker_id,
+        sequence: row.sequence,
+        attempt: Number(row.attempt || 1),
+        status: row.status,
+        requested_model: row.requested_model || workerObservations[0]?.logical_model_alias || workerObservations[0]?.requested_model || 'unknown',
+        actual_model: models.length === 1 ? models[0] : null,
+        model_observation_ids: workerObservations.map(item => item.observation_id),
+        started_at: row.started_at,
+        completed_at: row.completed_at,
+        retry_of: row.retry_of || null,
+      };
+      if (row.status === 'SUCCEEDED') return {
+        ...projected,
+        candidates_artifact: workerArtifactPaths(artifactRoot, row.worker_id).candidatesRelative,
+        receipt_artifact: workerArtifactPaths(artifactRoot, row.worker_id).receiptRelative,
+      };
+      return { ...projected, error: row.error || `worker ${row.status.toLowerCase()}` };
+    });
+    atomicWriteJsonLines(path.join(artifactRoot, 'validation', 'runtime-model-observations.jsonl'), observations);
+    atomicWriteJsonLines(path.join(artifactRoot, 'discovery', 'deep', 'workers.jsonl'), workers);
+    return { workers: workers.length, observations: observations.length };
+  } finally { if (!db) connection.close(); }
 }
 
 function writeJson(file, value) {
@@ -196,6 +396,85 @@ function appendRuntimeModelObservation(artifactRoot, observation) {
   return row;
 }
 
+function bindRuntimeModelObservationToWorker(artifactRoot, {
+  workerId,
+  observationId,
+  actualModel,
+} = {}) {
+  if (!artifactRoot || !workerId || !observationId || !actualModel) return false;
+  const file = path.join(artifactRoot, 'discovery', 'deep', 'workers.jsonl');
+  let lines;
+  try {
+    lines = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean);
+  } catch { return false; }
+  let changed = false;
+  const rows = lines.map(line => {
+    const row = JSON.parse(line);
+    if (row.worker_id !== workerId) return row;
+    const ids = Array.isArray(row.model_observation_ids) ? row.model_observation_ids : [];
+    if (!ids.includes(observationId)) {
+      row.model_observation_ids = [...ids, observationId];
+      changed = true;
+    }
+    if (row.actual_model !== actualModel) {
+      row.actual_model = actualModel;
+      changed = true;
+    }
+    return row;
+  });
+  if (!changed) return false;
+  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temporary, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, file);
+  return true;
+}
+
+function reconcileRuntimeModelObservationsToWorkers(artifactRoot) {
+  const workersFile = path.join(artifactRoot, 'discovery', 'deep', 'workers.jsonl');
+  const observationsFile = path.join(artifactRoot, 'validation', 'runtime-model-observations.jsonl');
+  let workers;
+  let observations;
+  try {
+    workers = fs.readFileSync(workersFile, 'utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse);
+    observations = fs.readFileSync(observationsFile, 'utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse);
+  } catch { return 0; }
+  const byWorker = new Map();
+  for (const observation of observations) {
+    if (observation?.agent_id !== 'source-code'
+        || observation?.review_role !== 'source-code-primary'
+        || !observation?.worker_id
+        || !observation?.observation_id
+        || !observation?.model
+        || !observation?.request_id
+        || !observation?.gateway_model_id
+        || !['litellm:spend-log', 'litellm:response-headers'].includes(observation?.source)) continue;
+    const rows = byWorker.get(observation.worker_id) || [];
+    rows.push(observation);
+    byWorker.set(observation.worker_id, rows);
+  }
+  let updated = 0;
+  for (const worker of workers) {
+    const matches = (byWorker.get(worker.worker_id) || [])
+      .sort((left, right) => String(left.observed_at || '').localeCompare(String(right.observed_at || ''))
+        || String(left.observation_id).localeCompare(String(right.observation_id)));
+    const models = [...new Set(matches.map(row => row.model))];
+    if (models.length !== 1) continue;
+    const ids = [...new Set([
+      ...(Array.isArray(worker.model_observation_ids) ? worker.model_observation_ids : []),
+      ...matches.map(row => row.observation_id),
+    ])];
+    if (JSON.stringify(ids) === JSON.stringify(worker.model_observation_ids || []) && worker.actual_model === models[0]) continue;
+    worker.model_observation_ids = ids;
+    worker.actual_model = models[0];
+    updated += 1;
+  }
+  if (!updated) return 0;
+  const temporary = `${workersFile}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temporary, `${workers.map(row => JSON.stringify(row)).join('\n')}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, workersFile);
+  return updated;
+}
+
 function normalizeDeepScanConfig(value = {}) {
   const positiveInteger = (input, fallback, maximum) => {
     const parsed = Number(input);
@@ -221,6 +500,7 @@ function normalizeDeepScanConfig(value = {}) {
 function initializeDeepScanRun(artifactRoot, {
   config = {},
   allowedModels = [],
+  expectedModels = {},
   requireModelDiversity = true,
   modelDiversityWaiver = null,
   reviewProfile = 'comprehensive',
@@ -233,7 +513,7 @@ function initializeDeepScanRun(artifactRoot, {
   const deadlineAt = deepScan.maxDurationMinutes
     ? new Date(startedAt.getTime() + deepScan.maxDurationMinutes * 60_000)
     : null;
-  run.workflowVersion = 3;
+  run.workflowVersion = 4;
   run.reviewProfile = reviewProfile === 'expedited' ? 'expedited' : 'comprehensive';
   run.campaign = campaign ? {
     enabled: true,
@@ -249,6 +529,9 @@ function initializeDeepScanRun(artifactRoot, {
   };
   run.modelPolicy = {
     allowedModels: [...new Set(allowedModels.map(value => String(value).trim()).filter(Boolean))],
+    expectedModels: Object.fromEntries(Object.entries(expectedModels)
+      .map(([role, model]) => [String(role), String(model || '').trim()])
+      .filter(([, model]) => model)),
     requireDiversity: requireModelDiversity !== false,
     diversityWaiver: modelDiversityWaiver || null,
   };
@@ -282,7 +565,12 @@ function markDeepScanCapped(artifactRoot, reason = 'security-review wall-clock l
   }
 }
 
-function discoveryDispatchCheckpoint(artifactRoot, { nextWorkerId, retryOf = null, saturationProbe = false } = {}) {
+function discoveryDispatchCheckpoint(artifactRoot, {
+  nextWorkerId,
+  retryOf = null,
+  saturationProbe = false,
+  lifecycleState = 'RUNNING',
+} = {}) {
   const invalid = [];
   const workerMatch = String(nextWorkerId || '').match(/^worker-(\d{3})$/);
   if (!workerMatch) return { passed: false, invalid: ['next worker_id must use worker-NNN'] };
@@ -318,7 +606,7 @@ function discoveryDispatchCheckpoint(artifactRoot, { nextWorkerId, retryOf = nul
   const manifest = parseJson('discovery/deep/manifest.json');
   const run = parseJson('run.json');
   if (manifest) {
-    if (manifest.schema_version !== 1 || manifest.status !== 'RUNNING') invalid.push('discovery/deep/manifest.json: expected harness schema_version 1 and RUNNING status');
+    if (manifest.schema_version !== 1 || manifest.status !== lifecycleState) invalid.push(`discovery/deep/manifest.json: expected harness schema_version 1 and ${lifecycleState} status`);
     if (!manifest.config || typeof manifest.started_at !== 'string' || (manifest.deadline_at !== null && typeof manifest.deadline_at !== 'string') || !Array.isArray(manifest.omitted_workers)) {
       invalid.push('discovery/deep/manifest.json: harness fields config, started_at, deadline_at, and omitted_workers must be preserved');
     }
@@ -329,11 +617,11 @@ function discoveryDispatchCheckpoint(artifactRoot, { nextWorkerId, retryOf = nul
       invalid.push(`discovery config ${field} must be normalized and identical in run.json and manifest`);
     }
   }
-  if (run?.deepScan?.terminalState !== 'RUNNING') invalid.push('run.json deep scan is not RUNNING');
+  if (run?.deepScan?.terminalState !== lifecycleState) invalid.push(`run.json deep scan is not ${lifecycleState}`);
   if (manifest?.deadline_at !== run?.deepScan?.deadlineAt) invalid.push('discovery deadline must match run.json');
   const deadlineMs = manifest?.deadline_at ? Date.parse(manifest.deadline_at) : null;
   if (manifest?.deadline_at && !Number.isFinite(deadlineMs)) invalid.push('discovery deadline is invalid');
-  else if (Number.isFinite(deadlineMs) && deadlineMs <= Date.now()) invalid.push('discovery deadline has elapsed; mark the run CAPPED');
+  else if (lifecycleState === 'RUNNING' && Number.isFinite(deadlineMs) && deadlineMs <= Date.now()) invalid.push('discovery deadline has elapsed; mark the run CAPPED');
   if (!saturationProbe && config.maxDiscoveryRuns != null && nextSequence > config.maxDiscoveryRuns) invalid.push(`discovery maximum of ${config.maxDiscoveryRuns} attempts has been reached`);
 
   const workersFile = path.join(artifactRoot, 'discovery/deep/workers.jsonl');
@@ -426,7 +714,8 @@ function discoveryDispatchCheckpoint(artifactRoot, { nextWorkerId, retryOf = nul
     const mapped = new Set();
     const canonicalRows = parseJsonl('discovery/candidates.jsonl');
     const canonicalIds = new Set(canonicalRows.map(row => row?.candidate_id).filter(Boolean));
-    const firstOwner = new Map();
+    const sequenceByWorker = new Map(succeeded.map(worker => [worker.worker_id, worker.sequence]));
+    const ownersByCanonical = new Map();
     for (const mapping of mappings) {
       const key = `${mapping?.worker_id}\0${mapping?.source_candidate_id}`;
       if (!rawKeys.has(key) || mapped.has(key) || !canonicalIds.has(mapping?.canonical_candidate_id) || typeof mapping?.rationale !== 'string' || !mapping.rationale.trim()) {
@@ -434,15 +723,19 @@ function discoveryDispatchCheckpoint(artifactRoot, { nextWorkerId, retryOf = nul
         break;
       }
       mapped.add(key);
-      if (!firstOwner.has(mapping.canonical_candidate_id)) firstOwner.set(mapping.canonical_candidate_id, mapping.worker_id);
+      const owners = ownersByCanonical.get(mapping.canonical_candidate_id) || [];
+      owners.push(mapping.worker_id);
+      ownersByCanonical.set(mapping.canonical_candidate_id, owners);
     }
     if (mapped.size !== rawKeys.size) invalid.push('dedupe mappings do not cover every prior raw candidate exactly once');
     if (!dedupe.new_candidate_counts || !Number.isInteger(dedupe.no_new_streak)) invalid.push('dedupe new_candidate_counts and no_new_streak are required');
     const countKeys = Object.keys(dedupe.new_candidate_counts || {});
     if (JSON.stringify(countKeys.sort()) !== JSON.stringify([...expectedWorkerIds].sort())) invalid.push('dedupe new_candidate_counts keys do not exactly match successful workers');
+    const firstOwners = [...ownersByCanonical.values()].map(owners => [...new Set(owners)]
+      .sort((left, right) => sequenceByWorker.get(left) - sequenceByWorker.get(right))[0]);
     const computedCounts = Object.fromEntries(expectedWorkerIds.map(workerId => [
       workerId,
-      [...firstOwner.values()].filter(owner => owner === workerId).length,
+      firstOwners.filter(owner => owner === workerId).length,
     ]));
     for (const workerId of expectedWorkerIds) {
       if (dedupe.new_candidate_counts?.[workerId] !== computedCounts[workerId]) invalid.push(`dedupe new_candidate_counts.${workerId} does not match canonical first introductions`);
@@ -464,7 +757,15 @@ function discoverySaturationCheckpoint(artifactRoot) {
   const invalid = [];
   const workers = readJsonLines(artifactRoot, 'discovery/deep/workers.jsonl', invalid);
   const nextWorkerId = `worker-${String(workers.length + 1).padStart(3, '0')}`;
-  const chain = discoveryDispatchCheckpoint(artifactRoot, { nextWorkerId, retryOf: null, saturationProbe: true });
+  let lifecycleState = 'RUNNING';
+  try {
+    const run = JSON.parse(fs.readFileSync(path.join(artifactRoot, 'run.json'), 'utf8'));
+    const manifest = JSON.parse(fs.readFileSync(path.join(artifactRoot, 'discovery/deep/manifest.json'), 'utf8'));
+    if (run?.deepScan?.terminalState === 'SATURATED' && manifest?.status === 'SATURATED') lifecycleState = 'SATURATED';
+  } catch {}
+  const chain = discoveryDispatchCheckpoint(artifactRoot, {
+    nextWorkerId, retryOf: null, saturationProbe: true, lifecycleState,
+  });
   invalid.push(...chain.invalid);
   const manifest = readJson(artifactRoot, 'discovery/deep/manifest.json', invalid);
   const dedupe = readJson(artifactRoot, 'discovery/deep/dedupe.json', invalid);
@@ -575,8 +876,11 @@ function validateCandidate(candidate, label, invalid, inventoryFiles = null) {
   }
 }
 
-function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservations = [], authoritativeWorkerRuns = [] } = {}) {
-  const missing = REQUIRED_DEEP_ARTIFACTS.filter(relative => !fs.existsSync(path.join(artifactRoot, relative)));
+function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservations = [], authoritativeWorkerRuns = [], skipSealValidation = false } = {}) {
+  const sealArtifacts = new Set(['scan-manifest.json', 'completion-receipt.json']);
+  const missing = REQUIRED_DEEP_ARTIFACTS
+    .filter(relative => !skipSealValidation || !sealArtifacts.has(relative))
+    .filter(relative => !fs.existsSync(path.join(artifactRoot, relative)));
   const invalid = [];
   const available = relative => !missing.includes(relative);
   const json = relative => available(relative) ? readJson(artifactRoot, relative, invalid) : null;
@@ -724,6 +1028,16 @@ function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservation
   const canonicalRows = jsonl('discovery/candidates.jsonl');
   const canonical = keyed(canonicalRows, 'candidate_id', 'discovery/candidates.jsonl', invalid);
   canonicalRows.forEach((row, index) => validateCandidate(row, `discovery/candidates.jsonl:${index + 1}`, invalid, inventoryFiles));
+  const validatorCandidateRows = fs.existsSync(path.join(artifactRoot, 'validation', 'new-candidates.jsonl'))
+    ? readJsonLines(artifactRoot, 'validation/new-candidates.jsonl', invalid)
+    : [];
+  const validatorCandidates = keyed(validatorCandidateRows, 'candidate_id', 'validation/new-candidates.jsonl', invalid);
+  validatorCandidateRows.forEach((row, index) => validateCandidate(row, `validation/new-candidates.jsonl:${index + 1}`, invalid, inventoryFiles));
+  const closureCandidates = new Map(canonical);
+  for (const [id, row] of validatorCandidates) {
+    if (closureCandidates.has(id)) invalid.push(`validation/new-candidates.jsonl: duplicate canonical candidate ${id}`);
+    else closureCandidates.set(id, row);
+  }
   const dedupe = json('discovery/deep/dedupe.json');
   const expectedWorkerIds = succeeded.map(row => row.worker_id);
   if (JSON.stringify(dedupe?.input_worker_ids || []) !== JSON.stringify(expectedWorkerIds)) invalid.push('discovery/deep/dedupe.json: input_worker_ids do not exactly match successful workers in sequence order');
@@ -763,7 +1077,7 @@ function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservation
 
   const closureRows = jsonl('validation/candidate-closure.jsonl');
   const closure = keyed(closureRows, 'candidate_id', 'validation/candidate-closure.jsonl', invalid);
-  requireExactKeys(canonical, closure, 'canonical candidates vs validation closure', invalid);
+  requireExactKeys(closureCandidates, closure, 'canonical and validator candidates vs validation closure', invalid);
   closureRows.forEach((row, index) => {
     const label = `candidate closure ${row.candidate_id || index + 1}`;
     if (!CANDIDATE_DISPOSITIONS.has(String(row.disposition || '').toUpperCase())) invalid.push(`${label}.disposition: invalid terminal disposition`);
@@ -773,11 +1087,15 @@ function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservation
     requireText(row.counterevidence, `${label}.counterevidence`, invalid);
     if (!Array.isArray(row.proof_gaps)) invalid.push(`${label}.proof_gaps: required array`);
     if (String(row.disposition || '').toUpperCase() === 'REPORTABLE' && (!Array.isArray(row.finding_ids) || row.finding_ids.length === 0)) invalid.push(`${label}: REPORTABLE requires finding_ids`);
+    if (String(row.disposition || '').toUpperCase() === 'OBSERVATION') {
+      if (!Array.isArray(row.observation_ids) || row.observation_ids.length === 0) invalid.push(`${label}: OBSERVATION requires observation_ids`);
+      requireText(row.reportability_rationale, `${label}.reportability_rationale`, invalid);
+    }
   });
 
   const attackRows = jsonl('validation/attack-paths.jsonl');
   const attackPaths = keyed(attackRows, 'candidate_id', 'validation/attack-paths.jsonl', invalid);
-  requireExactKeys(canonical, attackPaths, 'canonical candidates vs attack-path analysis', invalid);
+  requireExactKeys(closureCandidates, attackPaths, 'canonical and validator candidates vs attack-path analysis', invalid);
   attackRows.forEach((row, index) => {
     const label = `attack path ${row.candidate_id || index + 1}`;
     if (!ATTACK_PATH_DISPOSITIONS.has(String(row.disposition || '').toUpperCase())) invalid.push(`${label}.disposition: invalid terminal disposition`);
@@ -792,7 +1110,9 @@ function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservation
   for (const [id, observation] of observations) {
     requireText(observation.agent_id, `model observation ${id}.agent_id`, invalid);
     requireText(observation.model, `model observation ${id}.model`, invalid);
-    if (observation.source !== 'litellm:spend-log') invalid.push(`model observation ${id}.source: expected authoritative LiteLLM spend-log evidence`);
+    if (!['litellm:spend-log', 'litellm:response-headers'].includes(observation.source)) {
+      invalid.push(`model observation ${id}.source: expected authoritative LiteLLM spend-log or response-header evidence`);
+    }
     requireText(observation.request_id, `model observation ${id}.request_id`, invalid);
     requireText(observation.gateway_model_id, `model observation ${id}.gateway_model_id`, invalid);
     requireText(observation.billed_model_name, `model observation ${id}.billed_model_name`, invalid);
@@ -810,7 +1130,6 @@ function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservation
       invalid.push(`model observation ${id}: not present unchanged in the controller-owned gateway ledger`);
     }
     if (observation.review_role) requireText(observation.review_role, `model observation ${id}.review_role`, invalid);
-    if (observation.review_role === 'source-code-primary') requireText(observation.worker_id, `model observation ${id}.worker_id`, invalid);
   }
   for (const worker of succeeded) {
     const ids = Array.isArray(worker.model_observation_ids) ? worker.model_observation_ids : [];
@@ -833,6 +1152,9 @@ function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservation
   const requiredRoles = new Map(REQUIRED_MODEL_ROLES.map(role => [role, true]));
   requireExactKeys(requiredRoles, modelRoles, 'required review roles vs model receipts', invalid);
   const allowedModels = new Set(Array.isArray(run?.modelPolicy?.allowedModels) ? run.modelPolicy.allowedModels : []);
+  const expectedModels = run?.modelPolicy?.expectedModels && typeof run.modelPolicy.expectedModels === 'object'
+    ? run.modelPolicy.expectedModels
+    : {};
   modelReceipts.forEach(receipt => {
     requireText(receipt.requested_model, `model receipt ${receipt.role}.requested_model`, invalid);
     requireText(receipt.actual_model, `model receipt ${receipt.role}.actual_model`, invalid);
@@ -848,17 +1170,29 @@ function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservation
       }
     }
     if (allowedModels.size && !allowedModels.has(receipt.requested_model)) invalid.push(`model receipt ${receipt.role}: requested model ${receipt.requested_model} is outside the allowed model policy`);
+    if (expectedModels[receipt.role] && expectedModels[receipt.role] !== receipt.requested_model) {
+      invalid.push(`model receipt ${receipt.role}: requested model ${receipt.requested_model} does not match configured model ${expectedModels[receipt.role]}`);
+    }
+    if (expectedModels[receipt.role] && expectedModels[receipt.role] !== receipt.billed_model_name) {
+      invalid.push(`model receipt ${receipt.role}: billed model ${receipt.billed_model_name || '(missing)'} does not match configured model ${expectedModels[receipt.role]}`);
+    }
+    const receiptProviderProven = (receipt.observation_ids || []).some(id => observations.get(id)?.attestation_level === 'provider');
+    if (allowedModels.size && receiptProviderProven && !allowedModels.has(receipt.actual_model)) invalid.push(`model receipt ${receipt.role}: actual model ${receipt.actual_model} is outside the allowed model policy`);
   });
   const actualModels = new Set(modelReceipts.map(row => row.actual_model).filter(Boolean));
   for (const [id, observation] of observations) {
     if (allowedModels.size && MODEL_ROLE_AGENTS[observation.review_role] && !allowedModels.has(observation.requested_model)) {
       invalid.push(`model observation ${id}: requested model ${observation.requested_model} is outside the allowed model policy`);
     }
+    if (allowedModels.size && MODEL_ROLE_AGENTS[observation.review_role]
+        && observation.attestation_level === 'provider' && !allowedModels.has(observation.model)) {
+      invalid.push(`model observation ${id}: actual model ${observation.model} is outside the allowed model policy`);
+    }
   }
   const primaryReceipt = modelRoles.get('source-code-primary');
   const validatorReceipt = modelRoles.get('source-review-validator');
-  const primaryModel = primaryReceipt?.observation_ids?.map(id => observations.get(id)?.billed_model_name).find(Boolean);
-  const validatorModel = validatorReceipt?.observation_ids?.map(id => observations.get(id)?.billed_model_name).find(Boolean);
+  const primaryModel = primaryReceipt?.observation_ids?.map(id => observations.get(id)?.gateway_model_id).find(Boolean);
+  const validatorModel = validatorReceipt?.observation_ids?.map(id => observations.get(id)?.gateway_model_id).find(Boolean);
   if (run?.modelPolicy?.requireDiversity && primaryModel === validatorModel && !run?.modelPolicy?.diversityWaiver) invalid.push('model policy: primary discovery and independent validator used the same actual model without an operator waiver');
 
   const findingsDocument = json('findings.json');
@@ -873,6 +1207,22 @@ function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservation
     if (!Array.isArray(finding.locations) || finding.locations.length === 0) invalid.push(`finding ${finding.id || index + 1}.locations: required non-empty array`);
   });
 
+  const observationCount = closureRows.filter(row => String(row.disposition || '').toUpperCase() === 'OBSERVATION').length;
+  const observationsDocument = fs.existsSync(path.join(artifactRoot, 'observations.json'))
+    ? json('observations.json')
+    : observationCount ? (missing.push('observations.json'), null) : { observations: [] };
+  const observationRows = Array.isArray(observationsDocument?.observations) ? observationsDocument.observations : [];
+  if (observationsDocument && !Array.isArray(observationsDocument.observations)) invalid.push('observations.json.observations: required array');
+  const observationsById = keyed(observationRows, 'id', 'observations.json.observations', invalid);
+  const expectedObservationIds = new Map();
+  closureRows.filter(row => String(row.disposition || '').toUpperCase() === 'OBSERVATION').forEach(row => (row.observation_ids || []).forEach(id => expectedObservationIds.set(id, true)));
+  requireExactKeys(expectedObservationIds, observationsById, 'observation candidate dispositions vs observations.json', invalid);
+  observationRows.forEach((row, index) => {
+    for (const field of ['title', 'category', 'rationale', 'recommendation', 'evidence', 'reachability', 'counterevidence']) requireText(row[field], `observation ${row.id || index + 1}.${field}`, invalid);
+    if (!Array.isArray(row.locations) || row.locations.length === 0) invalid.push(`observation ${row.id || index + 1}.locations: required non-empty array`);
+    if (!Array.isArray(row.proof_gaps)) invalid.push(`observation ${row.id || index + 1}.proof_gaps: required array`);
+  });
+
   const coverageDocument = json('coverage.json');
   const coverageRows = Array.isArray(coverageDocument?.files) ? coverageDocument.files : [];
   if (coverageDocument && !Array.isArray(coverageDocument.files)) invalid.push('coverage.json.files: required array');
@@ -883,23 +1233,23 @@ function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservation
     requireText(row.review_method, `coverage ${row.path}.review_method`, invalid);
   });
 
-  const scanManifest = json('scan-manifest.json');
-  if (scanManifest?.producer !== 'glados-security-review/v1') invalid.push('scan-manifest.json.producer: expected glados-security-review/v1');
-  if (scanManifest?.terminal_state !== 'SATURATED') invalid.push('scan-manifest.json.terminal_state: expected SATURATED');
-  if (scanManifest?.repository_head !== run?.head) invalid.push('scan-manifest.json.repository_head: does not match run.json');
-  const receipt = json('completion-receipt.json');
-  if (receipt?.status !== 'SEALED' || receipt?.terminal_state !== 'SATURATED') invalid.push('completion-receipt.json: expected SEALED SATURATED receipt');
+  const scanManifest = skipSealValidation ? null : json('scan-manifest.json');
+  if (!skipSealValidation && scanManifest?.producer !== 'glados-security-review/v1') invalid.push('scan-manifest.json.producer: expected glados-security-review/v1');
+  if (!skipSealValidation && scanManifest?.terminal_state !== 'SATURATED') invalid.push('scan-manifest.json.terminal_state: expected SATURATED');
+  if (!skipSealValidation && scanManifest?.repository_head !== run?.head) invalid.push('scan-manifest.json.repository_head: does not match run.json');
+  const receipt = skipSealValidation ? null : json('completion-receipt.json');
+  if (!skipSealValidation && (receipt?.status !== 'SEALED' || receipt?.terminal_state !== 'SATURATED')) invalid.push('completion-receipt.json: expected SEALED SATURATED receipt');
   const sealedArtifacts = [
     'run.json', 'context/threat-model.json', 'discovery/deep/workers.jsonl', 'discovery/deep/dedupe.json',
     'discovery/candidates.jsonl', 'validation/candidate-closure.jsonl', 'validation/attack-paths.jsonl',
     'validation/runtime-model-observations.jsonl', 'validation/model-receipts.jsonl', 'findings.json', 'coverage.json',
   ];
   const digests = receipt?.artifact_sha256 || {};
-  for (const relative of sealedArtifacts) {
-    if (!fs.existsSync(path.join(artifactRoot, relative))) continue;
-    const actual = sha256File(path.join(artifactRoot, relative));
-    if (digests[relative] !== actual) invalid.push(`completion-receipt.json: digest mismatch for ${relative}`);
-    if (scanManifest?.artifact_sha256?.[relative] !== actual) invalid.push(`scan-manifest.json: digest mismatch for ${relative}`);
+  if (!skipSealValidation) for (const relative of sealedArtifacts) {
+      if (!fs.existsSync(path.join(artifactRoot, relative))) continue;
+      const actual = sha256File(path.join(artifactRoot, relative));
+      if (digests[relative] !== actual) invalid.push(`completion-receipt.json: digest mismatch for ${relative}`);
+      if (scanManifest?.artifact_sha256?.[relative] !== actual) invalid.push(`scan-manifest.json: digest mismatch for ${relative}`);
   }
 
   return { passed: missing.length === 0 && invalid.length === 0, missing, invalid };
@@ -910,6 +1260,8 @@ module.exports = {
   REQUIRED_DEEP_ARTIFACTS,
   REQUIRED_MODEL_ROLES,
   appendRuntimeModelObservation,
+  bindRuntimeModelObservationToWorker,
+  reconcileRuntimeModelObservationsToWorkers,
   claimDiscoveryWorker,
   discoveryWorkerIdFromPrompt,
   engagementIdFromArtifactRoot,
@@ -919,5 +1271,11 @@ module.exports = {
   initializeDeepScanRun,
   markDeepScanCapped,
   normalizeDeepScanConfig,
+  projectSecurityReviewLedgers,
+  reconcileActiveSecurityReviewWorkers,
+  reconcileInvalidSuccessfulDiscoveryWorkers,
+  reconcileCompletedDiscoveryWorker,
+  workerArtifactPaths,
+  validateWorkerArtifacts,
   validateDeepScanArtifacts,
 };

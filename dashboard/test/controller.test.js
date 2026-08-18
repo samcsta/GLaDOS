@@ -7,6 +7,7 @@ const cp = require('node:child_process');
 
 const { ensureBlackboardDb } = require('../../scripts/lib/glados-local');
 const { ControllerLite } = require('../lib/controller');
+const { InvestigationSessionStore } = require('../lib/investigation-session-store');
 
 function tempEnv() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-controller-test-'));
@@ -50,8 +51,8 @@ test('queues staged source-code reviews through GLaDOS and cancels queued jobs',
   const job = controller.enqueueSecurityReviewPath(repo);
   assert.equal(job.agent_id, 'glados');
   assert.equal(job.job_type, 'security_review_workflow_v3');
-  assert.match(job.prompt, /SOURCE SECURITY REVIEW WORKFLOW v3/);
-  assert.match(job.prompt, /durable worker/);
+  assert.match(job.prompt, /SOURCE SECURITY REVIEW WORKFLOW v4/);
+  assert.match(job.prompt, /durable harness-owned worker/);
   assert.match(job.prompt, /source-review-validator/);
   assert.equal(job.status, 'queued');
   const cancelled = controller.cancelJob(job.id);
@@ -75,6 +76,30 @@ test('controller status exposes session-scoped security-review progress', () => 
   assert.equal(status.securityReviews[0].progress.percent, 0);
   assert.deepEqual(controller.status({ sessionId: 'different-session' }).securityReviews, []);
   controller.close();
+});
+
+test('controller status and cancellation do not cross investigation sessions', () => {
+  const { dir, dbPath } = tempEnv();
+  const repoOne = path.join(dir, 'one');
+  const repoTwo = path.join(dir, 'two');
+  fs.mkdirSync(repoOne);
+  fs.mkdirSync(repoTwo);
+  initRepo(repoOne);
+  initRepo(repoTwo);
+  const sessions = new InvestigationSessionStore(dbPath);
+  const sessionOne = sessions.create({ name: 'One' });
+  const sessionTwo = sessions.create({ name: 'Two' });
+  let current = sessionOne.id;
+  const controller = new ControllerLite({ dbPath, getInvestigationSessionId: () => current });
+  const first = controller.enqueueSecurityReviewPath(repoOne, { sessionId: sessionOne.id });
+  current = sessionTwo.id;
+  const second = controller.enqueueSecurityReviewPath(repoTwo, { sessionId: sessionTwo.id });
+  assert.deepEqual(controller.status({ sessionId: sessionOne.id }).jobs.map(job => job.id), [first.id]);
+  assert.deepEqual(controller.status({ sessionId: sessionTwo.id }).jobs.map(job => job.id), [second.id]);
+  assert.equal(controller.cancelJob(second.id, { sessionId: sessionOne.id }).ok, false);
+  assert.equal(controller.getJob(second.id).status, 'queued');
+  controller.close();
+  sessions.close();
 });
 
 test('security reviews have no wall-clock deadline unless the operator sets one', () => {
@@ -147,11 +172,11 @@ test('security-review progress advances from discovery through sealing artifacts
   assert.equal(progress.phase, 'Blind discovery');
   assert.equal(progress.successfulWorkers, 2);
   assert.equal(progress.noNewStreak, 1);
-  assert.match(progress.detail, /saturation 1\/6/);
+  assert.match(progress.detail, /saturation 1\/3/);
   controller.close();
 });
 
-test('worker enforces one running job per agent', () => {
+test('worker enforces one running job per agent within an investigation session', () => {
   const { dir, dbPath } = tempEnv();
   const repo = path.join(dir, 'repo');
   fs.mkdirSync(repo);
@@ -174,6 +199,41 @@ test('worker enforces one running job per agent', () => {
   assert.equal(tracked.length, 1);
   controller.stop();
   controller.close();
+});
+
+test('worker runs the same coordinator concurrently across different investigation sessions', () => {
+  const { dir, dbPath } = tempEnv();
+  const repoOne = path.join(dir, 'repo-one');
+  const repoTwo = path.join(dir, 'repo-two');
+  fs.mkdirSync(repoOne);
+  fs.mkdirSync(repoTwo);
+  initRepo(repoOne);
+  initRepo(repoTwo);
+  const sessions = new InvestigationSessionStore(dbPath);
+  const sessionOne = sessions.create({ name: 'Review one' });
+  const sessionTwo = sessions.create({ name: 'Review two' });
+  let currentSessionId = sessionOne.id;
+  const tracked = [];
+  const controller = new ControllerLite({
+    dbPath,
+    maxConcurrent: 3,
+    getInvestigationSessionId: () => currentSessionId,
+    sendMessageToAgentTracked() {
+      const item = pendingTracked();
+      tracked.push(item);
+      return { child: item.child, promise: item.promise };
+    },
+  });
+  const first = controller.enqueueSecurityReviewPath(repoOne);
+  currentSessionId = sessionTwo.id;
+  const second = controller.enqueueSecurityReviewPath(repoTwo);
+  controller.tick();
+  assert.equal(controller.getJob(first.id).status, 'running');
+  assert.equal(controller.getJob(second.id).status, 'running');
+  assert.equal(tracked.length, 2);
+  controller.stop();
+  controller.close();
+  sessions.close();
 });
 
 test('reconciles stale running jobs on startup', () => {
@@ -234,13 +294,68 @@ test('security-review jobs cannot succeed when deterministic completion gates fa
   initRepo(repo);
   const controller = new ControllerLite({ dbPath });
   const job = controller.enqueueSecurityReviewPath(repo);
+  const artifactRoot = path.join(path.dirname(path.dirname(dbPath)), 'investigations', job.engagement_id, 'security-review');
+  const runFile = path.join(artifactRoot, 'run.json');
+  const run = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+  run.deepScan.terminalState = 'CAPPED';
+  fs.writeFileSync(runFile, `${JSON.stringify(run, null, 2)}\n`);
   controller._finishJob(job, 'succeeded', { result: 'model claimed completion' }, null);
   const finished = controller.getJob(job.id);
   assert.equal(finished.status, 'failed');
   assert.match(finished.error, /security-review hard gates failed/);
   assert.equal(finished.result.securityReviewGate.passed, false);
   assert.equal(controller.getGoal(job.goal_id).status, 'failed');
-  assert.equal(controller.db.prepare('SELECT status FROM engagements WHERE id=?').get(job.engagement_id).status, 'failed');
+  assert.equal(controller.db.prepare('SELECT status FROM engagements WHERE id=?').get(job.engagement_id).status, 'capped');
+  assert.equal(fs.existsSync(path.join(artifactRoot, 'completion-receipt.json')), false);
+  controller.close();
+});
+
+test('unchanged security-review checkpoint does not queue endless continuations', () => {
+  const { dir, dbPath } = tempEnv();
+  const repo = path.join(dir, 'repo');
+  fs.mkdirSync(repo);
+  initRepo(repo);
+  const controller = new ControllerLite({ dbPath });
+  const job = controller.enqueueSecurityReviewPath(repo);
+  controller.db.prepare("UPDATE controller_jobs SET status='running', attempts=1 WHERE id=?").run(job.id);
+  const current = controller.getJob(job.id);
+  assert.equal(controller._resumeInterruptedSecurityReview(current, 'security review incomplete: fixture'), true);
+  controller.db.prepare("UPDATE controller_jobs SET status='running' WHERE id=?").run(job.id);
+  assert.equal(controller._resumeInterruptedSecurityReview(controller.getJob(job.id), 'security review incomplete: fixture'), false);
+  controller.close();
+});
+
+test('append-only model observations do not create false continuation progress', () => {
+  const { dir, dbPath } = tempEnv();
+  const repo = path.join(dir, 'repo');
+  fs.mkdirSync(repo);
+  initRepo(repo);
+  const controller = new ControllerLite({ dbPath });
+  const job = controller.enqueueSecurityReviewPath(repo);
+  controller.db.prepare("UPDATE controller_jobs SET status='running', attempts=1 WHERE id=?").run(job.id);
+  controller.db.prepare(`INSERT INTO security_review_model_observations
+    (observation_id,engagement_id,agent_id,review_role,requested_model,actual_model,source,request_id,gateway_model_id,observed_at)
+    VALUES ('observation-initial',?,'glados','coordinator','gpt-5.6-terra','deployment-terra','litellm:response-headers','request-initial','deployment-terra','2026-08-17T11:59:00Z')`).run(job.engagement_id);
+  assert.equal(controller._resumeInterruptedSecurityReview(controller.getJob(job.id), 'security review incomplete: fixture'), true);
+  controller.db.prepare(`INSERT INTO security_review_model_observations
+    (observation_id,engagement_id,agent_id,review_role,requested_model,actual_model,source,request_id,gateway_model_id,observed_at)
+    VALUES ('observation-noise',?,'glados','coordinator','gpt-5.6-terra','deployment-terra','litellm:response-headers','request-noise','deployment-terra','2026-08-17T12:00:00Z')`).run(job.engagement_id);
+  controller.db.prepare("UPDATE controller_jobs SET status='running' WHERE id=?").run(job.id);
+  assert.equal(controller._resumeInterruptedSecurityReview(controller.getJob(job.id), 'security review incomplete: fixture'), false);
+  controller.close();
+});
+
+test('terminal orchestration failure marks active review artifacts failed', () => {
+  const { dir, dbPath } = tempEnv();
+  const repo = path.join(dir, 'repo');
+  fs.mkdirSync(repo);
+  initRepo(repo);
+  const controller = new ControllerLite({ dbPath });
+  const job = controller.enqueueSecurityReviewPath(repo);
+  controller._finishJob(job, 'failed', null, 'unrecoverable orchestration error');
+  const artifactRoot = path.join(path.dirname(path.dirname(dbPath)), 'investigations', job.engagement_id, 'security-review');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(artifactRoot, 'run.json'), 'utf8')).deepScan.terminalState, 'FAILED');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(artifactRoot, 'discovery/deep/manifest.json'), 'utf8')).status, 'FAILED');
   controller.close();
 });
 
@@ -271,7 +386,7 @@ test('security-review wall-clock ceiling marks the run capped and terminates its
   assert.equal(tracked.child.killed, true);
   assert.equal(JSON.parse(fs.readFileSync(runFile, 'utf8')).deepScan.terminalState, 'CAPPED');
   assert.equal(controller.db.prepare('SELECT status FROM engagements WHERE id=?').get(job.engagement_id).status, 'capped');
-  assert.match(fs.readFileSync(statusFile, 'utf8'), /None\. GLaDOS is idle/);
+  assert.equal(fs.readFileSync(statusFile, 'utf8'), '# stale active roster\n');
   controller.close();
 });
 

@@ -53,3 +53,12 @@ test('report index omits loose Playwright artifacts but preserves engagement evi
   assert.doesNotMatch(serialized, /console-2026/);
   assert.match(serialized, /target\/evidence\/page-2026/);
 });
+
+test('report index preserves engagement names that contain a repos path segment', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-report-engagement-'));
+  const engagement = path.join(root, 'Users-name-Desktop-FORD-GH-REPOS-project-20260814-abcd12');
+  fs.mkdirSync(engagement, { recursive: true });
+  fs.writeFileSync(path.join(engagement, 'EXECUTIVE-SUMMARY.md'), '# Summary\n');
+
+  assert.match(JSON.stringify(walk(root)), /EXECUTIVE-SUMMARY\.md/);
+});

@@ -85,6 +85,30 @@ test('deleting the active session creates an unassigned replacement and removes 
   store.close();
 });
 
+test('deleting a security-review session removes job-linked transcript rows before controller jobs', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-security-review-session-delete-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  const store = new InvestigationSessionStore(dbPath);
+  const session = store.create({ name: 'Historical review' });
+  const engagementId = 'eng-security-review-delete';
+  const goalId = 'goal-security-review-delete';
+  const jobId = 'job-security-review-delete';
+  store.db.prepare('INSERT INTO engagements (id, session_id, target_name, scope) VALUES (?, ?, ?, ?)')
+    .run(engagementId, session.id, '/tmp/repo', '["/tmp/repo"]');
+  store.db.prepare("INSERT INTO controller_goals (id,type,target,status,engagement_id) VALUES (?, 'security_review', ?, 'failed', ?)")
+    .run(goalId, '/tmp/repo', engagementId);
+  store.db.prepare("INSERT INTO controller_jobs (id,goal_id,engagement_id,agent_id,job_type,target,prompt,status) VALUES (?,?,?,'glados','security_review_workflow_v3',?,?,'failed')")
+    .run(jobId, goalId, engagementId, '/tmp/repo', 'review');
+  store.db.prepare("INSERT INTO dashboard_transcript_events (session_id,agent_id,kind,text,event_json,engagement_id,controller_job_id) VALUES (?,'glados','result','done','{}',?,?)")
+    .run(session.id, engagementId, jobId);
+  const deleted = store.delete(session.id);
+  assert.equal(deleted.rowsDeleted.dashboard_transcript_events, 1);
+  assert.equal(deleted.rowsDeleted.controller_jobs, 1);
+  assert.equal(store.get(session.id), null);
+  store.close();
+});
+
 test('deleting archived sessions does not create additional unassigned sessions', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-investigation-delete-archived-'));
   const dbPath = path.join(root, 'blackboard.db');

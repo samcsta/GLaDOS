@@ -116,7 +116,7 @@ test('golden fixtures structurally match SDK stream mapping and prompt assembly'
   const haltScript = [
     "const fs = require('node:fs')",
     "const path = require('node:path')",
-    "const dir = path.join(process.env.GLADOS_RUNTIME_DIR, 'halts')",
+    "const dir = path.join(process.env.GLADOS_RUNTIME_DIR, 'halts', 'legacy')",
     "fs.mkdirSync(dir, { recursive: true, mode: 0o700 })",
     `fs.writeFileSync(path.join(dir, '${halt.agentId}.json'), JSON.stringify({ agentId: '${halt.agentId}', reason: 'golden halt', initiator: 'test' }), { mode: 0o600 })`,
     "const { decideToolUse } = require('./dashboard/lib/harness/agent-sdk')",
@@ -178,7 +178,7 @@ test('source security review uses staged coordinator and independent validator c
   assert.equal(policy.taskDispatch.allowAgents.includes('source-review-validator'), true);
   assert.match(controller, /security_review_workflow_v3/);
   assert.match(controller, /securityReviewCoordinatorPrompt/);
-  assert.match(gladosRunbook, /SOURCE SECURITY REVIEW WORKFLOW v3/);
+  assert.match(gladosRunbook, /SOURCE SECURITY REVIEW WORKFLOW v4/);
   assert.match(sourceRunbook, /authorization-access-control/);
   assert.match(sourceRunbook, /historical-regression/);
   assert.match(validatorRunbook, /omitted classes/i);
@@ -245,7 +245,7 @@ test('v4 desktop UI keeps app operations in Settings and agent operations in con
   assert.match(app, /const ALERT_KINDS = new Set\(\['error', 'failed', 'offline', 'denied'\]\)/);
   assert.match(app, /stored\.filter\(item => ALERT_KINDS\.has\(item\?\.kind\)\)/);
   assert.match(app, /if \(ALERT_KINDS\.has\(kind\)\)/);
-  assert.match(app, /ev\.kind === 'tool-result' && ev\.isError/);
+  assert.doesNotMatch(app, /label: 'Tool error'/);
   assert.match(app, /id="settings-save-models"/);
   assert.match(app, /\/api\/settings\/agents\/models/);
   assert.match(app, /const modelDrafts = new Map\(\)/);
@@ -370,6 +370,7 @@ test('v4 report library provides searchable, source-filtered navigation with dur
   const css = fs.readFileSync(path.join(ROOT, 'dashboard/public/styles.css'), 'utf8');
   assert.match(app, /id="reports-search"/);
   assert.match(app, /data-report-scope="investigations"/);
+  assert.match(app, /data-report-scope="security-reviews"/);
   assert.match(app, /function filterReportTree\(/);
   assert.match(app, /state\.reports\.selectedPath = relPath/);
   assert.match(app, /function formatReportDate\(/);
@@ -378,6 +379,31 @@ test('v4 report library provides searchable, source-filtered navigation with dur
   assert.match(css, /\.report-document\.severity-critical/);
   assert.match(css, /--report-tone/);
   assert.match(css, /\.reports-tree \.file\.active[\s\S]*?box-shadow: inset 3px 0 0 var\(--accent\)/);
+  assert.match(css, /\.report-tree-delete/);
+  assert.match(app, /function deleteReportEntry/);
+  assert.match(app, /reportTreeAction\('delete', n, 'file'\)/);
+  assert.match(app, /reportTreeAction\('delete', n, 'dir'\)/);
+  assert.match(app, /viewer\.innerHTML = header \+ `<div class="report-empty">error:/);
+  assert.match(app, /row\.append\(head, reportTreeAction\('rename', n, 'dir'\), reportTreeAction\('delete', n, 'dir'\)\)/);
+  assert.match(app, /Delete security review/);
+  assert.match(app, /Delete investigation/);
+  assert.match(app, /function renameReportEntry/);
+  assert.match(app, /id="report-rename"/);
+  assert.match(css, /\.report-tree-rename/);
+});
+
+test('desktop dashboard exits surface supervised restart state instead of a misleading proxy failure', () => {
+  const app = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
+  assert.match(app, /gladosDesktop\?\.onDashboardExit/);
+  assert.match(app, /Dashboard worker stopped and will restart automatically/);
+  assert.match(app, /if \(dashboardRestartNotice\) return/);
+});
+
+test('dashboard health polling falls back to the Electron main process when renderer fetch fails', () => {
+  const app = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
+  assert.match(app, /async function fetchDashboardHealth/);
+  assert.match(app, /gladosDesktop\?\.getDashboardHealth/);
+  assert.match(app, /return window\.gladosDesktop\.getDashboardHealth\(\)/);
 });
 
 test('v4 report index budgets reports and investigations independently', () => {

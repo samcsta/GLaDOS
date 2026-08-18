@@ -12,10 +12,16 @@ class ResumeCoordinator {
     if (!this.filePath) return;
     try {
       const parsed = JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
-      for (const [agentId, snapshot] of Object.entries(parsed?.paused || {})) {
-        if (agentId && snapshot?.agentId === agentId) this.paused.set(agentId, snapshot);
+      for (const [storedKey, snapshot] of Object.entries(parsed?.paused || {})) {
+        const agentId = snapshot?.agentId || storedKey;
+        const sessionId = snapshot?.investigationSessionId || 'legacy';
+        if (agentId) this.paused.set(this.key(sessionId, agentId), { ...snapshot, agentId, investigationSessionId: sessionId });
       }
     } catch {}
+  }
+
+  key(sessionId, agentId) {
+    return `${String(sessionId || 'legacy')}\0${String(agentId || '').trim()}`;
   }
 
   persist() {
@@ -42,23 +48,24 @@ class ResumeCoordinator {
       operatorPrompt: String(work.operatorPrompt || '').trim(),
       haltedAt: new Date().toISOString(),
     };
-    this.paused.set(id, snapshot);
+    this.paused.set(this.key(snapshot.investigationSessionId, id), snapshot);
     this.persist();
     return snapshot;
   }
 
-  take(agentId) {
+  take(agentId, sessionId = 'legacy') {
     const id = String(agentId || '').trim();
-    const snapshot = this.paused.get(id) || null;
+    const key = this.key(sessionId, id);
+    const snapshot = this.paused.get(key) || null;
     if (snapshot) {
-      this.paused.delete(id);
+      this.paused.delete(key);
       this.persist();
     }
     return snapshot;
   }
 
-  clear(agentId) {
-    if (this.paused.delete(String(agentId || '').trim())) this.persist();
+  clear(agentId, sessionId = 'legacy') {
+    if (this.paused.delete(this.key(sessionId, agentId))) this.persist();
   }
 
   clearAll() {

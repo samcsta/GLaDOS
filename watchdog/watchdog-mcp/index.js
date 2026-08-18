@@ -119,13 +119,13 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
         result = markHealth(args.target_url, args.state, args.reason);
         break;
       case 'agent_halt':
-        result = await agentHalt(args.agent_id, args.reason, { initiator: 'mcp' });
+        result = await agentHalt(args.agent_id, args.reason, { initiator: 'mcp', sessionId: process.env.GLADOS_SESSION_ID || 'legacy' });
         break;
       case 'agent_resume':
-        result = await agentResume(args.agent_id, { initiator: 'mcp' });
+        result = await agentResume(args.agent_id, { initiator: 'mcp', sessionId: process.env.GLADOS_SESSION_ID || 'legacy' });
         break;
       case 'agent_status':
-        result = agentStatus(args.agent_id);
+        result = agentStatus(args.agent_id, { sessionId: process.env.GLADOS_SESSION_ID || 'legacy' });
         break;
       case 'plan_check_dispatch':
         result = planCheckDispatch(args.agent_id, args.engagement_id);

@@ -448,6 +448,9 @@ CREATE TABLE IF NOT EXISTS security_review_worker_runs (
   started_at TEXT NOT NULL,
   completed_at TEXT,
   error TEXT,
+  requested_model TEXT,
+  attempt INTEGER NOT NULL DEFAULT 1,
+  retry_of TEXT,
   PRIMARY KEY (engagement_id, worker_id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_security_review_worker_sequence
@@ -481,6 +484,10 @@ CREATE TABLE IF NOT EXISTS security_review_model_observations (
   request_id TEXT NOT NULL,
   gateway_model_id TEXT NOT NULL,
   cost_usd REAL,
+  logical_model_alias TEXT,
+  provider_model TEXT,
+  attestation_level TEXT NOT NULL DEFAULT 'deployment',
+  gateway_call_id TEXT,
   observed_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS security_review_llm_requests (
@@ -499,6 +506,21 @@ CREATE TABLE IF NOT EXISTS security_review_llm_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_security_review_llm_pending
   ON security_review_llm_requests(engagement_id, status, observed_at);
+CREATE TABLE IF NOT EXISTS litellm_relay_receipts (
+  request_id TEXT PRIMARY KEY,
+  gateway_call_id TEXT UNIQUE,
+  logical_model_alias TEXT,
+  gateway_model_id TEXT,
+  gateway_model_group TEXT,
+  provider_model TEXT,
+  provisional_cost_usd REAL,
+  final_cost_usd REAL,
+  status TEXT NOT NULL DEFAULT 'CAPTURED',
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  responded_at TEXT,
+  reconciled_at TEXT
+);
 CREATE TABLE IF NOT EXISTS findings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   engagement_id TEXT NOT NULL,
@@ -672,6 +694,14 @@ CREATE INDEX IF NOT EXISTS idx_replan_state ON replan_proposals(state);
   if (!jobCols.has('sdk_session_id')) runSql(paths.blackboardDb, 'ALTER TABLE controller_jobs ADD COLUMN sdk_session_id TEXT;', { ignoreError: true });
   const observationCols = sqliteTableColumns(paths.blackboardDb, 'security_review_model_observations');
   if (!observationCols.has('billed_model_name')) runSql(paths.blackboardDb, 'ALTER TABLE security_review_model_observations ADD COLUMN billed_model_name TEXT;', { ignoreError: true });
+  if (!observationCols.has('logical_model_alias')) runSql(paths.blackboardDb, 'ALTER TABLE security_review_model_observations ADD COLUMN logical_model_alias TEXT;', { ignoreError: true });
+  if (!observationCols.has('provider_model')) runSql(paths.blackboardDb, 'ALTER TABLE security_review_model_observations ADD COLUMN provider_model TEXT;', { ignoreError: true });
+  if (!observationCols.has('attestation_level')) runSql(paths.blackboardDb, "ALTER TABLE security_review_model_observations ADD COLUMN attestation_level TEXT NOT NULL DEFAULT 'deployment';", { ignoreError: true });
+  if (!observationCols.has('gateway_call_id')) runSql(paths.blackboardDb, 'ALTER TABLE security_review_model_observations ADD COLUMN gateway_call_id TEXT;', { ignoreError: true });
+  const workerCols = sqliteTableColumns(paths.blackboardDb, 'security_review_worker_runs');
+  if (!workerCols.has('requested_model')) runSql(paths.blackboardDb, 'ALTER TABLE security_review_worker_runs ADD COLUMN requested_model TEXT;', { ignoreError: true });
+  if (!workerCols.has('attempt')) runSql(paths.blackboardDb, 'ALTER TABLE security_review_worker_runs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1;', { ignoreError: true });
+  if (!workerCols.has('retry_of')) runSql(paths.blackboardDb, 'ALTER TABLE security_review_worker_runs ADD COLUMN retry_of TEXT;', { ignoreError: true });
 }
 
 function ensureWatchdogDb(paths) {
@@ -688,6 +718,7 @@ CREATE TABLE IF NOT EXISTS target_health (
 CREATE TABLE IF NOT EXISTS halt_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agent_id TEXT,
+  session_id TEXT NOT NULL DEFAULT 'legacy',
   engagement_id TEXT,
   reason TEXT,
   initiator TEXT,
@@ -695,6 +726,8 @@ CREATE TABLE IF NOT EXISTS halt_log (
   at INTEGER NOT NULL
 );
 `);
+  const haltCols = sqliteTableColumns(paths.watchdogDb, 'halt_log');
+  if (!haltCols.has('session_id')) runSql(paths.watchdogDb, "ALTER TABLE halt_log ADD COLUMN session_id TEXT NOT NULL DEFAULT 'legacy';", { ignoreError: true });
 }
 
 function assertSupportedNodeForInstall() {

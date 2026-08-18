@@ -75,9 +75,20 @@ function engagementMetrics(db, engagementId, options = {}) {
   let meteredCostEvents = 0;
   let tokenEvents = 0;
 
+  const meteredRows = [];
+  const sessionIndexes = new Map();
   for (const row of rows) {
     let event = {};
     try { event = JSON.parse(row.event_json) || {}; } catch {}
+    const sessionId = String(event.sessionId || '').trim();
+    if (sessionId && sessionIndexes.has(sessionId)) meteredRows[sessionIndexes.get(sessionId)] = { row, event };
+    else {
+      if (sessionId) sessionIndexes.set(sessionId, meteredRows.length);
+      meteredRows.push({ row, event });
+    }
+  }
+
+  for (const { row, event } of meteredRows) {
     const agent = byAgent.get(row.agent_id) || {
       agentId: row.agent_id,
       resultEvents: 0,
@@ -173,7 +184,7 @@ function engagementMetrics(db, engagementId, options = {}) {
     metering: {
       source: gatewayRows.length ? 'LiteLLM request spend logs' : 'Claude Agent SDK result events in dashboard_transcript_events',
       attribution: 'result events carrying this engagement_id through the terminal metering cutoff',
-      resultEvents: rows.length,
+      resultEvents: meteredRows.length,
       meteredCostEvents,
       costAvailable: gatewayRows.length > 0 || meteredCostEvents > 0,
       costUsd: gatewayRows.length ? Number(gatewayCost.toFixed(6)) : meteredCostEvents > 0 ? Number(costUsd.toFixed(6)) : null,

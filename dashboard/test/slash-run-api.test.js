@@ -223,6 +223,18 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     const review = await slashRun(srv.port, `/security-review ${localRepo}`);
     assert.equal(review.ok, true);
     assert.match(review.events.at(-1).text, /Queued expedited source-code security review/);
+    const reviewDb = new Database(path.join(srv.runtime, 'blackboard', 'blackboard.db'), { readonly: true });
+    try {
+      const engagement = reviewDb.prepare("SELECT id FROM engagements WHERE target_name=? ORDER BY id DESC LIMIT 1").get(localRepo);
+      const run = JSON.parse(fs.readFileSync(path.join(srv.runtime, 'investigations', engagement.id, 'security-review', 'run.json'), 'utf8'));
+      const settings = settingsAgents.json.agents;
+      assert.equal(run.modelPolicy.expectedModels['source-code-primary'], settings.find(agent => agent.id === 'source-code').model);
+      assert.equal(run.modelPolicy.expectedModels['source-review-validator'], settings.find(agent => agent.id === 'source-review-validator').model);
+      assert.equal(run.modelPolicy.expectedModels.coordinator, settings.find(agent => agent.id === 'glados').model);
+      assert.deepEqual(run.modelPolicy.allowedModels.sort(), [...new Set(Object.values(run.modelPolicy.expectedModels))].sort());
+    } finally {
+      reviewDb.close();
+    }
 
     const status = await slashRun(srv.port, '/status');
     assert.equal(status.ok, true);

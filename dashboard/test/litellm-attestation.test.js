@@ -16,7 +16,10 @@ test('LiteLLM attestation requires deployment-level model evidence', () => {
   }, 'req-1'), {
     actualModel: 'deployment-42',
     billedModelName: 'custom/gpt-5.6-sol',
+    providerModel: null,
+    attestationLevel: 'deployment',
     gatewayModelId: 'deployment-42',
+    gatewayCallId: 'req-1',
     costUsd: 1.25,
   });
   assert.equal(gatewayEvidence({
@@ -50,7 +53,10 @@ test('LiteLLM attestation queries an individual request without exposing the rep
     attempts: 1,
     actualModel: 'deployment-terra',
     billedModelName: 'gpt-5.6-terra',
+    providerModel: null,
+    attestationLevel: 'deployment',
     gatewayModelId: 'deployment-terra',
+    gatewayCallId: 'req-1',
     costUsd: 0.75,
   });
 });
@@ -73,4 +79,18 @@ test('LiteLLM attestation retries until the request-level spend row is available
   assert.equal(result.available, true);
   assert.equal(result.attempts, 3);
   assert.equal(result.costUsd, 0.5);
+});
+
+test('attestation reporting bypasses a loopback Agent SDK relay', async () => {
+  let seenUrl;
+  await fetchLiteLlmAttestation('req-relay', {
+    env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:44444' },
+    token: REPORTING_FIXTURE_TOKEN,
+    attempts: 1,
+    fetchImpl: async url => {
+      seenUrl = url;
+      return { ok: true, async text() { return '[]'; } };
+    },
+  });
+  assert.match(seenUrl, /^https:\/\/llmapi\.redteamstuff\.com\/spend\/logs/);
 });

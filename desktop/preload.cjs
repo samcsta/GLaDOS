@@ -5,6 +5,9 @@ contextBridge.exposeInMainWorld('gladosDesktop', {
   onDashboardExit(callback) {
     ipcRenderer.on('dashboard-exit', (_event, payload) => callback(payload));
   },
+  getDashboardHealth() {
+    return ipcRenderer.invoke('desktop:dashboard:health');
+  },
   onUpdateError(callback) {
     ipcRenderer.on('desktop-update-error', (_event, payload) => callback(payload));
   },
@@ -31,6 +34,9 @@ contextBridge.exposeInMainWorld('gladosDesktop', {
   },
   chooseSecurityReviewDirectory(input) {
     return ipcRenderer.invoke('desktop:security-review:choose-directory', input);
+  },
+  exportSecurityReviewPdf(input) {
+    return ipcRenderer.invoke('desktop:security-review:export-pdf', input);
   },
   getUpdateAccessStatus() {
     return ipcRenderer.invoke('desktop:update-auth:status');

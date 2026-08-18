@@ -61,7 +61,10 @@ test('local installer can deploy the exact signed release and refresh app discov
   assert.match(installer, /LSREGISTER.*-u/s);
   assert.match(installer, /LSREGISTER.*-f/s);
   assert.match(installer, /LSREGISTER.*-gc/s);
+  assert.match(installer, /LSREGISTER.*-kill.*-domain local.*-domain system.*-domain user/s);
   assert.match(installer, /MDIMPORT.*-i/s);
+  assert.match(installer, /mdfind/);
+  assert.match(installer, /rm -rf "\$SOURCE"/);
   assert.match(installer, /GLaDOS\.app\.replaced-/);
   assert.doesNotMatch(installer, /rm -rf "\$DEST"/);
 });

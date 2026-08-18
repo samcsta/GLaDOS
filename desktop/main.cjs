@@ -7,6 +7,7 @@ const { AppImageUpdater, DebUpdater, MacUpdater } = require('electron-updater');
 const { UpdateCredentialStore } = require('./lib/private-update.cjs');
 const { SetupAssistant } = require('./lib/setup-assistant.cjs');
 const { systemNetworkEnvironment } = require('./lib/network-environment.cjs');
+const { loadCompletedSecurityReview, safeEngagementId } = require('./lib/security-review-report.cjs');
 
 const runtimeDir = path.resolve(process.env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), '.glados'));
 
@@ -28,6 +29,9 @@ if (!gotLock) {
 let mainWindow = null;
 let dashboard = null;
 let dashboardRestarting = false;
+let dashboardRestartTimer = null;
+let dashboardStartedAt = 0;
+let dashboardRestartAttempts = 0;
 let quitInProgress = false;
 let dashboardStoppedForQuit = false;
 let dashboardUrl = null;
@@ -39,6 +43,47 @@ let lastSetupVerification = null;
 let dashboardNetworkEnv = {};
 
 const updateCredentials = new UpdateCredentialStore({ runtimeDir, safeStorage, platform: process.platform });
+
+function dashboardLog(message) {
+  try {
+    const logsDir = path.join(runtimeDir, 'logs');
+    fs.mkdirSync(logsDir, { recursive: true, mode: 0o700 });
+    fs.appendFileSync(path.join(logsDir, 'dashboard.log'), `[${new Date().toISOString()}] ${String(message).trimEnd()}\n`, { mode: 0o600 });
+  } catch {}
+}
+
+async function renderSecurityReviewPdf(engagementId, outputPath = null) {
+  const id = safeEngagementId(engagementId);
+  const investigationsRoot = path.resolve(process.env.GLADOS_INVESTIGATIONS_DIR || path.join(runtimeDir, 'investigations'));
+  const reviewRoot = path.resolve(investigationsRoot, id, 'security-review');
+  if (!reviewRoot.startsWith(`${investigationsRoot}${path.sep}`)) throw new Error('security-review path escapes investigations root');
+  const completed = loadCompletedSecurityReview(reviewRoot);
+  const destination = outputPath || path.join(reviewRoot, 'deliverables', 'security-review-report.pdf');
+  const hidden = new BrowserWindow({
+    show: false,
+    backgroundColor: '#ffffff',
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+  });
+  try {
+    await hidden.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(completed.html)}`);
+    await hidden.webContents.executeJavaScript('document.fonts ? document.fonts.ready.then(() => true) : true');
+    const pdf = await hidden.webContents.printToPDF({ printBackground: true, preferCSSPageSize: true });
+    const outputs = new Set([
+      path.resolve(destination),
+      path.join(reviewRoot, 'deliverables', 'security-review-report.pdf'),
+      path.join(reviewRoot, 'security-review-report.pdf'),
+    ]);
+    for (const output of outputs) {
+      fs.mkdirSync(path.dirname(output), { recursive: true, mode: 0o700 });
+      const temporary = `${output}.${process.pid}.${Date.now()}.tmp`;
+      fs.writeFileSync(temporary, pdf, { mode: 0o600 });
+      fs.renameSync(temporary, output);
+    }
+    return { path: destination, bytes: pdf.length };
+  } finally {
+    if (!hidden.isDestroyed()) hidden.destroy();
+  }
+}
 
 function repoRoot() {
   if (app.isPackaged) return process.resourcesPath;
@@ -63,6 +108,8 @@ function dashboardNodeExecPath() {
 }
 
 function stopDashboard() {
+  if (dashboardRestartTimer) clearTimeout(dashboardRestartTimer);
+  dashboardRestartTimer = null;
   const child = dashboard;
   dashboard = null;
   if (!child || child.killed || child.exitCode != null) return Promise.resolve();
@@ -74,6 +121,21 @@ function stopDashboard() {
     child.once('exit', () => { clearTimeout(timer); resolve(); });
     try { child.kill('SIGTERM'); } catch { clearTimeout(timer); resolve(); }
   });
+}
+
+function scheduleDashboardRestart({ code = null, signal = null, error = null } = {}) {
+  if (quitInProgress || dashboardStoppedForQuit || dashboardRestarting || dashboardRestartTimer) return;
+  const stableRun = dashboardStartedAt && Date.now() - dashboardStartedAt >= 60_000;
+  dashboardRestartAttempts = stableRun ? 1 : dashboardRestartAttempts + 1;
+  const delayMs = Math.min(30_000, 1_000 * (2 ** Math.min(5, Math.max(0, dashboardRestartAttempts - 1))));
+  const reason = error?.message || `dashboard exited unexpectedly (code=${code ?? 'null'}, signal=${signal || 'none'})`;
+  dashboardLog(`${reason}; restarting in ${delayMs}ms`);
+  mainWindow?.webContents.send('dashboard-exit', { code, signal, reason, restarting: true, delayMs });
+  dashboardRestartTimer = setTimeout(() => {
+    dashboardRestartTimer = null;
+    restartDashboard(reason).catch(restartError => dashboardLog(`dashboard restart failed: ${restartError.message}`));
+  }, delayMs);
+  dashboardRestartTimer.unref?.();
 }
 
 async function quitFromSignal() {
@@ -100,24 +162,50 @@ function startDashboard() {
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
     dashboard = child;
-    child.stdout?.on('data', chunk => process.stdout.write(`[dashboard] ${chunk}`));
-    child.stderr?.on('data', chunk => process.stderr.write(`[dashboard] ${chunk}`));
-    child.once('error', reject);
-    const readyTimeout = setTimeout(() => reject(new Error('dashboard startup timed out')), 30000);
+    let settled = false;
+    let readyTimeout = null;
+    const failStartup = error => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(readyTimeout);
+      reject(error);
+    };
+    child.stdout?.on('data', chunk => {
+      process.stdout.write(`[dashboard] ${chunk}`);
+      dashboardLog(`stdout: ${chunk}`);
+    });
+    child.stderr?.on('data', chunk => {
+      process.stderr.write(`[dashboard] ${chunk}`);
+      dashboardLog(`stderr: ${chunk}`);
+    });
+    child.once('error', error => {
+      dashboardLog(`child process error: ${error.message}`);
+      if (dashboard === child) dashboard = null;
+      failStartup(error);
+    });
+    readyTimeout = setTimeout(() => failStartup(new Error('dashboard startup timed out')), 30000);
     child.on('message', msg => {
       if (msg?.type === 'glados-dashboard-ready' && msg.url) {
+        if (settled) return;
+        settled = true;
         clearTimeout(readyTimeout);
         dashboardUrl = msg.url;
+        dashboardStartedAt = Date.now();
+        dashboardLog(`ready at ${msg.url} (pid=${child.pid})`);
         resolve(msg.url);
       }
       if (msg?.type === 'glados-dashboard-restart-request') restartDashboard(msg.reason).catch(() => {});
-    });
-    child.once('exit', code => {
-      clearTimeout(readyTimeout);
-      if (dashboard === child) dashboard = null;
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('dashboard-exit', { code });
+      if (msg?.type === 'glados-security-review-deliverables-ready' && msg.engagementId) {
+        renderSecurityReviewPdf(msg.engagementId).catch(error => process.stderr.write(`[security-review-pdf] ${error.message}\n`));
       }
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(readyTimeout);
+      const unexpected = dashboard === child;
+      if (unexpected) dashboard = null;
+      dashboardLog(`exit pid=${child.pid} code=${code ?? 'null'} signal=${signal || 'none'} unexpected=${unexpected}`);
+      failStartup(new Error(`dashboard exited before startup completed (code=${code ?? 'null'}, signal=${signal || 'none'})`));
+      if (unexpected) scheduleDashboardRestart({ code, signal });
     });
   });
 }
@@ -125,16 +213,20 @@ function startDashboard() {
 async function restartDashboard(reason = 'dashboard restart') {
   if (dashboardRestarting) return;
   dashboardRestarting = true;
+  let retryError = null;
   try {
     await stopDashboard();
     const url = await startDashboard();
+    dashboardOrigin = new URL(url).origin;
     if (mainWindow && !mainWindow.isDestroyed()) await mainWindow.loadURL(url);
+    dashboardLog(`restart completed: ${reason}`);
   } catch (error) {
+    retryError = error;
     mainWindow?.webContents.send('dashboard-exit', { code: null, reason, error: error.message });
-    dialog.showErrorBox('GLaDOS dashboard restart failed', error.message);
   } finally {
     dashboardRestarting = false;
   }
+  if (retryError) scheduleDashboardRestart({ error: retryError });
 }
 
 function createWindow(url) {
@@ -274,6 +366,11 @@ async function dashboardJson(pathname, options = {}) {
   return body;
 }
 
+ipcMain.handle('desktop:dashboard:health', async event => {
+  assertTrustedDashboardEvent(event);
+  return dashboardJson('/api/health/proxy', { timeoutMs: 5000 });
+});
+
 async function setupStatus() {
   const status = setupAssistant().status();
   let proxy = { healthy: false, processStatus: 'unknown', error: 'proxy health is unavailable' };
@@ -308,6 +405,27 @@ ipcMain.handle('desktop:security-review:choose-directory', async (event, input =
   else options.defaultPath = app.getPath('desktop');
   const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
   return { canceled: result.canceled, path: result.canceled ? null : result.filePaths[0] || null };
+});
+ipcMain.handle('desktop:security-review:export-pdf', async (event, input = {}) => {
+  assertTrustedDashboardEvent(event);
+  const engagementId = safeEngagementId(input.engagementId);
+  const reportsRoot = path.resolve(process.env.GLADOS_REPORTS_DIR || path.join(runtimeDir, 'reports'));
+  fs.mkdirSync(reportsRoot, { recursive: true, mode: 0o700 });
+  const parent = BrowserWindow.fromWebContents(event.sender) || mainWindow || undefined;
+  const selected = parent
+    ? await dialog.showSaveDialog(parent, { title: 'Export Security Review PDF', defaultPath: path.join(reportsRoot, `${engagementId}-security-review.pdf`), filters: [{ name: 'PDF', extensions: ['pdf'] }] })
+    : await dialog.showSaveDialog({ title: 'Export Security Review PDF', defaultPath: path.join(reportsRoot, `${engagementId}-security-review.pdf`), filters: [{ name: 'PDF', extensions: ['pdf'] }] });
+  if (selected.canceled || !selected.filePath) return { canceled: true };
+  const exported = await renderSecurityReviewPdf(engagementId, selected.filePath);
+  const artifactPdf = path.join(
+    path.resolve(process.env.GLADOS_INVESTIGATIONS_DIR || path.join(runtimeDir, 'investigations')),
+    engagementId, 'security-review', 'deliverables', 'security-review-report.pdf'
+  );
+  if (path.resolve(exported.path) !== path.resolve(artifactPdf)) {
+    fs.copyFileSync(exported.path, artifactPdf);
+    fs.chmodSync(artifactPdf, 0o600);
+  }
+  return { canceled: false, path: exported.path, bytes: exported.bytes, artifactPath: artifactPdf };
 });
 ipcMain.handle('desktop:setup:save-litellm', async (event, input) => {
   assertTrustedDashboardEvent(event);

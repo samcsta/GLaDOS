@@ -218,14 +218,18 @@ function expandMcpTools(tools) {
 }
 
 function mountedToolsForAgent(agentId, policy = loadPolicy(), options = {}) {
+  const env = options.env || process.env;
   const explicit = policy.agents?.[agentId]?.tools;
-  if (Array.isArray(explicit)) return expandMcpTools(expandTaskToolAliases(explicit));
   const profile = policy.agentToolProfiles?.[agentId] || defaultProfileForAgent(agentId);
-  const tools = [...profileTools(policy, profile)];
-  if (browserMcpEnabled(options.env || process.env) && profileCanUseBrowserMcp(policy, profile, agentId)) {
+  const tools = Array.isArray(explicit) ? [...explicit] : [...profileTools(policy, profile)];
+  if (!Array.isArray(explicit) && browserMcpEnabled(env)
+      && env.GLADOS_SECURITY_REVIEW !== '1'
+      && profileCanUseBrowserMcp(policy, profile, agentId)) {
     tools.push(browserMountForAgent(agentId));
   }
-  return expandMcpTools(expandTaskToolAliases(tools));
+  const expanded = expandMcpTools(expandTaskToolAliases(tools));
+  if (env.GLADOS_SECURITY_REVIEW !== '1') return expanded;
+  return expanded.filter(tool => !tool.startsWith('mcp__glados-ops__') && !tool.startsWith('mcp__browser-'));
 }
 
 function unique(values) {
@@ -303,8 +307,8 @@ function taskAllowlist(policy = loadPolicy(), { workspaceRoot = agentWorkspaceRo
     .map(row => row.id));
 }
 
-function haltActive(agentId) {
-  try { return agentStatus(agentId).haltActive; }
+function haltActive(agentId, env = process.env) {
+  try { return agentStatus(agentId, { sessionId: env.GLADOS_SESSION_ID || 'legacy' }).haltActive; }
   catch { return true; }
 }
 
@@ -312,8 +316,42 @@ function decideToolUse({ agentId, toolName, input = {}, policy = loadPolicy(), w
   if (!agentEnabled(agentId, { policy, workspaceRoot })) {
     return { allowed: false, reason: `${agentId} is disabled by policy or local workspace state`, interrupt: true };
   }
-  if (haltActive(agentId)) {
+  if (haltActive(agentId, env)) {
     return { allowed: false, reason: `${agentId} is halted by the operator`, interrupt: true };
+  }
+
+  if (env.GLADOS_SECURITY_REVIEW === '1') {
+    if (/^mcp__glados-ops__(?:desktop_|local_auth_|adfs_active_directory_login$)/i.test(String(toolName || ''))
+        || /^mcp__browser-[^_]+__browser_/i.test(String(toolName || ''))) {
+      return { allowed: false, reason: 'desktop, browser, and local-auth capabilities are unavailable in a source-only security review' };
+    }
+    if (/blackboard_engagement_create$/i.test(String(toolName || ''))) {
+      return { allowed: false, reason: 'the security-review controller already provisioned this engagement; use the supplied engagement_id' };
+    }
+    const inputText = JSON.stringify(input || {});
+    const agentMemoryRoot = path.join(agentWorkspaceRoot(env), agentId);
+    if (/^(?:Read|Glob|Grep)$/i.test(String(toolName || ''))
+        && (inputText.includes(path.join(agentMemoryRoot, 'memory')) || inputText.includes(path.join(agentMemoryRoot, 'MEMORY.md')))) {
+      return { allowed: false, reason: 'blind security-review workers may not read persistent agent memory or prior-assessment context' };
+    }
+    if (env.GLADOS_SECURITY_REVIEW_GIT_HISTORY !== '1' && /(?:^|__)Bash$/i.test(String(toolName || ''))
+        && /(?:^|[;&|()\s])git(?:\s|$)/i.test(String(input.command || ''))) {
+      return { allowed: false, reason: 'this security-review target is a directory snapshot without Git metadata; use run.json and inventory artifacts' };
+    }
+    if (/^(?:Write|Edit|MultiEdit)$/i.test(String(toolName || ''))
+        && /(?:discovery[\\/]deep[\\/]workers\.jsonl|validation[\\/](?:runtime-model-observations|model-receipts)\.jsonl|(?:^|[\\/])(?:findings|coverage|scan-manifest|completion-receipt)\.json)$/.test(String(input.file_path || input.path || ''))) {
+      return { allowed: false, reason: 'security-review final ledgers and sealed outputs are controller-owned and cannot be edited by agents' };
+    }
+    if (/(?:^|__)Bash$/i.test(String(toolName || ''))
+        && /(?:workers\.jsonl|runtime-model-observations\.jsonl|model-receipts\.jsonl|findings\.json|coverage\.json|scan-manifest\.json|completion-receipt\.json)/.test(String(input.command || ''))
+        && /(?:>|tee\b|cp\b|mv\b|rm\b|python\b|perl\b|ruby\b)/.test(String(input.command || ''))) {
+      return { allowed: false, reason: 'security-review runtime ledgers are controller-owned projections and cannot be modified from Bash' };
+    }
+    if (/(?:^|__)Bash$/i.test(String(toolName || ''))
+        && /(?:blackboard\.db|BLACKBOARD_DB)/.test(String(input.command || ''))
+        && /(?:sqlite3|better-sqlite3|python|INSERT\b|UPDATE\b|DELETE\b|DROP\b|ALTER\b)/i.test(String(input.command || ''))) {
+      return { allowed: false, interrupt: true, reason: 'direct mutation of the controller blackboard database is prohibited; use scoped blackboard tools' };
+    }
   }
 
   const mounted = mountedToolsForAgent(agentId, policy, { env });
@@ -439,6 +477,10 @@ function normalizeToolInput(toolName, input = {}, { agentId = null } = {}) {
   const name = String(toolName || '');
   const reportingAgent = agentId === 'report-writer' || agentId === 'report-validator';
   let normalized = input;
+  if ((/^Read$/i.test(name) || /__Read$/i.test(name)) && (!input.pages || typeof input.pages === 'string' && !input.pages.trim())) {
+    normalized = { ...normalized };
+    delete normalized.pages;
+  }
   if (isTaskDispatchTool(name) && (
     Object.prototype.hasOwnProperty.call(normalized, 'isolation')
     || Object.prototype.hasOwnProperty.call(normalized, 'model')
@@ -464,7 +506,7 @@ function normalizeToolInput(toolName, input = {}, { agentId = null } = {}) {
       })),
     };
   }
-  if (reportingAgent && /^Read$/i.test(name) && (!Number.isFinite(Number(input.limit)) || Number(input.limit) > 300)) {
+  if ((/^Read$/i.test(name) || /__Read$/i.test(name)) && (!Number.isFinite(Number(input.limit)) || Number(input.limit) > 300)) {
     normalized = { ...normalized, limit: 300 };
   }
   if (reportingAgent && /(?:^|__)blackboard_baseline_get$/i.test(name) && input.mode !== 'summary') {
@@ -566,6 +608,7 @@ function buildPreToolUseHook(agentId, policy = loadPolicy(), options = {}) {
           artifactRoot, engagementId,
           workerId,
           toolCallId: input.tool_use_id,
+          requestedModel: registryById({ env: options.env || process.env }).get('source-code')?.model || null,
         });
         if (!claim.claimed) {
           if (/maximum of \d+ attempts/.test(claim.reason)) {
@@ -788,14 +831,16 @@ function buildMcpServers(env = process.env) {
       args: [path.join(REPO_ROOT, 'watchdog', 'watchdog-mcp', 'index.js')],
       env: mcpEnv,
     },
-    'glados-ops': {
+  };
+  if (env.GLADOS_SECURITY_REVIEW !== '1') {
+    servers['glados-ops'] = {
       type: 'stdio',
       command: runtime.command,
       args: [path.join(REPO_ROOT, 'tools', 'glados-ops-mcp', 'index.js')],
       env: mcpEnv,
-    },
-  };
-  if (browserMcpEnabled(env)) {
+    };
+  }
+  if (browserMcpEnabled(env) && env.GLADOS_SECURITY_REVIEW !== '1') {
     const policy = loadPolicy();
     const localCli = path.join(REPO_ROOT, 'dashboard', 'node_modules', '@playwright', 'mcp', 'cli.js');
     const useLocalCli = !env.GLADOS_BROWSER_MCP_COMMAND && fs.existsSync(localCli);
@@ -914,14 +959,30 @@ function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, work
     '- Do not infer current model names from static roster tables, examples, MEMORY.md, or historical workspace files.',
     `- GLaDOS proxy URL for target HTTP(S): ${proxyUrl || proxyUrlFromEnv()}. For shell HTTP, use /usr/bin/curl -x this URL -k and add X-GLaDOS-Agent: ${agentId}. Do not use legacy :8080 proxy examples unless the operator explicitly overrides it.`,
   ];
+  if (env.GLADOS_SECURITY_REVIEW === '1') {
+    const repositoryPath = env.GLADOS_SECURITY_REVIEW_REPOSITORY || '(read repository_path from the task)';
+    const artifactRoot = env.GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT || '(read artifact_root from the task)';
+    const gitHistoryAvailable = env.GLADOS_SECURITY_REVIEW_GIT_HISTORY === '1';
+    lines.push(`- Security-review repository root: ${repositoryPath}. Use absolute paths; the SDK working directory is not the assessed repository.`);
+    lines.push(`- Security-review artifact root: ${artifactRoot}. The source tree is read-only; write review output only below this artifact root or through blackboard tools.`);
+    lines.push(`- Security-review source type: ${env.GLADOS_SECURITY_REVIEW_SOURCE_TYPE || 'unknown'}. Git history available: ${gitHistoryAvailable ? 'yes' : 'no'}. ${gitHistoryAvailable ? 'Use Git only when the assigned review step requires history.' : 'Do not run Git commands; consume run.json and inventory/secrets-history.json as authoritative.'}`);
+    lines.push('- Prompt files and role contracts are already loaded. Do not reread SOUL.md, USER.md, IDENTITY.md, RUNBOOK.md, TOOLS.md, MEMORY.md, or memory/ as startup work. Blind review must not consult agent memory or prior-assessment context.');
+    lines.push('- Derive available files and directories from inventory/files.jsonl. Do not guess conventional paths such as src/test or gradle/libs.versions.toml when absent.');
+    lines.push('- Snapshot verification is harness-owned. Do not invent a find/shasum or per-file digest aggregate; use the canonical run.json revision and harness verification receipt.');
+    lines.push('- Static analysis, worker continuation, specialist review, validation, and writes below artifact_root require no operator approval. Continue automatically until saturated and sealed or a real terminal blocker occurs.');
+    lines.push('- The engagement is already provisioned by the controller. Never call blackboard_engagement_create for this review.');
+    lines.push('- Full Access is ignored for this source-only review. Desktop, browser, local-auth, and Apple Events tools are unavailable.');
+  }
   if (agentId === 'glados' && registryRows.length) {
-    if (isFullAccessEnabled(env)) {
+    if (env.GLADOS_SECURITY_REVIEW === '1') {
+      // The source-review capability boundary above is authoritative.
+    } else if (isFullAccessEnabled(env)) {
       lines.push('- Full Access is ENABLED by the operator. You may use desktop_snapshot, desktop_list_windows, desktop_click, desktop_type, and desktop_key; read/edit requested files; and run shell commands without per-command prompts. macOS Accessibility and Screen Recording consent still apply.');
       lines.push('- Full Access changes tool permission handling, not operator intent. Perform destructive or external actions only when they are clearly requested in the current operator turn, and verify ambiguous targets before acting.');
     } else {
       lines.push('- Full Access is disabled. Desktop-control tools are unavailable; tell the operator to enable Full Access in Settings if the requested task requires them.');
     }
-    const halted = listHaltedAgents().map(marker => marker.agentId).filter(Boolean);
+    const halted = listHaltedAgents({ sessionId: env.GLADOS_SESSION_ID || 'legacy' }).map(marker => marker.agentId).filter(Boolean);
     lines.push(`- Operator halt state: ${halted.length ? `halted agents are ${halted.join(', ')}` : 'no agents are halted'}. Treat this as authoritative and do not dispatch a halted agent.`);
     lines.push('- For normal investigations, perform target reachability preflight only with mcp__watchdog__target_probe. Never use Bash/curl or browser tools from GLaDOS for target interaction; delegate that work to a named specialist.');
     lines.push('- Subagent dispatch rule: use the SDK subagent dispatch tool only with subagent_type set to an exact enabled GLaDOS agent id, name set to that same id, and run_in_background=false. Omit model and isolation: each named AgentDefinition owns its configured model, and GLaDOS specialists run in the managed local runtime workspace rather than a git worktree or remote environment. Background dispatch is hard-denied. Never launch a generic unnamed Agent.');
@@ -991,7 +1052,9 @@ function buildAgentDefinitions(policy = loadPolicy(), options = {}) {
   const registryRows = loadRegistry({ workspaceRoot: options.workspaceRoot, env: options.env });
   const proxyUrl = proxyUrlFromEnv(options.env || process.env);
   const workspaceRoot = options.workspaceRoot || agentWorkspaceRoot(options.env || process.env);
-  const allowedAgents = taskAllowlist(policy, { workspaceRoot });
+  const configuredAllowlist = Array.isArray(options.subagentAllowlist) ? new Set(options.subagentAllowlist) : null;
+  const allowedAgents = new Set([...taskAllowlist(policy, { workspaceRoot })]
+    .filter(agentId => !configuredAllowlist || configuredAllowlist.has(agentId)));
   const mcpServers = buildMcpServers(options.env || process.env);
   for (const row of registryRows) {
     if (!row?.id || row.id === 'glados' || !allowedAgents.has(row.id)) continue;
@@ -1068,11 +1131,13 @@ function buildAgentSdkOptions(agentId, options = {}) {
     templateRoot: options.templateRoot,
     env: options.env,
     modelOverride: options.modelOverride,
+    subagentAllowlist: options.subagentAllowlist,
   });
   const tools = processToolsForAgent(agentId, policy, {
     workspaceRoot,
     templateRoot: options.templateRoot,
     env: options.env || process.env,
+    subagentAllowlist: options.subagentAllowlist,
   });
   const registryRows = loadRegistry({ workspaceRoot, env: options.env });
   const registry = new Map(registryRows.map(row => [row.id, row]));
@@ -1086,7 +1151,9 @@ function buildAgentSdkOptions(agentId, options = {}) {
     ? Math.min(8, configuredReviewConcurrency)
     : 3;
   const reviewReservations = options.reviewKey ? new Set() : null;
-  const fullAccess = agentId === 'glados' && isFullAccessEnabled(options.env || process.env);
+  const fullAccess = agentId === 'glados'
+    && (options.env || process.env).GLADOS_SECURITY_REVIEW !== '1'
+    && isFullAccessEnabled(options.env || process.env);
   const preToolUse = buildPreToolUseHook(agentId, policy, {
     workspaceRoot,
     env: options.env || process.env,
@@ -1343,7 +1410,8 @@ function mapSdkMessageToEvents(agentId, message, context = {}) {
         if (targetAgentId && block.id) context.subagentByParentToolUseId.set(block.id, targetAgentId);
         if (block.id) context.toolNameByToolUseId.set(block.id, block.name);
         if (block.id) context.toolInputByToolUseId.set(block.id, block.input || {});
-        const transcriptInput = redactCredentialInput(block.input || {});
+        const effectiveInput = normalizeToolInput(block.name, block.input || {}, { agentId: renderAgentId });
+        const transcriptInput = redactCredentialInput(effectiveInput);
         return [{
           ...base,
           kind: 'tool-call',
@@ -1689,7 +1757,7 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
   if (options.abortSignal?.aborted) await interrupt(options.abortSignal.reason || 'operator stop');
   await waitForCoreMcpServers(iterable, sdkOptions, options);
   const pollMs = options.haltPollMs ?? 1000;
-  const isHalted = options.isAgentHalted || haltActive;
+  const isHalted = options.isAgentHalted || (id => haltActive(id, options.env || process.env));
   const haltedInTurn = () => {
     const agents = new Set([agentId, ...context.subagentByParentToolUseId.values()]);
     return [...agents].find(id => isHalted(id)) || null;
@@ -1710,6 +1778,7 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
       ? Date.now() + firstActivityTimeoutMs
       : null;
     let firstActivitySeen = false;
+    let sdkMessagesSeen = 0;
     while (true) {
       const remainingMs = firstActivitySeen || !firstActivityDeadline
         ? 0
@@ -1721,6 +1790,7 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
         }, firstActivityTimeoutMs);
       if (next.done) break;
       const message = next.value;
+      sdkMessagesSeen += 1;
       if (sdkOptions.resume && isMissingSdkConversationError(message)) {
         const error = new Error(sdkErrorText(message));
         error.code = 'GLADOS_STALE_SDK_SESSION';
@@ -1744,6 +1814,7 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
         break;
       }
       const mappedEvents = mapSdkMessageToEvents(agentId, message, context);
+      if (typeof options.onSdkMessage === 'function') await options.onSdkMessage(message, context);
       if (!firstActivitySeen && isMeaningfulTurnActivity(mappedEvents)) firstActivitySeen = true;
       for (const ev of mappedEvents) {
         // Streaming deltas are transient UI transport. Persisting every token
@@ -1761,6 +1832,11 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
         events.push(recorded);
         if (onEvent) onEvent(recorded, message);
       }
+    }
+    if (!firstActivitySeen) {
+      const error = new Error(`Agent SDK ended without meaningful model or tool activity (${sdkMessagesSeen} SDK messages)`);
+      error.code = 'GLADOS_EMPTY_SDK_TURN';
+      throw error;
     }
   } catch (error) {
     if (isFirstActivityTimeoutError(error) && !error.model) error.model = sdkOptions.model || null;

@@ -52,3 +52,25 @@ test('desktop setup verification uses Electron networking and exports resolved p
   assert.match(main, /fetchImpl:\s*\(url, options\) => net\.fetch\(url, options\)/);
   assert.match(main, /\.\.\.dashboardNetworkEnv/);
 });
+
+test('desktop supervises unexpected dashboard exits with bounded restart backoff and durable logs', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.cjs'), 'utf8');
+  assert.match(main, /function scheduleDashboardRestart/);
+  assert.match(main, /Math\.min\(30_000/);
+  assert.match(main, /dashboardRestartTimer/);
+  assert.match(main, /dashboard\.log/);
+  assert.match(main, /if \(unexpected\) scheduleDashboardRestart/);
+  assert.match(main, /restarting: true/);
+  assert.match(main, /dashboardOrigin = new URL\(url\)\.origin;[\s\S]*mainWindow\.loadURL\(url\)/);
+  assert.match(main, /if \(retryError\) scheduleDashboardRestart\(\{ error: retryError \}\)/);
+  assert.match(main, /dashboard exited before startup completed/);
+});
+
+test('desktop exposes a loopback dashboard health fallback independent of renderer networking', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.cjs'), 'utf8');
+  const preload = fs.readFileSync(path.join(__dirname, '..', 'preload.cjs'), 'utf8');
+  assert.match(main, /desktop:dashboard:health/);
+  assert.match(main, /dashboardJson\('\/api\/health\/proxy', \{ timeoutMs: 5000 \}\)/);
+  assert.match(preload, /getDashboardHealth/);
+  assert.match(preload, /ipcRenderer\.invoke\('desktop:dashboard:health'\)/);
+});

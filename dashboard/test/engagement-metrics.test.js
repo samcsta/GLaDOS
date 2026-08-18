@@ -101,3 +101,21 @@ test('engagement metrics prefer settled LiteLLM request costs over SDK estimates
   assert.equal(result.metering.costSettled, true);
   db.close();
 });
+
+test('engagement metrics keep only the latest cumulative receipt for a resumed session', () => {
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE engagements (id TEXT PRIMARY KEY, target_name TEXT, status TEXT, started_at TEXT, completed_at TEXT);
+    CREATE TABLE tasks (id INTEGER PRIMARY KEY, engagement_id TEXT, status TEXT);
+    CREATE TABLE dashboard_transcript_events (id INTEGER PRIMARY KEY, engagement_id TEXT, agent_id TEXT, kind TEXT, event_json TEXT, ts TEXT);
+  `);
+  db.prepare('INSERT INTO engagements VALUES (?, ?, ?, ?, ?)').run('eng-3', 'repo', 'complete', '2026-08-10 10:00:00', '2026-08-10 11:00:00');
+  const insert = db.prepare('INSERT INTO dashboard_transcript_events VALUES (?, ?, ?, ?, ?, ?)');
+  insert.run(1, 'eng-3', 'glados', 'result', JSON.stringify({ sessionId: 'sdk-1', costUsd: 1, modelUsage: { terra: { costUSD: 1, inputTokens: 10 } } }), '2026-08-10T10:20:00Z');
+  insert.run(2, 'eng-3', 'glados', 'result', JSON.stringify({ sessionId: 'sdk-1', costUsd: 3, modelUsage: { terra: { costUSD: 3, inputTokens: 30 } } }), '2026-08-10T10:40:00Z');
+  const result = engagementMetrics(db, 'eng-3');
+  assert.equal(result.metering.resultEvents, 1);
+  assert.equal(result.metering.costUsd, 3);
+  assert.equal(result.metering.byModel[0].inputTokens, 30);
+  db.close();
+});

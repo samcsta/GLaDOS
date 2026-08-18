@@ -9,8 +9,10 @@ Reject a compound assignment that asks this one Agent SDK turn to coordinate the
 ## Snapshot And Write Boundary
 
 - Confirm the supplied repository path and immutable revision before analysis. The revision may be a Git HEAD or a deterministic `snapshot:<sha256>` for an extracted source copy. Stop if it changes.
+- Inventory rows store `size` and `sha256` as separate JSON fields. Compare only the exact 64-character `sha256` field to the file digest; never concatenate the adjacent size value or copy a raw search-output prefix into the expected hash.
 - The assessed repository is read-only. Do not edit, generate, format, or install dependencies into it.
 - Write only to the designated investigation `artifact_root` and blackboard.
+- Large-file rule: search first, then read only the necessary slice with explicit offset and a limit no greater than 300. Never request an entire large manifest, source map, generated report, transcript, or JSONL ledger in one Read call.
 - Every blackboard task update must include both the exact `task_id` and `engagement_id`.
 
 ## Common Evidence Contract
@@ -31,7 +33,7 @@ When `security_review_role: blind-discovery`:
 1. Use the deterministic inventory but do not read prior findings, CWEs, paths, or conclusions.
 2. Build route/controller/service/repository and trust-boundary maps before findings.
 3. Cover authz, injection, file handling, SSRF, deserialization, crypto, secrets, resilience, IaC, CI/CD, and production overlay differences.
-4. When assigned a `worker_id`, write only that worker's candidate JSONL and receipt at the supplied paths. Every candidate needs a stable local ID, CWE IDs, exact typed locations, summary, evidence, control, sink, reachability, counterevidence, proof gaps, and confidence. An empty candidate file plus a valid receipt is a successful no-new result.
+4. When assigned a `worker_id`, write only `discovery/deep/<worker_id>/candidates.jsonl` and `discovery/deep/<worker_id>/receipt.json`. Never use the legacy `discovery/workers/` path. Every candidate needs a stable local ID, CWE IDs, exact typed locations, summary, evidence, control, sink, reachability, counterevidence, proof gaps, and confidence. An empty candidate file plus a valid receipt is a successful no-new result.
    - Candidate rows must use exactly: `candidate_id`, `cwe_ids`, `locations`, `summary`, `evidence`, `control`, `sink`, `reachability`, `counterevidence`, `proof_gaps`, and `confidence`. Candidate IDs must be `<worker_id>-CNNNN` (for example `worker-001-C0001`); do not insert category labels such as `authz` into the ID.
    - The exact typed shape is `{"candidate_id":"worker-NNN-CNNN","cwe_ids":["CWE-N"],"locations":[{"path":"repo/relative/file","start_line":1,"end_line":1,"role":"source|control|sink|evidence"}],"summary":"...","evidence":"...","control":"...","sink":"...","reachability":"...","counterevidence":"...","proof_gaps":[],"confidence":"high|medium|low"}`. `proof_gaps` is always a JSON array, including when empty; never write it as a prose string.
    - Every location must use repository-relative `path`, positive `start_line`, `end_line`, and `role` (`source`, `control`, `sink`, or `evidence`). Never use `file`, `line`, `line_range`, or `symbol` in a discovery candidate location.
@@ -46,7 +48,9 @@ When assigned a track, stay within its objective but disposition every supplied 
 
 - `authorization-access-control`: every route/mutation, authn, OAuth scopes, caller/subject/object ownership, empty authorization filters, ORM operation ordering, and mass assignment. Trace route -> middleware -> handler -> service -> repository/ORM.
 - `data-flow-injection`: path/query/body/JWT sources to SQL, Graph/OData/LDAP, URL, command, log, and response sinks; include raw error reflection.
-- `secrets-history`: deterministic HEAD and git-history scans; Kubernetes Secrets in every base/overlay; redact values and classify HEAD/history/both.
+- `secrets-history`: deterministic HEAD and git-history scans; Kubernetes Secrets in every base/overlay; redact values and classify HEAD/history/both. Distinguish pattern-only, reference-only, committed literal, structural validity, and controller-verified validity. Never claim `VALID_SECRET` without a controller-owned verification receipt. Identify PII schema/flow candidates separately from confirmed natural-person PII; do not use external enrichment or expose values.
+  - Write `tracks/secrets-history/sensitive-data-dispositions.jsonl` with exactly one row for every `inventory/sensitive-data-head.json` candidate. Required fields: `inventory_key`, `kind`, `data_class`, `presence_status`, `validation_status`, `verification_id`, `value_redacted: true`, `rationale`, and `finding_ids`.
+  - `VALID_SECRET` and `CONFIRMED_PII` are allowed only when the harness-created `validation/sensitive-data-verifications.jsonl` already contains the matching `verification_id`; otherwise use `UNVERIFIED`, `STRUCTURALLY_VALID`, `INVALID_SECRET`, or `PII_PATTERN_ONLY` as appropriate.
 - `resilience-error-handling`: every HTTP client timeout and retry boundary, migration/batch error propagation, swallowed failures, and unbounded background work.
 - `iac-config-manifests`: every manifest, production overlay, Terraform IAM/database grant, deletion protection, debug/telemetry argument, and environment-specific auth setting.
 - `cryptography-suppressions`: every crypto operation and every nosec/nolint/gosec-equivalent suppression; reject MD5/SHA-1 for security use and separate inbound verification from outbound token acquisition.

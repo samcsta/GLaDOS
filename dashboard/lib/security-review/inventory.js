@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { scanSensitiveData } = require('./sensitive-data');
 
 function git(repositoryPath, args, fallback = '') {
   try {
@@ -73,6 +74,42 @@ function snapshotId(repositoryPath, files) {
     hash.update('\0');
   }
   return hash.digest('hex');
+}
+
+function verifySecurityReviewInventory({ repositoryPath, artifactRoot }) {
+  const root = fs.realpathSync(repositoryPath);
+  const run = JSON.parse(fs.readFileSync(path.join(artifactRoot, 'run.json'), 'utf8'));
+  const rows = fs.readFileSync(path.join(artifactRoot, 'inventory', 'files.jsonl'), 'utf8')
+    .split(/\r?\n/).filter(Boolean).map(JSON.parse);
+  const expectedPaths = rows.map(row => row.path);
+  const actualPaths = run.gitHistoryAvailable ? repositoryFiles(root) : snapshotFiles(root);
+  const expectedSet = new Set(expectedPaths);
+  const actualSet = new Set(actualPaths);
+  const added = actualPaths.filter(relative => !expectedSet.has(relative));
+  const missing = expectedPaths.filter(relative => !actualSet.has(relative));
+  const changed = [];
+  for (const row of rows) {
+    const file = path.join(root, row.path);
+    if (!actualSet.has(row.path)) continue;
+    const stat = fs.lstatSync(file);
+    if (!!row.symlink !== stat.isSymbolicLink()) {
+      changed.push(row.path);
+      continue;
+    }
+    if (stat.isFile() && row.sha256 !== sha256(file)) changed.push(row.path);
+  }
+  const actualRevision = run.gitHistoryAvailable
+    ? git(root, ['rev-parse', 'HEAD'], null)
+    : `snapshot:${snapshotId(root, actualPaths)}`;
+  return {
+    verified: added.length === 0 && missing.length === 0 && changed.length === 0 && actualRevision === run.head,
+    expectedRevision: run.head,
+    actualRevision,
+    fileCount: actualPaths.length,
+    added,
+    missing,
+    changed,
+  };
 }
 
 function classify(relative) {
@@ -281,7 +318,20 @@ function generateSecurityReviewInventory({ repositoryPath, artifactRoot }) {
   writeJsonLines(path.join(artifactRoot, 'inventory', 'security-sensitive.jsonl'), semanticReviewCandidates(root, files));
   writeJson(path.join(artifactRoot, 'inventory', 'secrets-head.json'), scanReceipt(root, files, false, { gitAvailable, revision }));
   writeJson(path.join(artifactRoot, 'inventory', 'secrets-history.json'), scanReceipt(root, files, true, { gitAvailable, revision }));
+  const sensitive = scanSensitiveData(root, files, crypto.randomBytes(32));
+  writeJson(path.join(artifactRoot, 'inventory', 'sensitive-data-head.json'), {
+    schema_version: 1, engine: 'glados-sensitive-data/v1', mode: 'HEAD', completed: true, head: revision,
+    candidates: [...sensitive.secrets, ...sensitive.pii],
+  });
+  writeJson(path.join(artifactRoot, 'inventory', 'pii-head.json'), {
+    schema_version: 1, engine: 'glados-sensitive-data/v1', mode: 'HEAD', completed: true, head: revision,
+    candidates: sensitive.pii,
+  });
+  writeJson(path.join(artifactRoot, 'inventory', 'pii-history.json'), gitAvailable
+    ? { schema_version: 1, engine: 'glados-sensitive-data/v1', mode: 'history', completed: false, unavailable: true, reason: 'PII history scanning is not yet supported safely', head: revision, candidates: [] }
+    : { schema_version: 1, engine: 'glados-sensitive-data/v1', mode: 'history', completed: false, unavailable: true, reason: 'source snapshot has no Git metadata; history scanning requires a Git work tree', head: revision, candidates: [] });
+  writeJsonLines(path.join(artifactRoot, 'validation', 'sensitive-data-verifications.jsonl'), []);
   return run;
 }
 
-module.exports = { generateSecurityReviewInventory };
+module.exports = { generateSecurityReviewInventory, verifySecurityReviewInventory };

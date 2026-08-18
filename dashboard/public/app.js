@@ -37,6 +37,18 @@ const state = {
   })(),
   operatorProfile: { name: '', initials: 'You' },
   sessionGeneration: 0,
+  sessionActivationGeneration: 0,
+  sessionActivationPending: false,
+  sessionActivationController: null,
+  sessionActivationClientId: (() => {
+    try {
+      const stored = sessionStorage.getItem('glados-dash.activation-client-id');
+      if (stored) return stored;
+      const created = globalThis.crypto?.randomUUID?.() || `dashboard-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      sessionStorage.setItem('glados-dash.activation-client-id', created);
+      return created;
+    } catch { return `dashboard-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+  })(),
   overview: null,
   securityReviews: [],
   agentFilter: (() => { try { return localStorage.getItem('glados-dash.agent-filter') || 'all'; } catch { return 'all'; } })(),
@@ -116,12 +128,14 @@ function closeSessionStreams() {
 }
 
 async function loadInvestigationSessions() {
+  const activationGeneration = state.sessionActivationGeneration;
   const response = await fetch('/api/investigation-sessions');
   const body = await response.json();
   if (!response.ok || !body.ok) throw new Error(body.error || 'could not load investigation sessions');
+  if (activationGeneration !== state.sessionActivationGeneration) return false;
   state.investigationSessions = body.sessions || [];
   state.investigationProjects = body.projects || [];
-  state.currentSessionId = body.activeId;
+  if (!state.sessionActivationPending) state.currentSessionId = body.activeId;
   const validSessions = new Set(state.investigationSessions.map(session => session.id));
   state.unreadCompletedSessionIds = new Set([...state.unreadCompletedSessionIds].filter(id => validSessions.has(id) && id !== body.activeId));
   persistUnreadCompletedSessions();
@@ -129,6 +143,7 @@ async function loadInvestigationSessions() {
   if (!(state.expandedProjectIds instanceof Set)) state.expandedProjectIds = new Set(validProjects);
   else state.expandedProjectIds = new Set([...state.expandedProjectIds].filter(id => validProjects.has(id)));
   renderInvestigationNavigation();
+  return true;
 }
 
 async function loadOperatorProfile() {
@@ -141,16 +156,50 @@ async function loadOperatorProfile() {
 
 async function activateInvestigationSession(sessionId) {
   if (!sessionId || sessionId === state.currentSessionId) return;
-  const previous = state.investigationSessions.find(session => session.id === state.currentSessionId);
+  const previousSessionId = state.currentSessionId;
+  const previous = state.investigationSessions.find(session => session.id === previousSessionId);
   const continuesInBackground = Number(previous?.runningCount || 0) > 0 || state.active.size > 0;
-  const response = await fetch(`/api/investigation-sessions/${encodeURIComponent(sessionId)}/activate`, { method: 'POST' });
-  const body = await response.json();
-  if (!response.ok || !body.ok) throw new Error(body.error || 'could not activate investigation');
+  const activationGeneration = ++state.sessionActivationGeneration;
+  state.sessionActivationController?.abort();
+  const controller = new AbortController();
+  state.sessionActivationController = controller;
+  state.sessionActivationPending = true;
+  state.currentSessionId = sessionId;
+  renderInvestigationNavigation();
+  let response;
+  let body;
+  try {
+    response = await fetch(`/api/investigation-sessions/${encodeURIComponent(sessionId)}/activate`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientId: state.sessionActivationClientId,
+        generation: activationGeneration,
+      }),
+    });
+    body = await response.json();
+  } catch (error) {
+    if (error?.name === 'AbortError' || activationGeneration !== state.sessionActivationGeneration) return;
+    state.currentSessionId = previousSessionId;
+    state.sessionActivationPending = false;
+    renderInvestigationNavigation();
+    throw error;
+  }
+  if (activationGeneration !== state.sessionActivationGeneration) return;
+  if (!response.ok || !body.ok) {
+    state.currentSessionId = previousSessionId;
+    state.sessionActivationPending = false;
+    renderInvestigationNavigation();
+    throw new Error(body.error || 'could not activate investigation');
+  }
+  state.sessionActivationPending = false;
+  state.sessionActivationController = null;
   closeSessionStreams();
-  state.currentSessionId = body.session.id;
+  state.currentSessionId = body.activeId || body.session.id;
   state.investigationSessions = body.sessions || [];
   state.investigationProjects = body.projects || state.investigationProjects;
-  markSessionSeen(body.session.id);
+  markSessionSeen(state.currentSessionId);
   clearPlanClientState();
   persistWorkspaceState();
   await Promise.all([loadAgents(), loadSecurityReviews()]);
@@ -590,8 +639,11 @@ function wireOperationControls(root = document) {
 }
 
 async function loadAgents() {
-  const res = await fetch(withSession('/api/agents'));
+  const sessionId = state.currentSessionId;
+  const generation = state.sessionGeneration;
+  const res = await fetch(`/api/agents?session_id=${encodeURIComponent(sessionId || 'legacy')}`);
   const j = await res.json();
+  if (generation !== state.sessionGeneration || sessionId !== state.currentSessionId) return false;
   const previouslyActive = new Set(state.active.keys());
   state.agents = j.agents || [];
   state.active.clear();
@@ -608,6 +660,7 @@ async function loadAgents() {
   state.agentsLoadedOnce = true;
   renderAgentList();
   syncAgentViewToolbars();
+  return true;
 }
 
 
@@ -701,18 +754,24 @@ function renderSecurityReviews() {
   updateSecurityReviewTimes();
 }
 
-let securityReviewLoadPending = false;
+const securityReviewLoads = new Map();
 async function loadSecurityReviews() {
-  if (securityReviewLoadPending || !state.currentSessionId) return;
-  securityReviewLoadPending = true;
+  const sessionId = state.currentSessionId;
+  const generation = state.sessionGeneration;
+  if (!sessionId) return false;
+  securityReviewLoads.get(sessionId)?.abort();
+  const controller = new AbortController();
+  securityReviewLoads.set(sessionId, controller);
   try {
-    const response = await fetch(withSession('/api/controller/status'));
+    const response = await fetch(`/api/controller/status?session_id=${encodeURIComponent(sessionId)}`, { signal: controller.signal });
     const body = await response.json();
     if (!response.ok || !body.ok) throw new Error(body.error || 'could not load security reviews');
+    if (generation !== state.sessionGeneration || sessionId !== state.currentSessionId) return false;
     state.securityReviews = body.securityReviews || [];
     renderSecurityReviews();
+    return true;
   } catch {}
-  finally { securityReviewLoadPending = false; }
+  finally { if (securityReviewLoads.get(sessionId) === controller) securityReviewLoads.delete(sessionId); }
 }
 
 function openOverview() {
@@ -1011,13 +1070,18 @@ function renderUsageModelRows(usage, metric = 'spend') {
 
 function renderLiteLlmUsage(usage, metric = 'spend') {
   const selectedPeriod = usage?.period?.days === 1 ? 'daily' : 'weekly';
-  if (!usage?.available) {
+  if (!usage?.available && !usage?.sdkObserved) {
     return `<section class="overview-section overview-usage">
       <div class="overview-section-head"><div><h2>LLM usage</h2><p>Configured virtual key only</p></div><span class="status-chip warning">Unavailable</span></div>
       <div class="usage-unavailable"><strong>Usage metrics unavailable</strong><span>${escapeHtml(usage?.message || 'No reporting data is available.')}</span></div>
-    </section>`;
+      </section>`;
+  }
+  if (!usage?.available && usage?.sdkObserved) {
+    const observed = usage.sdkObserved.totals || {};
+    return `<section class="overview-section overview-usage"><div class="overview-section-head"><div><h2>LLM usage</h2><p>Local provisional Agent SDK totals</p></div><span class="status-chip warning">LiteLLM unavailable</span></div><div class="overview-usage-summary"><div><span>GLaDOS observed</span><strong>${formatUsageCurrency(observed.costUsd || 0)}</strong><small>Provisional SDK cost · ${formatUsageInteger(observed.completedTurns || 0)} completed turns</small></div><div><span>Tokens</span><strong>${formatUsageNumber(observed.totalTokens || 0)}</strong><small>Local terminal SDK usage</small></div></div></section>`;
   }
   const totals = usage.totals || {};
+  const sdkObserved = usage.sdkObserved?.totals || {};
   const daily = usage.daily || [];
   const maxDailySpend = Math.max(0, ...daily.map(day => Number(day.spend) || 0));
   const failureRate = totals.requests > 0 ? (totals.failedRequests / totals.requests) * 100 : 0;
@@ -1032,10 +1096,10 @@ function renderLiteLlmUsage(usage, metric = 'spend') {
       <div class="usage-period-controls"><div class="usage-segments" role="group" aria-label="Usage period"><button type="button" data-usage-period="daily" class="${selectedPeriod === 'daily' ? 'active' : ''}">Daily</button><button type="button" data-usage-period="weekly" class="${selectedPeriod === 'weekly' ? 'active' : ''}">Weekly</button></div><span class="overview-updated">Synced ${escapeHtml(fetchedAt)}</span></div>
     </div>
     <div class="overview-usage-summary">
-      <div><span>Spend</span><strong>${formatUsageCurrency(totals.spend)}</strong><small>${windowLabel} · this key only</small></div>
+      <div><span>LiteLLM posted</span><strong>${formatUsageCurrency(totals.spend)}</strong><small>${windowLabel} · this key only</small></div>
+      <div><span>GLaDOS observed</span><strong>${formatUsageCurrency(sdkObserved.costUsd || 0)}</strong><small>Provisional SDK cost · ${formatUsageInteger(sdkObserved.completedTurns || 0)} completed turn${Number(sdkObserved.completedTurns) === 1 ? '' : 's'}</small></div>
       <div><span>Tokens</span><strong>${formatUsageNumber(totals.totalTokens)}</strong><small>${formatUsageNumber(totals.promptTokens)} input · ${formatUsageNumber(totals.completionTokens)} output</small></div>
-      <div><span>Requests</span><strong>${formatUsageInteger(totals.requests)}</strong><small>${formatUsageInteger(totals.successfulRequests)} successful</small></div>
-      <div><span>Failures</span><strong>${formatUsageInteger(totals.failedRequests)}</strong><small>${failureRate.toFixed(1)}% of requests</small></div>
+      <div><span>Requests</span><strong>${formatUsageInteger(totals.requests)}</strong><small>${formatUsageInteger(totals.successfulRequests)} successful · ${formatUsageInteger(totals.failedRequests)} failed (${failureRate.toFixed(1)}%)</small></div>
     </div>
     <div class="overview-usage-body">
       <div class="usage-daily">
@@ -1521,7 +1585,14 @@ async function renderOverviewPane() {
           candidate.setAttribute('aria-selected', String(active));
         });
         const list = content.querySelector('[data-usage-model-list]');
-        if (list) list.innerHTML = renderUsageModelRows(data.llmUsage, usageShareMetric);
+        if (list) {
+          const observed = data.llmUsage?.sdkObserved;
+          const usage = observed?.models?.length ? {
+            totals: { spend: observed.totals?.costUsd, totalTokens: observed.totals?.totalTokens, requests: observed.totals?.completedTurns },
+            models: observed.models.map(model => ({ ...model, spend: model.costUsd, requests: 0 })),
+          } : data.llmUsage;
+          list.innerHTML = renderUsageModelRows(usage, usageShareMetric);
+        }
       }));
       content.querySelectorAll('[data-usage-period]').forEach(button => button.addEventListener('click', () => {
         const next = button.dataset.usagePeriod;
@@ -1750,8 +1821,6 @@ function ensureTranscript(tabId, agentId) {
     const recentOperationalEvent = !transcriptEventMs(ev) || Date.now() - transcriptEventMs(ev) < 30_000;
     if (ev.kind === 'prompt-error' && recentOperationalEvent) {
       pushNotification('error', `${rec.agentId}: ${ev.error || ev.text || 'LLM prompt failed'}`, { toast: true, label: 'Agent runtime' });
-    } else if (ev.kind === 'tool-result' && ev.isError && recentOperationalEvent) {
-      pushNotification('error', `${rec.agentId}: ${ev.toolName || 'tool'} failed`, { toast: true, label: 'Tool error' });
     } else if (ev.kind === 'permission-denied' && recentOperationalEvent) {
       pushNotification('denied', `${rec.agentId}: ${ev.decisionReason || ev.text || 'tool use denied'}`, { toast: true, label: 'Safety gate' });
     }
@@ -3311,17 +3380,28 @@ function logEvent(kind, text) {
 // Proxy health banner. Startup only warns when the selected proxy backend
 // reports a real problem.
 const healthBannerState = { dismissedSig: null, lastSig: null, notifiedSig: null };
+let dashboardRestartNotice = null;
+async function fetchDashboardHealth() {
+  try {
+    const response = await fetch('/api/health/proxy', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json();
+  } catch (browserError) {
+    if (!window.gladosDesktop?.getDashboardHealth) throw browserError;
+    return window.gladosDesktop.getDashboardHealth();
+  }
+}
 async function refreshHealthBanner() {
   const banner = document.getElementById('health-banner');
   const msg = document.getElementById('health-banner-msg');
   if (!banner || !msg) return;
   let data;
   try {
-    const r = await fetch('/api/health/proxy');
-    data = await r.json();
+    data = await fetchDashboardHealth();
   } catch {
     banner.classList.remove('hidden');
-    msg.textContent = 'Dashboard cannot reach its own health endpoint';
+    msg.textContent = dashboardRestartNotice || 'Dashboard cannot reach its own health endpoint';
+    if (dashboardRestartNotice) return;
     if (healthBannerState.notifiedSig !== 'dashboard-health-unreachable') {
       healthBannerState.notifiedSig = 'dashboard-health-unreachable';
       pushNotification('offline', msg.textContent, { toast: true, label: 'System health' });
@@ -3358,8 +3438,7 @@ function setupHealthBanner() {
 
   detailsBtn?.addEventListener('click', async () => {
     try {
-      const r = await fetch('/api/health/proxy');
-      const data = await r.json();
+      const data = await fetchDashboardHealth();
       await showDialog({ title: 'Proxy health details', message: JSON.stringify(data, null, 2), confirmLabel: 'Close', detail: true });
     } catch (e) { pushNotification('error', 'Health fetch failed: ' + e.message, { toast: true, label: 'Proxy health' }); }
   });
@@ -3371,6 +3450,21 @@ function setupHealthBanner() {
 
   refreshHealthBanner();
   setInterval(refreshHealthBanner, 5_000);
+}
+
+if (window.gladosDesktop?.onDashboardExit) {
+  window.gladosDesktop.onDashboardExit(info => {
+    const delay = Math.max(1, Math.ceil(Number(info?.delayMs || 1000) / 1000));
+    dashboardRestartNotice = info?.restarting
+      ? `Dashboard worker stopped and will restart automatically in ${delay}s`
+      : 'Dashboard worker stopped';
+    const banner = document.getElementById('health-banner');
+    const msg = document.getElementById('health-banner-msg');
+    if (banner && msg) {
+      msg.textContent = dashboardRestartNotice;
+      banner.classList.remove('hidden');
+    }
+  });
 }
 
 // Lobby event stream — session-started / session-ended -> auto-open tab.
@@ -3386,6 +3480,9 @@ function subscribeLobby() {
   es.addEventListener('investigation-projects-changed', () => refreshInvestigationNavigationSoon());
   es.addEventListener('investigation-session-deleted', async () => {
     try { await loadInvestigationSessions(); if (state.currentTab === 'glados-chat') renderPane(); } catch {}
+  });
+  es.addEventListener('investigation-session-changed', async () => {
+    try { await loadInvestigationSessions(); } catch {}
   });
   es.addEventListener('snapshot', e => {
     const arr = JSON.parse(e.data);
@@ -3450,12 +3547,14 @@ function subscribeLobby() {
     renderAgentList();
   });
   es.addEventListener('halt', e => {
-    const { agentId, reason } = JSON.parse(e.data);
+    const { agentId, reason, investigationSessionId } = JSON.parse(e.data);
+    if (investigationSessionId && investigationSessionId !== state.currentSessionId) return;
     setAgentHaltedState(agentId, true);
     logEvent('ended', `HALT ${agentId}${reason ? ' — ' + reason : ''}`);
   });
   es.addEventListener('resume', e => {
-    const { agentId } = JSON.parse(e.data);
+    const { agentId, investigationSessionId } = JSON.parse(e.data);
+    if (investigationSessionId && investigationSessionId !== state.currentSessionId) return;
     setAgentHaltedState(agentId, false);
     logEvent('started', `resume ${agentId}`);
   });
@@ -3551,6 +3650,7 @@ async function renderReportsPane() {
         <div class="report-source-tabs" role="tablist" aria-label="Report source">
           <button type="button" role="tab" data-report-scope="all">All</button>
           <button type="button" role="tab" data-report-scope="reports">Reports</button>
+          <button type="button" role="tab" data-report-scope="security-reviews">Security</button>
           <button type="button" role="tab" data-report-scope="investigations">Investigations</button>
         </div>
         <div class="report-index-notice" id="report-index-notice" hidden></div>
@@ -3678,12 +3778,69 @@ function formatReportDate(value) {
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(date);
 }
 
+async function renameReportEntry(relPath, currentName) {
+  const name = await showNameInput({
+    title: 'Rename report entry', value: currentName, confirmLabel: 'Rename',
+    label: 'File or folder name', placeholder: currentName,
+  });
+  if (!name || name === currentName) return;
+  const response = await fetch('/api/reports/file', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path: relPath, name }),
+  });
+  const body = await response.json();
+  if (!response.ok || !body.ok) throw new Error(body.error || 'rename failed');
+  if (state.reports.selectedPath === relPath || state.reports.selectedPath?.startsWith(`${relPath}/`)) {
+    state.reports.selectedPath = body.alias ? state.reports.selectedPath : `${body.path}${state.reports.selectedPath.slice(relPath.length)}`;
+  }
+  renderPane();
+}
+
+async function deleteReportEntry(relPath, name, type) {
+  const collection = !String(relPath || '').includes('/');
+  const securityReview = /^security-reviews\/[^/]+$/.test(relPath);
+  const investigation = /^investigations\/[^/]+$/.test(relPath);
+  const title = collection ? 'Clear report collection' : securityReview ? 'Delete security review' : investigation ? 'Delete investigation' : type === 'dir' ? 'Delete folder' : 'Delete report';
+  const label = collection ? 'Clear collection' : securityReview ? 'Delete review' : investigation ? 'Delete investigation' : type === 'dir' ? 'Delete folder' : 'Delete report';
+  const message = collection
+    ? `Permanently delete every object in ${name}? The collection itself will remain available. This cannot be undone.`
+    : `Permanently delete ${relPath}${type === 'dir' ? ' and every file inside it' : ''}? This cannot be undone.`;
+  if (!await confirmAction({ title, message, confirmLabel: label, danger: true })) return;
+  const response = await fetch('/api/reports/file?path=' + encodeURIComponent(relPath), { method: 'DELETE' });
+  const body = await response.json();
+  if (!response.ok || !body.ok) throw new Error(body.error || 'delete failed');
+  if (state.reports.selectedPath === relPath || state.reports.selectedPath?.startsWith(`${relPath}/`)) state.reports.selectedPath = null;
+  renderPane();
+}
+
+function reportTreeAction(kind, node, type) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `report-tree-${kind}${type === 'file' ? ' file-action' : ''}`;
+  button.title = `${kind === 'rename' ? 'Rename' : 'Delete'} ${node.name}`;
+  button.setAttribute('aria-label', button.title);
+  button.textContent = kind === 'rename' ? '✎' : '×';
+  button.addEventListener('click', async event => {
+    event.stopPropagation();
+    try {
+      if (kind === 'rename') await renameReportEntry(node.path, node.name);
+      else await deleteReportEntry(node.path, node.name, type);
+    } catch (error) {
+      pushNotification('error', `${kind === 'rename' ? 'Rename' : 'Delete'} failed: ${error.message}`, { toast: true, label: 'Reports' });
+    }
+  });
+  return button;
+}
+
 function buildTreeNodes(nodes, { depth = 0, forceOpen = false } = {}) {
   const frag = document.createDocumentFragment();
   for (const n of nodes) {
     const li = document.createElement('li');
     li.className = n.type === 'dir' ? 'report-dir-node' : 'report-file-node';
     if (n.type === 'dir') {
+      const row = document.createElement('div');
+      row.className = 'report-dir-row';
       const head = document.createElement('button');
       head.type = 'button';
       head.className = `dir${depth === 0 ? ' collection' : ''}`;
@@ -3707,7 +3864,8 @@ function buildTreeNodes(nodes, { depth = 0, forceOpen = false } = {}) {
         childUl.hidden = !open;
         if (open) populate();
       });
-      li.appendChild(head);
+      row.append(head, reportTreeAction('rename', n, 'dir'), reportTreeAction('delete', n, 'dir'));
+      li.appendChild(row);
       li.appendChild(childUl);
     } else {
       const fileEl = document.createElement('button');
@@ -3718,6 +3876,7 @@ function buildTreeNodes(nodes, { depth = 0, forceOpen = false } = {}) {
       fileEl.innerHTML = `<span class="file-kind">${escapeHtml(reportFileType(n))}</span><span class="file-copy"><span class="file-name">${escapeHtml(n.name)}</span><span class="file-details"><span>${escapeHtml(formatReportDate(n.mtime))}</span><span>${escapeHtml(formatReportSize(n.size))}</span></span></span>`;
       fileEl.addEventListener('click', () => loadReport(n.path, fileEl));
       li.appendChild(fileEl);
+      li.append(reportTreeAction('rename', n, 'file'), reportTreeAction('delete', n, 'file'));
     }
     frag.appendChild(li);
   }
@@ -3731,15 +3890,22 @@ async function loadReport(relPath, clickedEl) {
   const viewer = document.getElementById('report-viewer');
   viewer.innerHTML = '<div class="report-empty">loading…</div>';
   const isMd = /\.md$/i.test(relPath);
+  const reviewMatch = relPath.match(/^security-reviews\/([^/]+)\//);
   const header = `<div class="report-header"><span>${escapeHtml(relPath)}</span>
     <span class="report-actions">
-      ${isMd ? `<button class="btn-link" id="report-edit">edit</button>` : ''}
+      ${isMd && !reviewMatch ? `<button class="btn-link" id="report-edit">edit</button>` : ''}
+      ${reviewMatch && window.gladosDesktop?.exportSecurityReviewPdf ? '<button class="btn-link" id="report-export-pdf">export PDF</button>' : ''}
       <a href="/api/reports/raw?path=${encodeURIComponent(relPath)}" target="_blank" rel="noopener">open raw</a>
+      <button class="btn-link" id="report-rename">rename</button>
       <button class="btn-link danger" id="report-delete">delete</button>
     </span></div>`;
   try {
     const j = await fetch('/api/reports/file?path=' + encodeURIComponent(relPath)).then(r => r.json());
-    if (j.error) { viewer.innerHTML = `<div class="report-empty">error: ${escapeHtml(j.error)}</div>`; return; }
+    if (j.error) {
+      viewer.innerHTML = header + `<div class="report-empty">error: ${escapeHtml(j.error)}</div>`;
+      wireReportActions(relPath, {}, viewer);
+      return;
+    }
     const rawUrl = '/api/reports/raw?path=' + encodeURIComponent(relPath);
     let body;
     if (j.kind === 'markdown') {
@@ -3752,7 +3918,7 @@ async function loadReport(relPath, clickedEl) {
     } else if (j.kind === 'image') {
       body = `<img class="report-image" src="${rawUrl}" alt="${escapeHtml(relPath)}" />`;
     } else if (j.kind === 'pdf') {
-      body = `<iframe class="report-pdf" src="${rawUrl}"></iframe>`;
+      body = `<object class="report-pdf" data="${rawUrl}" type="application/pdf" aria-label="${escapeHtml(relPath)} PDF preview"><div class="report-empty">PDF preview unavailable - <a href="${rawUrl}" target="_blank" rel="noopener">open PDF</a></div></object>`;
     } else {
       body = `<div class="report-empty">binary file — <a href="${rawUrl}" target="_blank" rel="noopener">download</a></div>`;
     }
@@ -3781,6 +3947,8 @@ function formatReportMarkdownForDisplay(content) {
     if (evidence) return `### Evidence ${evidence[1]}: ${evidence[2]}`;
     const section = line.match(/^#(Summary|Remediation|CVSS\s+3\.1\s+Score|Action|Result)#\s*$/i);
     if (section) return `## ${section[1]}`;
+    const reportSection = line.match(/^#(Description|Recommendation|Confidence|SLASeverity|SLATiming|Reference|CVSSv3\.BaseSeverity|CVSSv3\.BaseScore|CVSSv3\.Vector)#\s*$/i);
+    if (reportSection) return `## ${reportSection[1]}`;
     return line;
   }).join('\n');
 }
@@ -3792,16 +3960,28 @@ function reportPresentationClass(relPath) {
 }
 
 function wireReportActions(relPath, fileMeta, viewer) {
+  const reviewMatch = relPath.match(/^security-reviews\/([^/]+)\//);
+  const exportButton = viewer.querySelector('#report-export-pdf');
+  if (exportButton && reviewMatch) exportButton.addEventListener('click', async () => {
+    try {
+      const result = await window.gladosDesktop.exportSecurityReviewPdf({ engagementId: reviewMatch[1] });
+      if (!result?.canceled) {
+        showToast('Security review PDF exported.', { kind: 'success', label: 'Reports' });
+        renderPane();
+      }
+    } catch (error) {
+      pushNotification('error', `PDF export failed: ${error.message}`, { toast: true, label: 'Reports' });
+    }
+  });
   const delBtn = viewer.querySelector('#report-delete');
   if (delBtn) delBtn.addEventListener('click', async () => {
-    if (!await confirmAction({ title: 'Delete report', message: `Delete ${relPath}? This cannot be undone.`, confirmLabel: 'Delete', danger: true })) return;
-    try {
-      const r = await fetch('/api/reports/file?path=' + encodeURIComponent(relPath), { method: 'DELETE' });
-      const j = await r.json();
-      if (!j.ok) throw new Error(j.error || 'delete failed');
-      state.reports.selectedPath = null;
-      renderPane();
-    } catch (e) { pushNotification('error', 'Delete failed: ' + e.message, { toast: true, label: 'Reports' }); }
+    try { await deleteReportEntry(relPath, relPath.split('/').at(-1), 'file'); }
+    catch (e) { pushNotification('error', 'Delete failed: ' + e.message, { toast: true, label: 'Reports' }); }
+  });
+  const renameBtn = viewer.querySelector('#report-rename');
+  if (renameBtn) renameBtn.addEventListener('click', async () => {
+    try { await renameReportEntry(relPath, relPath.split('/').at(-1)); }
+    catch (error) { pushNotification('error', `Rename failed: ${error.message}`, { toast: true, label: 'Reports' }); }
   });
   const editBtn = viewer.querySelector('#report-edit');
   if (editBtn && fileMeta.kind === 'markdown') editBtn.addEventListener('click', () => {

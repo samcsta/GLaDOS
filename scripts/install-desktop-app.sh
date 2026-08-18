@@ -60,11 +60,29 @@ if [[ -d "$DEST" ]]; then
 fi
 /usr/bin/ditto "$SOURCE" "$DEST"
 [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -f "$DEST" >/dev/null 2>&1 || true
-[[ -x "$LSREGISTER" ]] && "$LSREGISTER" -gc >/dev/null 2>&1 || true
 [[ -x "$MDIMPORT" ]] && "$MDIMPORT" -i "$INSTALL_ROOT" >/dev/null 2>&1 || true
 
 if [[ "${KEEP_GLADOS_ARTIFACTS:-0}" != "1" && -z "${GLADOS_APP_SOURCE:-}" ]]; then
   rm -rf "$ROOT/artifacts"
+elif [[ "${KEEP_GLADOS_ARTIFACTS:-0}" != "1" && "$SOURCE" == "$ARTIFACT_ROOT"/* ]]; then
+  [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -u "$SOURCE" >/dev/null 2>&1 || true
+  rm -rf "$SOURCE"
+fi
+
+if [[ -x "$LSREGISTER" ]]; then
+  "$LSREGISTER" -kill -r -domain local -domain system -domain user >/dev/null 2>&1 || true
+  "$LSREGISTER" -f "$DEST" >/dev/null 2>&1 || true
+  "$LSREGISTER" -gc >/dev/null 2>&1 || true
+fi
+[[ -x "$MDIMPORT" ]] && "$MDIMPORT" -i "$DEST" >/dev/null 2>&1 || true
+
+if command -v mdfind >/dev/null 2>&1; then
+  spotlight_apps="$(mdfind 'kMDItemContentType == "com.apple.application-bundle" && (kMDItemDisplayName == "GLaDOS" || kMDItemFSName == "GLaDOS.app")' 2>/dev/null || true)"
+  unexpected_apps="$(printf '%s\n' "$spotlight_apps" | grep -Fvx "$DEST" || true)"
+  if [[ -n "$unexpected_apps" ]]; then
+    echo "Warning: Spotlight still lists non-canonical GLaDOS applications:" >&2
+    printf '%s\n' "$unexpected_apps" >&2
+  fi
 fi
 
 echo "Installed $DEST"

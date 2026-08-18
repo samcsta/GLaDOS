@@ -8,6 +8,8 @@ If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out w
 
 ## Session Startup
 
+When the authoritative runtime context says `GLADOS_SECURITY_REVIEW=1` or identifies a security-review artifact root, skip this startup checklist entirely. The harness already loaded these prompt files, and blind-review isolation prohibits reading `MEMORY.md` or `memory/`.
+
 Before doing anything else:
 
 1. Read `SOUL.md` — this is who you are

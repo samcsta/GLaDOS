@@ -234,7 +234,7 @@ class InvestigationSessionStore {
     let replacement = null;
     const runDelete = (table, sql, ...params) => {
       const result = this.db.prepare(sql).run(...params);
-      rowsDeleted[table] = result.changes;
+      rowsDeleted[table] = Number(rowsDeleted[table] || 0) + result.changes;
     };
     const tx = this.db.transaction(() => {
       if (session.state === 'active') {
@@ -256,11 +256,13 @@ class InvestigationSessionStore {
         }
       }
       runDelete('controller_events', `DELETE FROM controller_events WHERE goal_id IN (SELECT id FROM controller_goals WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?)) OR job_id IN (SELECT id FROM controller_jobs WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?))`, id, id);
+      runDelete('dashboard_transcript_events', `DELETE FROM dashboard_transcript_events WHERE session_id=? OR engagement_id IN (SELECT id FROM engagements WHERE session_id=?) OR controller_job_id IN (SELECT id FROM controller_jobs WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?))`, id, id, id);
       runDelete('controller_jobs', `DELETE FROM controller_jobs WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?) OR goal_id IN (SELECT id FROM controller_goals WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?))`, id, id);
       runDelete('controller_goals', `DELETE FROM controller_goals WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?)`, id);
       runDelete('security_review_worker_attempts', `DELETE FROM security_review_worker_attempts WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?)`, id);
       runDelete('security_review_worker_runs', `DELETE FROM security_review_worker_runs WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?)`, id);
       runDelete('security_review_model_observations', `DELETE FROM security_review_model_observations WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?)`, id);
+      runDelete('litellm_relay_receipts', `DELETE FROM litellm_relay_receipts WHERE request_id IN (SELECT request_id FROM security_review_llm_requests WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?))`, id);
       runDelete('security_review_llm_requests', `DELETE FROM security_review_llm_requests WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?)`, id);
       runDelete('replan_proposals', `DELETE FROM replan_proposals WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?)`, id);
       runDelete('plan_approvals', `DELETE FROM plan_approvals WHERE plan_id IN (SELECT p.id FROM plans p JOIN engagements e ON e.id=p.engagement_id WHERE e.session_id=?)`, id);
@@ -270,7 +272,6 @@ class InvestigationSessionStore {
       runDelete('tasks', `DELETE FROM tasks WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?)`, id);
       runDelete('findings', `DELETE FROM findings WHERE engagement_id IN (SELECT id FROM engagements WHERE session_id=?)`, id);
       runDelete('engagements', `DELETE FROM engagements WHERE session_id=?`, id);
-      runDelete('dashboard_transcript_events', `DELETE FROM dashboard_transcript_events WHERE session_id=?`, id);
       runDelete('operator_action_approvals', `DELETE FROM operator_action_approvals WHERE session_id=?`, id);
       runDelete('investigation_sessions', `DELETE FROM investigation_sessions WHERE id=?`, id);
       const violation = this.db.prepare('PRAGMA foreign_key_check').get();

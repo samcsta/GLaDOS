@@ -107,7 +107,10 @@ function aggregateDailyActivity(payload, { now = new Date(), days = DEFAULT_DAYS
 }
 
 function gatewayBaseUrl(env = process.env) {
-  return String(env.ANTHROPIC_BASE_URL || DEFAULT_BASE_URL)
+  const configured = String(env.GLADOS_LITELLM_UPSTREAM_BASE_URL || env.ANTHROPIC_BASE_URL || DEFAULT_BASE_URL);
+  const loopbackRelay = /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?(?:\/|$)/i.test(configured)
+    && !env.GLADOS_LITELLM_UPSTREAM_BASE_URL;
+  return String(loopbackRelay ? DEFAULT_BASE_URL : configured)
     .trim()
     .replace(/\/+$/, '')
     .replace(/\/v1$/i, '');
