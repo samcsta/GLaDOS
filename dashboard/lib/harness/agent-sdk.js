@@ -229,7 +229,8 @@ function mountedToolsForAgent(agentId, policy = loadPolicy(), options = {}) {
   }
   const expanded = expandMcpTools(expandTaskToolAliases(tools));
   if (env.GLADOS_SECURITY_REVIEW !== '1') return expanded;
-  return expanded.filter(tool => !tool.startsWith('mcp__glados-ops__') && !tool.startsWith('mcp__browser-'));
+  return expanded.filter(tool => tool !== 'Bash' && tool !== 'NotebookEdit'
+    && !tool.startsWith('mcp__glados-ops__') && !tool.startsWith('mcp__browser-'));
 }
 
 function unique(values) {
@@ -342,6 +343,16 @@ function decideToolUse({ agentId, toolName, input = {}, policy = loadPolicy(), w
         && /(?:discovery[\\/]deep[\\/]workers\.jsonl|validation[\\/](?:runtime-model-observations|model-receipts)\.jsonl|(?:^|[\\/])(?:findings|coverage|scan-manifest|completion-receipt)\.json)$/.test(String(input.file_path || input.path || ''))) {
       return { allowed: false, reason: 'security-review final ledgers and sealed outputs are controller-owned and cannot be edited by agents' };
     }
+    if (/^(?:Write|Edit|MultiEdit)$/i.test(String(toolName || ''))) {
+      const requested = String(input.file_path || input.path || '');
+      const artifactRoot = path.resolve(env.GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT || '');
+      if (requested && artifactRoot) {
+        const destination = path.resolve(requested);
+        if (destination !== artifactRoot && !destination.startsWith(`${artifactRoot}${path.sep}`)) {
+          return { allowed: false, reason: 'security-review artifact writes must stay below the assigned artifact_root' };
+        }
+      }
+    }
     if (/(?:^|__)Bash$/i.test(String(toolName || ''))
         && /(?:workers\.jsonl|runtime-model-observations\.jsonl|model-receipts\.jsonl|findings\.json|coverage\.json|scan-manifest\.json|completion-receipt\.json)/.test(String(input.command || ''))
         && /(?:>|tee\b|cp\b|mv\b|rm\b|python\b|perl\b|ruby\b)/.test(String(input.command || ''))) {
@@ -351,6 +362,11 @@ function decideToolUse({ agentId, toolName, input = {}, policy = loadPolicy(), w
         && /(?:blackboard\.db|BLACKBOARD_DB)/.test(String(input.command || ''))
         && /(?:sqlite3|better-sqlite3|python|INSERT\b|UPDATE\b|DELETE\b|DROP\b|ALTER\b)/i.test(String(input.command || ''))) {
       return { allowed: false, interrupt: true, reason: 'direct mutation of the controller blackboard database is prohibited; use scoped blackboard tools' };
+    }
+    if (/(?:^|__)Bash$/i.test(String(toolName || ''))) {
+      const command = String(input.command || '');
+      const mutating = /(?:^|[;&|]\s*|\s)(?:rm|mv|cp|install|mkdir|touch|truncate|tee|ln|chmod|chown|python\d*|perl|ruby|node)\b|(?:^|[^<])>{1,2}(?!>)/i.test(command);
+      if (mutating) return { allowed: false, reason: 'security-review Bash is read-only; use Write or Edit for artifact_root output' };
     }
   }
 
@@ -970,6 +986,7 @@ function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, work
     lines.push('- Derive available files and directories from inventory/files.jsonl. Do not guess conventional paths such as src/test or gradle/libs.versions.toml when absent.');
     lines.push('- Snapshot verification is harness-owned. Do not invent a find/shasum or per-file digest aggregate; use the canonical run.json revision and harness verification receipt.');
     lines.push('- Static analysis, worker continuation, specialist review, validation, and writes below artifact_root require no operator approval. Continue automatically until saturated and sealed or a real terminal blocker occurs.');
+    lines.push('- Security-review report exception: never wait for wrap approval and never dispatch report-writer or report-validator for the built-in package. Return after the run and deep manifest are SATURATED and all terminal analysis artifacts are ready. The controller owns engagement completion, canonicalization, sealing, and automatic Markdown/HTML/per-finding generation; the desktop then generates the PDF. Approval remains required only for live actions, optional custom reports, or external publication.');
     lines.push('- The engagement is already provisioned by the controller. Never call blackboard_engagement_create for this review.');
     lines.push('- Full Access is ignored for this source-only review. Desktop, browser, local-auth, and Apple Events tools are unavailable.');
   }

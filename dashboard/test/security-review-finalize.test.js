@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { generateCanonicalCoverage, generateCanonicalFindings, generateCanonicalObservations, generateModelReceipts, sealSecurityReview } = require('../lib/security-review/finalize');
+const { generateCanonicalCoverage, generateCanonicalFindings, generateCanonicalObservations, generateModelReceipts, invalidateSecurityReviewSeal, sealSecurityReview } = require('../lib/security-review/finalize');
 const { normalizeSecurityReviewArtifacts } = require('../lib/security-review/normalize-artifacts');
 
 function writeJson(file, value) {
@@ -79,6 +79,43 @@ test('controller generates deterministic canonical findings and coverage schemas
   assert.deepEqual(coverage.files[0].finding_ids, ['F-1']);
 });
 
+test('controller prefers detailed specialist findings and merges validation metadata', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-finalize-finding-merge-'));
+  writeJsonLines(path.join(root, 'validation/candidate-closure.jsonl'), [{
+    candidate_id: 'C-1', disposition: 'REPORTABLE', finding_ids: ['F-1'],
+  }]);
+  writeJsonLines(path.join(root, 'discovery/candidates.jsonl'), [{
+    candidate_id: 'C-1', summary: 'Candidate', sink: 'Sink',
+    locations: [{ path: 'main.go', start_line: 1, end_line: 2, role: 'source' }],
+  }]);
+  writeJsonLines(path.join(root, 'tracks/resilience-error-handling/findings.jsonl'), [{
+    finding_id: 'F-1', title: 'Detailed finding', severity: 'high', description: 'Detailed description', impact: 'Impact',
+    recommendation: 'Fix', reachable_entry_point: 'Reachable', status: 'candidate',
+    locations: [{ path: 'main.go', start_line: 1, end_line: 2, role: 'source' }],
+  }]);
+  writeJsonLines(path.join(root, 'discovery/findings.jsonl'), [{
+    finding_id: 'F-1', validated: true, confidence: 'high', counterevidence: ['External control unknown.'],
+  }]);
+  const finding = generateCanonicalFindings(root, { head: 'snapshot:test', engagementId: 'eng-1' }).findings[0];
+  assert.equal(finding.description, 'Detailed description');
+  assert.equal(finding.status, 'candidate');
+  assert.deepEqual(finding.counterevidence, ['External control unknown.']);
+});
+
+test('controller refuses to fabricate a canonical finding when no finding row exists', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-finalize-derived-finding-'));
+  writeJsonLines(path.join(root, 'validation/candidate-closure.jsonl'), [{
+    candidate_id: 'C-1', disposition: 'REPORTABLE', finding_ids: ['F-1'],
+    counterevidence: 'External policy unknown.', proof_gaps: ['Validate runtime policy.'],
+  }]);
+  writeJsonLines(path.join(root, 'discovery/candidates.jsonl'), [{
+    candidate_id: 'C-1', cwe_ids: ['CWE-862'], summary: 'Missing object authorization',
+    sink: 'Repository update', reachability: 'Authenticated API route.', confidence: 'high',
+    locations: [{ path: 'main.go', start_line: 1, end_line: 2, role: 'source' }, { path: 'repo.go', start_line: 5, end_line: 7, role: 'sink' }],
+  }]);
+  assert.throws(() => generateCanonicalFindings(root, { head: 'snapshot:test', engagementId: 'eng-1' }), /missing source rows: F-1/);
+});
+
 test('controller canonical output fills exact finding and coverage fields from retained evidence', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-finalize-legacy-fields-'));
   writeJsonLines(path.join(root, 'validation/candidate-closure.jsonl'), [{
@@ -107,19 +144,76 @@ test('controller canonical output fills exact finding and coverage fields from r
 test('controller separates observations from reportable findings', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-finalize-observations-'));
   writeJsonLines(path.join(root, 'validation/candidate-closure.jsonl'), [{
-    candidate_id: 'O-1', disposition: 'OBSERVATION', observation_ids: ['O-1'],
+    candidate_id: 'C-1', disposition: 'OBSERVATION', observation_ids: ['O-1'],
     observation_category: 'supply-chain-hardening', reportability_rationale: 'Registry mutability is unproven.',
     recommendation: 'Pin the image digest.',
   }]);
   writeJsonLines(path.join(root, 'discovery/candidates.jsonl'), [{
-    candidate_id: 'O-1', cwe_ids: ['CWE-829'], summary: 'Mutable image reference', evidence: 'Image has no digest.',
+    candidate_id: 'C-1', cwe_ids: ['CWE-829'], summary: 'Mutable image reference', evidence: 'Image has no digest.',
     locations: [{ path: 'build.gradle', start_line: 1, end_line: 2, role: 'source' }], reachability: 'Build time.',
     counterevidence: 'Private registry policy is unknown.', proof_gaps: ['Inspect registry policy.'], confidence: 'low',
   }]);
   const observations = generateCanonicalObservations(root, { head: 'snapshot:test', engagementId: 'eng-1' });
   assert.equal(observations.observations.length, 1);
+  assert.equal(observations.observations[0].id, 'O-1');
+  assert.equal(observations.observations[0].candidate_id, 'C-1');
   assert.equal(observations.observations[0].category, 'supply-chain-hardening');
   assert.equal(generateCanonicalFindings(root, { head: 'snapshot:test', engagementId: 'eng-1' }).findings.length, 0);
+});
+
+test('controller normalizes terminal report artifacts from supported model output variants', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-finalize-terminal-normalize-'));
+  writeJson(path.join(root, 'run.json'), { deepScan: { terminalState: 'SATURATED' } });
+  writeJson(path.join(root, 'discovery/deep/manifest.json'), { completed_at: '2026-08-18T00:44:40.510Z' });
+  writeJsonLines(path.join(root, 'inventory/security-sensitive.jsonl'), [{
+    inventory_key: 'main.go:rule', check_id: 'request-binding-mass-assignment', rule: 'rule', file: 'main.go',
+    line_ranges: [{ start_line: 1, end_line: 2 }],
+  }]);
+  writeJson(path.join(root, 'validation/semantic-coverage.json'), {
+    checks: [{ id: 'secret-authenticity-and-exposure', status: 'FINDING', analysis: 'Closed as FSH-001', evidence: [{}], finding_ids: ['FSH-001'] }],
+    candidate_dispositions: [{ inventory_key: 'main.go:rule', check_id: 'request-binding-mass-assignment', disposition: 'NOT_APPLICABLE', analysis: 'No sink', evidence: {} }],
+    referrals: [{ referral_id: 'R-1', disposition: 'OBSERVATION', evidence: {} }],
+  });
+  writeJsonLines(path.join(root, 'validation/candidate-closure.jsonl'), [{
+    candidate_id: 'NEW-1', disposition: 'REPORTABLE', finding_ids: ['RES-001'],
+  }]);
+  writeJson(path.join(root, 'validation/challenge-matrix.json'), {
+    outcomes: [{ id: 'NEW-1', candidate_id: 'NEW-1', outcome: 'NEW' }],
+  });
+  writeJsonLines(path.join(root, 'validation/new-candidates.jsonl'), [{
+    candidate_id: 'NEW-1', locations: [{ path: 'main.go', start_line: 1, end_line: 1, role: 'entry' }],
+  }]);
+  writeJsonLines(path.join(root, 'inventory/crypto-operations.jsonl'), [{ key: 'crypto-1' }]);
+  writeJsonLines(path.join(root, 'tracks/cryptography-suppressions/crypto-matrix.jsonl'), [{ inventory_key: 'crypto-1' }]);
+  writeJsonLines(path.join(root, 'inventory/suppressions.jsonl'), []);
+  writeJsonLines(path.join(root, 'tracks/cryptography-suppressions/suppression-dispositions.jsonl'), []);
+  writeJsonLines(path.join(root, 'inventory/http-clients.jsonl'), []);
+  writeJsonLines(path.join(root, 'tracks/resilience-error-handling/http-client-matrix.jsonl'), []);
+
+  normalizeSecurityReviewArtifacts(root);
+  const run = JSON.parse(fs.readFileSync(path.join(root, 'run.json'), 'utf8'));
+  const semantic = JSON.parse(fs.readFileSync(path.join(root, 'validation/semantic-coverage.json'), 'utf8'));
+  const challenge = JSON.parse(fs.readFileSync(path.join(root, 'validation/challenge-matrix.json'), 'utf8'));
+  const validatorCandidate = JSON.parse(fs.readFileSync(path.join(root, 'validation/new-candidates.jsonl'), 'utf8'));
+  assert.equal(run.deepScan.completedAt, '2026-08-18T00:44:40.510Z');
+  assert.deepEqual(semantic.checks[0].finding_ids, ['FSH-001']);
+  assert.equal(semantic.candidate_dispositions[0].reason, 'No sink');
+  assert.equal(semantic.referrals[0].status, 'OBSERVATION');
+  assert.equal(challenge.outcomes.some(row => row.id === 'RES-001'), false);
+  assert.equal(validatorCandidate.locations[0].role, 'source');
+  assert.equal(fs.readFileSync(path.join(root, 'tracks/cryptography-suppressions/crypto-matrix.jsonl'), 'utf8').trim(), '{"inventory_key":"crypto-1"}');
+});
+
+test('controller refuses to manufacture per-file coverage from candidate dispositions', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-finalize-coverage-refusal-'));
+  writeJsonLines(path.join(root, 'inventory/files.jsonl'), [{ path: 'main.go', key: 'main.go', binary: false }]);
+  writeJsonLines(path.join(root, 'inventory/security-sensitive.jsonl'), [{
+    inventory_key: 'main.go:rule', file: 'main.go', rule: 'rule', line_ranges: [{ start_line: 1, end_line: 2 }],
+  }]);
+  writeJsonLines(path.join(root, 'discovery/coverage-ledger.jsonl'), [{
+    candidate_id: 'C-1', disposition: 'REPORTABLE', finding_ids: ['F-1'], evidence_locations: [],
+  }]);
+  assert.throws(() => normalizeSecurityReviewArtifacts(root), /candidate-shaped coverage cannot prove file review/);
 });
 
 test('controller generates exactly one model receipt per required role', () => {
@@ -152,5 +246,14 @@ test('controller generates exactly one model receipt per required role', () => {
 test('security-review sealing refuses a run that is not saturated', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-refuse-early-seal-'));
   assert.throws(() => sealSecurityReview(root, { head: 'snapshot:test', deepScan: { terminalState: 'RUNNING' } }, 'eng'), /before run reaches SATURATED/);
+  assert.equal(fs.existsSync(path.join(root, 'completion-receipt.json')), false);
+});
+
+test('invalidating a security-review seal removes both integrity receipts', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-invalidate-seal-'));
+  writeJson(path.join(root, 'scan-manifest.json'), { terminal_state: 'SATURATED' });
+  writeJson(path.join(root, 'completion-receipt.json'), { status: 'SEALED' });
+  invalidateSecurityReviewSeal(root);
+  assert.equal(fs.existsSync(path.join(root, 'scan-manifest.json')), false);
   assert.equal(fs.existsSync(path.join(root, 'completion-receipt.json')), false);
 });

@@ -233,6 +233,28 @@ test('completion-driven discovery preserves a null attempt ceiling', () => {
   });
 });
 
+test('controller can transition proven discovery saturation to terminal state', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-saturation-transition-'));
+  completeReviewArtifacts(root);
+  const runFile = path.join(root, 'run.json');
+  const manifestFile = path.join(root, 'discovery/deep/manifest.json');
+  const run = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+  run.deepScan.terminalState = 'RUNNING';
+  run.deepScan.deadlineAt = null;
+  delete run.deepScan.completedAt;
+  manifest.status = 'RUNNING';
+  manifest.deadline_at = null;
+  delete manifest.completed_at;
+  writeJson(root, 'run.json', run);
+  writeJson(root, 'discovery/deep/manifest.json', manifest);
+  const saturation = require('../lib/security-review/deep-scan').discoverySaturationCheckpoint(root);
+  assert.equal(saturation.passed, true, saturation.invalid.join('; '));
+  require('../lib/security-review/deep-scan').markDeepScanSaturated(root, '2026-08-18T04:00:00.000Z');
+  assert.equal(JSON.parse(fs.readFileSync(runFile, 'utf8')).deepScan.terminalState, 'SATURATED');
+  assert.equal(JSON.parse(fs.readFileSync(manifestFile, 'utf8')).status, 'SATURATED');
+});
+
 test('controller-owned worker claims allow three-wide discovery and reject overflow', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-worker-claim-test-'));
   const dbPath = path.join(root, 'blackboard.db');
@@ -570,13 +592,16 @@ test('source review coordinator contract requires staged analysis and hard gates
   assert.match(prompt, /Preserve the harness-created discovery\/deep\/manifest\.json fields/);
 });
 
-test('security review asks for approval only for live actions and formal reporting', () => {
+test('security review automatically generates built-in reports after sealing', () => {
   const prompt = securityReviewCoordinatorPrompt({
     repositoryPath: '/tmp/repository', engagementId: 'eng-1', goalId: 'goal-1', artifactRoot: '/tmp/artifacts', contextMode: 'blind',
   });
   assert.match(prompt, /Automatically retry incomplete static-analysis\/validation tasks/);
-  assert.match(prompt, /Mark the analysis goal complete and deliver validated results/);
-  assert.match(prompt, /approval is required only for live\/target-facing actions and for generating or publishing the formal report package/i);
+  assert.match(prompt, /return the validated result/);
+  assert.match(prompt, /automatically generates and indexes the sealed security-review Markdown, HTML, per-finding, and desktop PDF deliverables/i);
+  assert.match(prompt, /Do not wait for wrap approval/);
+  assert.match(prompt, /approval remains required for live\/target-facing actions and external publication/i);
+  assert.match(prompt, /Do not call engagement completion/);
   assert.doesNotMatch(prompt, /finish at pending operator confirmation/);
 });
 
@@ -805,6 +830,28 @@ test('source review gate accepts evidence-backed observations outside the vulner
   });
   const result = sourceReviewGateStatus(root, authoritativeDeepOptions(root));
   assert.equal(result.invalid.some(item => /OBSERVATION|observations\.json|reportable candidate findings/.test(item)), false);
+});
+
+test('semantic referral observations are terminal but NEW is not High/Critical confirmation', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-source-review-terminal-variants-'));
+  completeReviewArtifacts(root);
+  const semanticFile = path.join(root, 'validation/semantic-coverage.json');
+  const semantic = JSON.parse(fs.readFileSync(semanticFile, 'utf8'));
+  semantic.referrals = [{
+    id: 'R-1', status: 'OBSERVATION', evidence: {
+      file: 'main.go', line_range: '1-2', rule: 'referral', observed_evidence: 'Conditional path', result: 'OBSERVATION',
+    },
+  }];
+  writeJson(root, 'validation/semantic-coverage.json', semantic);
+  const findingId = 'F-HIGH';
+  const findings = [{ finding_id: findingId, severity: 'high' }];
+  writeJsonLines(root, 'discovery/findings.jsonl', findings);
+  const challenge = JSON.parse(fs.readFileSync(path.join(root, 'validation/challenge-matrix.json'), 'utf8'));
+  challenge.outcomes = [{ id: findingId, outcome: 'NEW' }];
+  writeJson(root, 'validation/challenge-matrix.json', challenge);
+  const result = sourceReviewGateStatus(root, authoritativeDeepOptions(root));
+  assert.equal(result.invalid.some(item => /semantic referral R-1/.test(item)), false);
+  assert.equal(result.invalid.some(item => /missing validator confirmation/.test(item)), true);
 });
 
 test('discovery dispatch checkpoint blocks a new worker until the prior worker is durably reconciled', () => {

@@ -29,6 +29,9 @@ Supervisor and dispatcher only. GLaDOS coordinates, gates, and summarizes; speci
   and `operator_approval_reference: <reference>` in every report-agent task,
   plus `report_pass: initial`, `report_pass: review-and-edit`, or
   `report_pass: final` as appropriate.
+- Those report-agent markers apply only to ordinary/custom report-agent
+  dispatch. `/security-review` built-in deliverables are controller-generated;
+  never dispatch either report agent and never wait for wrap approval for them.
 - Treat `c2-*`, `phish-*`, and `postex-*` as disabled-by-default modules that require explicit operator enablement and approval.
 
 ## Evidence Handling

@@ -54,6 +54,7 @@ const TOOLS = [
         query: { type: "string", description: "Free-text search across title and description" },
         limit: { type: "number", description: "Max results (default 50)" },
       },
+      required: ["engagement_id"],
     },
   },
   {
@@ -93,6 +94,7 @@ const TOOLS = [
         engagement_id: { type: "string", description: "Filter by engagement ID" },
         status: { type: "string", description: "Filter by status: pending, in_progress, completed, failed, cancelled" },
       },
+      required: ["engagement_id"],
     },
   },
   {

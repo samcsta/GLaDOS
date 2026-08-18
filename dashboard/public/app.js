@@ -476,7 +476,7 @@ function createAgentViewToolbar(agentId) {
   const toolbar = document.createElement('div');
   toolbar.className = 'agent-view-toolbar';
   toolbar.dataset.agentId = agentId;
-  const resetLabel = agentId === 'glados' ? 'Reset investigation' : 'Reset session';
+  const resetLabel = agentId === 'glados' ? 'Reset SDK conversations' : 'Reset SDK conversation';
   const label = agentId === 'glados' ? 'GLaDOS' : agentId;
   const role = agentId === 'glados' ? 'Coordinator' : 'Specialist agent';
   const avatar = agentId === 'glados'
@@ -615,10 +615,10 @@ async function handleRefreshRuntime() {
 
 async function handleResetAgentSession(agentId) {
   const tabId = tabIdForAgent(agentId);
-  const resetLabel = agentId === 'glados' ? 'Reset conversations' : 'Reset session';
+  const resetLabel = agentId === 'glados' ? 'Reset SDK conversations' : 'Reset SDK conversation';
   const resetMsg = agentId === 'glados'
     ? 'Start fresh Agent SDK conversations for this investigation session? Existing transcript history, blackboard findings, plans, evidence, reports, and all other investigation sessions are preserved.'
-    : `Clear the current transcript state for "${agentId}"? The next message starts fresh.`;
+    : `Start a fresh Agent SDK conversation for "${agentId}"? Existing transcript history and investigation data are preserved.`;
   if (!await confirmAction({ title: resetLabel, message: resetMsg, confirmLabel: resetLabel, danger: true })) return;
   try {
     const r = await fetch(withSession(`/api/agents/${encodeURIComponent(agentId)}/reset-session`), { method: 'POST' });
@@ -1182,7 +1182,7 @@ function renderInvestigationSessionManager(sessionHost) {
   sessionHost.querySelectorAll('[data-session-delete-id]').forEach(button => button.addEventListener('click', async event => {
     event.stopPropagation();
     const session = state.investigationSessions.find(item => item.id === button.dataset.sessionDeleteId);
-    if (!session || !await confirmAction({ title: 'Delete investigation session', message: `Permanently delete "${session.name}" and its blackboard records, plans, tasks, findings, and transcripts? Evidence and report files are preserved.`, confirmLabel: 'Delete session', danger: true })) return;
+    if (!session || !await confirmAction({ title: 'Delete investigation session', message: `Permanently delete "${session.name}", including its database records, transcripts, SDK conversation IDs, and chat attachments? Investigation evidence and exported report files are preserved.`, confirmLabel: 'Delete session', danger: true })) return;
     try {
       details.open = false;
       if (session.id === state.currentSessionId) await deleteInvestigationSession(session.id);
@@ -1539,7 +1539,7 @@ async function renderOverviewPane() {
             <div class="overview-section-head"><div><h2>Quick launch</h2><p>Common workstation actions</p></div></div>
             <div class="overview-launch-grid">
               <button type="button" data-overview-chat><span>01</span><strong>Talk to GLaDOS</strong><small>Start a task or security review</small></button>
-              <button type="button" data-overview-new><span>02</span><strong>New workspace</strong><small>Open a clean, isolated session</small></button>
+              <button type="button" data-overview-new><span>02</span><strong>New workspace</strong><small>Open a new blackboard and SDK scope</small></button>
               <button type="button" data-overview-settings><span>03</span><strong>Models & setup</strong><small>Credentials, models, and permissions</small></button>
               <button type="button" data-overview-proxy><span>04</span><strong>Proxy traffic</strong><small>Inspect captured requests</small></button>
               <button type="button" data-overview-update><span>05</span><strong>App update</strong><small>Check the release channel</small></button>

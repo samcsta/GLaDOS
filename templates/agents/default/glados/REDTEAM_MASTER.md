@@ -90,7 +90,8 @@ GLaDOS proxy capture is accessed through the native `/api/proxy/*` surface and p
 
 ## Reporting
 
-Only an explicit operator wrap/report decision starts reporting. The
+For ordinary investigations and optional custom report-agent workflows, only
+an explicit operator wrap/report decision starts reporting. The
 `report-writer` agent writes durable Markdown under
 `~/.glados/investigations/<target>/reports/` using the canonical
 `CWEs/{Critical,High,Medium,Low}/` and `RT/` package. Reporting is a finite
@@ -99,3 +100,9 @@ edits and meter refresh, writer final draft. Do not revalidate the final draft
 unless the operator explicitly asks. Exporting or sharing
 reports is an explicit operator action via
 `scripts/export-report.sh <engagement>`.
+
+The built-in `/security-review` package is an exception: after deterministic
+analysis gates pass, the controller finalizes and seals the review, then
+automatically generates its Markdown, HTML, per-finding, and desktop PDF
+deliverables. Do not dispatch report agents or wait for wrap approval for this
+built-in package. External publication remains an explicit operator action.

@@ -3,10 +3,18 @@ const path = require('node:path');
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low'];
 const CWE_NAMES = Object.freeze({
+  'CWE-20': 'Improper Input Validation',
+  'CWE-200': 'Exposure of Sensitive Information to an Unauthorized Actor',
+  'CWE-269': 'Improper Privilege Management',
+  'CWE-532': 'Insertion of Sensitive Information into Log File',
   'CWE-639': 'Authorization Bypass Through User-Controlled Key',
   'CWE-703': 'Improper Check or Handling of Exceptional Conditions',
+  'CWE-754': 'Improper Check for Unusual or Exceptional Conditions',
+  'CWE-778': 'Insufficient Logging',
+  'CWE-829': 'Inclusion of Functionality from Untrusted Control Sphere',
   'CWE-862': 'Missing Authorization',
   'CWE-918': 'Server-Side Request Forgery (SSRF)',
+  'CWE-1188': 'Initialization of a Resource with an Insecure Default',
 });
 
 function escapeHtml(value) {
@@ -19,6 +27,9 @@ function escapeHtml(value) {
 }
 
 function markdownText(value) {
+  if (value && typeof value === 'object') {
+    return Object.entries(value).map(([key, item]) => `${key.replaceAll('_', ' ')}: ${Array.isArray(item) ? item.join(' ') : item}`).join('; ');
+  }
   return String(value ?? '').replace(/\r/g, '').trim();
 }
 
@@ -82,6 +93,15 @@ function findingCwes(finding) {
   return [...new Set(ids.map(item => String(item || '').toUpperCase()).filter(Boolean))];
 }
 
+function redactReportText(value) {
+  let text = markdownText(value);
+  text = text.replace(/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g, '[REDACTED PRIVATE KEY]');
+  text = text.replace(/(Authorization\s*:\s*Bearer\s+)[A-Za-z0-9._~+/=-]+/ig, '$1[REDACTED]');
+  text = text.replace(/((?:password|passwd|client[_-]?secret|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|bearer[_-]?token|private[_-]?key|credential)\s*[:=]\s*)(["'])[^"']*\2/ig, '$1[REDACTED]');
+  text = text.replace(/(\b(?:https?|mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis):\/\/[^\s:@/]+:)[^\s@/]+@/ig, '$1[REDACTED]@');
+  return text;
+}
+
 function cvss31Score(vector) {
   const metrics = Object.fromEntries(String(vector || '').split('/').slice(1).map(part => part.split(':')));
   const values = {
@@ -139,9 +159,17 @@ function snippetForLocation(repositoryPath, location) {
   const start = Math.max(1, Number(location.start_line));
   const requestedEnd = Number(location.end_line || start);
   const end = Math.min(lines.length, Math.max(start, Math.min(requestedEnd, start + 11)));
+  let inPrivateKey = false;
   const redacted = lines.slice(start - 1, end).map((line, index) => {
-    let safe = line.replace(/((?:password|passwd|secret|api[_-]?key)\s*[:=]\s*)(["'])[^"']*\2/ig, '$1[REDACTED]');
-    safe = safe.replace(/((?:password|passwd|secret|api[_-]?key)\s*:\s*)(?!\$|\{|[A-Za-z_][\w.]*\()[^\s,#]+/ig, '$1[REDACTED]');
+    let safe = line;
+    if (/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/.test(safe)) inPrivateKey = true;
+    if (inPrivateKey) safe = '[REDACTED PRIVATE KEY]';
+    if (/-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/.test(line)) inPrivateKey = false;
+    safe = safe.replace(/((?:password|passwd|client[_-]?secret|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|bearer[_-]?token|private[_-]?key|credential)\s*[:=]\s*)(["'])[^"']*\2/ig, '$1[REDACTED]');
+    safe = safe.replace(/((?:password|passwd|client[_-]?secret|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|bearer[_-]?token|private[_-]?key|credential)\s*:\s*)(?!\$|\{|[A-Za-z_][\w.]*\()[^\s,#]+/ig, '$1[REDACTED]');
+    safe = safe.replace(/((?:password|passwd|client[_-]?secret|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|bearer[_-]?token|private[_-]?key|credential)\s*=\s*)(?!\$|\{|[A-Za-z_][\w.]*\()[^\s,#]+/ig, '$1[REDACTED]');
+    safe = safe.replace(/(Authorization\s*:\s*Bearer\s+)[A-Za-z0-9._~+/=-]+/ig, '$1[REDACTED]');
+    safe = safe.replace(/(\b(?:https?|mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis):\/\/[^\s:@/]+:)[^\s@/]+@/ig, '$1[REDACTED]@');
     return `${String(start + index).padStart(5)} | ${safe}`;
   }).join('\n');
   return { start, end, code: redacted, language: path.extname(location.path).slice(1) || 'text' };
@@ -150,8 +178,8 @@ function snippetForLocation(repositoryPath, location) {
 function actionMarkdown(finding, repositoryPath) {
   const locations = Array.isArray(finding.locations) ? finding.locations : [];
   const sections = [
-    `Red Team AI agents analyzed the code paths below and identified ${cweLabel(primaryCwe(finding))} because ${sentence(finding.description || finding.source_to_sink_evidence || 'the cited security control is incomplete')}`,
-    `The weakness can be exercised through ${sentence(finding.reachability || finding.cvss_preconditions || 'the documented execution path')} By exploiting or triggering the code in this way, an attacker or adverse runtime condition can produce the outcome described in the security impact section.`,
+    `Red Team AI agents analyzed the code paths below and identified ${cweLabel(primaryCwe(finding))} because ${sentence(redactReportText(finding.description || finding.source_to_sink_evidence || 'the cited security control is incomplete'))}`,
+    `The weakness can be exercised through ${sentence(redactReportText(finding.reachability || finding.cvss_preconditions || 'the documented execution path'))} By exploiting or triggering the code in this way, an attacker or adverse runtime condition can produce the outcome described in the security impact section.`,
   ];
   for (const location of locations) {
     sections.push(`**Evidence location:** \`${locationText(location)}\`${location.role ? ` (${location.role})` : ''}`);
@@ -166,9 +194,9 @@ function validationStatus(finding) {
 }
 
 function limitationsMarkdown(finding) {
-  const counterevidence = markdownText(finding.counterevidence || 'No additional counterevidence was recorded.');
+  const counterevidence = redactReportText(finding.counterevidence || 'No additional counterevidence was recorded.');
   const gaps = Array.isArray(finding.proof_gaps) && finding.proof_gaps.length
-    ? finding.proof_gaps.map(item => `- ${markdownText(item)}`).join('\n')
+    ? finding.proof_gaps.map(item => `- ${redactReportText(item)}`).join('\n')
     : '- No additional proof gaps were recorded.';
   return `**Counterevidence.** ${counterevidence}\n\n**Proof gaps.**\n\n${gaps}`;
 }
@@ -177,16 +205,16 @@ function cvssMarkdown(finding) {
   const score = cvssScore(finding);
   const vector = markdownText(finding.cvss_vector || finding.cvss?.vector || '');
   if (score != null && vector) return `${score.toFixed(1)} - \`${vector}\``;
-  return `**Not assigned.** This source-only review did not establish every required CVSS 3.1 base metric without relying on unverified deployment or external-control assumptions. Preconditions that must be resolved before scoring: ${markdownText(finding.cvss_preconditions || finding.reachability || 'runtime reachability and security impact were not validated')}`;
+  return `**Not assigned.** This source-only review did not establish every required CVSS 3.1 base metric without relying on unverified deployment or external-control assumptions. Preconditions that must be resolved before scoring: ${redactReportText(finding.cvss_preconditions || finding.reachability || 'runtime reachability and security impact were not validated')}`;
 }
 
 function resultMarkdown(finding) {
-  const highLevel = markdownText(finding.impact || finding.cvss_preconditions || finding.reachability || 'The vulnerable path can violate the affected security property.');
+  const highLevel = redactReportText(finding.impact || finding.cvss_preconditions || finding.reachability || 'The vulnerable path can violate the affected security property.');
   const detail = [
-    markdownText(finding.description || finding.source_to_sink_evidence || ''),
-    finding.reachability ? `The affected path is ${sentence(finding.reachability)}` : null,
-    finding.validation_correction ? markdownText(finding.validation_correction) : null,
-    finding.counterevidence ? `Limiting conditions: ${markdownText(finding.counterevidence)}` : null,
+    redactReportText(finding.description || finding.source_to_sink_evidence || ''),
+    finding.reachability ? `The affected path is ${sentence(redactReportText(finding.reachability))}` : null,
+    finding.validation_correction ? redactReportText(finding.validation_correction) : null,
+    finding.counterevidence ? `Limiting conditions: ${redactReportText(finding.counterevidence)}` : null,
     finding.validation_status ? `Validation status: ${finding.validation_status}.` : null,
     finding.confidence ? `Confidence: ${finding.confidence}.` : null,
   ].filter(Boolean).join(' ');
@@ -197,15 +225,15 @@ function findingMarkdown(finding, repositoryPath = null) {
   return [
     `#${cweLabel(primaryCwe(finding))}#`,
     '',
-    `**Finding:** ${markdownText(finding.title)}`,
+    `**Finding:** ${redactReportText(finding.title)}`,
     '',
     '#Description#',
     '',
-    markdownText(finding.description || finding.source_to_sink_evidence || 'Not recorded.'),
+    redactReportText(finding.description || finding.source_to_sink_evidence || 'Not recorded.'),
     '',
     '#Recommendation#',
     '',
-    markdownText(finding.remediation || finding.recommendation || 'Remediate the cited control failure and verify the fix in an isolated environment.'),
+    redactReportText(finding.remediation || finding.recommendation || 'Remediate the cited control failure and verify the fix in an isolated environment.'),
     '',
     '#Action#',
     '',
@@ -318,13 +346,13 @@ function combinedReportMarkdown(model) {
       sections.push([
         `### ${cweLabel(primaryCwe(finding))}`,
         '',
-        `**Finding:** ${markdownText(finding.title)}`,
+        `**Finding:** ${redactReportText(finding.title)}`,
         '',
-        markdownText(finding.description || finding.source_to_sink_evidence || 'Not recorded.'),
+        redactReportText(finding.description || finding.source_to_sink_evidence || 'Not recorded.'),
         '',
         '#### Recommendation',
         '',
-        markdownText(finding.remediation || finding.recommendation || 'Remediate the cited control failure and verify the fix in an isolated environment.'),
+        redactReportText(finding.remediation || finding.recommendation || 'Remediate the cited control failure and verify the fix in an isolated environment.'),
         '',
         '#### Red Team AI Analysis',
         '',
@@ -373,17 +401,17 @@ function structuredFindingHtml(finding, model, level) {
   }).join('');
   const score = cvssScore(finding);
   const vector = finding.cvss_vector || finding.cvss?.vector || 'Not recorded';
-  const highLevel = finding.impact || finding.cvss_preconditions || finding.reachability || 'The vulnerable path can violate the affected security property.';
+  const highLevel = redactReportText(finding.impact || finding.cvss_preconditions || finding.reachability || 'The vulnerable path can violate the affected security property.');
   const detail = [
-    finding.description || finding.source_to_sink_evidence || null,
-    finding.reachability ? `The affected path is ${sentence(finding.reachability)}` : null,
-    finding.validation_correction || null,
-    finding.counterevidence ? `Limiting conditions: ${finding.counterevidence}` : null,
+    redactReportText(finding.description || finding.source_to_sink_evidence || ''),
+    finding.reachability ? `The affected path is ${sentence(redactReportText(finding.reachability))}` : null,
+    finding.validation_correction ? redactReportText(finding.validation_correction) : null,
+    finding.counterevidence ? `Limiting conditions: ${redactReportText(finding.counterevidence)}` : null,
     finding.validation_status ? `Validation status: ${finding.validation_status}.` : null,
     finding.confidence ? `Confidence: ${finding.confidence}.` : null,
   ].filter(Boolean).join(' ');
   const analysis = `Red Team AI agents analyzed the code paths below and identified ${cweLabel(primaryCwe(finding))} because ${sentence(finding.description || finding.source_to_sink_evidence || 'the cited security control is incomplete')} The weakness can be exercised through ${sentence(finding.reachability || finding.cvss_preconditions || 'the documented execution path')} By exploiting or triggering the code in this way, an attacker or adverse runtime condition can produce the security impact described below.`;
-  return `<section class="finding ${level}"><header><div><span class="severity">${level.toUpperCase()}</span><span class="confidence">${escapeHtml(finding.confidence || 'confidence not recorded')}</span></div><h2>${escapeHtml(cweLabel(primaryCwe(finding)))}</h2><p class="finding-title"><strong>Finding:</strong> ${escapeHtml(finding.title)}</p></header><p class="finding-summary">${escapeHtml(finding.description || finding.source_to_sink_evidence || 'Not recorded.')}</p><h3>Recommendation</h3><p>${escapeHtml(finding.remediation || finding.recommendation || 'Remediate the cited control failure and verify the fix in an isolated environment.')}</p><h3>Red Team AI Analysis</h3><p>${escapeHtml(analysis)}</p><div class="code-evidence-list">${actions || '<p>No code snippet was available for this location.</p>'}</div><h3>Security Impact</h3><p><strong>High-level impact.</strong> ${escapeHtml(highLevel)}</p><p><strong>Technical result.</strong> ${escapeHtml(detail || highLevel)}</p><h3>Validation Status</h3><p>${escapeHtml(validationStatus(finding))}. Confidence: ${escapeHtml(finding.confidence || 'not recorded')}.</p><h3>Assumptions and Limitations</h3><p>${escapeHtml(finding.counterevidence || 'No additional counterevidence was recorded.')}</p><p>${escapeHtml((finding.proof_gaps || []).join(' '))}</p><h3>CVSS 3.1</h3><p>${score == null ? escapeHtml(cvssMarkdown(finding)) : `${score.toFixed(1)} - <code>${escapeHtml(vector)}</code>`}</p><div class="cwe-reference"><h3>CWE References</h3>${cweReferencesHtml(finding)}</div></section>`;
+  return `<section class="finding ${level}"><header><div><span class="severity">${level.toUpperCase()}</span><span class="confidence">${escapeHtml(finding.confidence || 'confidence not recorded')}</span></div><h2>${escapeHtml(cweLabel(primaryCwe(finding)))}</h2><p class="finding-title"><strong>Finding:</strong> ${escapeHtml(redactReportText(finding.title))}</p></header><p class="finding-summary">${escapeHtml(redactReportText(finding.description || finding.source_to_sink_evidence || 'Not recorded.'))}</p><h3>Recommendation</h3><p>${escapeHtml(redactReportText(finding.remediation || finding.recommendation || 'Remediate the cited control failure and verify the fix in an isolated environment.'))}</p><h3>Red Team AI Analysis</h3><p>${escapeHtml(redactReportText(analysis))}</p><div class="code-evidence-list">${actions || '<p>No code snippet was available for this location.</p>'}</div><h3>Security Impact</h3><p><strong>High-level impact.</strong> ${escapeHtml(highLevel)}</p><p><strong>Technical result.</strong> ${escapeHtml(redactReportText(detail || highLevel))}</p><h3>Validation Status</h3><p>${escapeHtml(validationStatus(finding))}. Confidence: ${escapeHtml(finding.confidence || 'not recorded')}.</p><h3>Assumptions and Limitations</h3><p>${escapeHtml(redactReportText(finding.counterevidence || 'No additional counterevidence was recorded.'))}</p><p>${escapeHtml(redactReportText((finding.proof_gaps || []).join(' ')))}</p><h3>CVSS 3.1</h3><p>${score == null ? escapeHtml(redactReportText(cvssMarkdown(finding))) : `${score.toFixed(1)} - <code>${escapeHtml(vector)}</code>`}</p><div class="cwe-reference"><h3>CWE References</h3>${cweReferencesHtml(finding)}</div></section>`;
 }
 
 function structuredReportHtml(model) {

@@ -70,9 +70,8 @@ function cleanupLooseInvestigationArtifacts(investigationsRoot) {
   return { removed, errors };
 }
 
-// Targeted plan-only cleanup for maintenance/tests. The dashboard's full
-// runtime refresh intentionally uses server.wipeBlackboard() so engagement,
-// finding, task, recon, transcript, and plan rows all start clean together.
+// Targeted plan-only cleanup for maintenance/tests. Runtime refresh preserves
+// blackboard state; investigation-session deletion owns scoped cleanup.
 function clearPlanState(dbPath) {
   let db;
   try {

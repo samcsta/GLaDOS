@@ -64,10 +64,40 @@ test('security-review deliverables name and link every CWE on a consolidated fin
   assert.match(markdown, /\[CWE-862: Missing Authorization\]\(https:\/\/cwe\.mitre\.org\/data\/definitions\/862\.html\)/);
 });
 
+test('security-review deliverables render official names and structured CVSS preconditions', () => {
+  const finding = {
+    title: 'Logged secret', cwe_ids: ['CWE-532'],
+    cvss_preconditions: { attack_path: 'CI log access is available.', impact: 'A credential is exposed.' },
+  };
+  const markdown = findingMarkdown(finding);
+  assert.match(markdown, /^#CWE-532: Insertion of Sensitive Information into Log File#/);
+  assert.match(markdown, /attack path: CI log access is available\.; impact: A credential is exposed\./);
+  assert.doesNotMatch(markdown, /\[object Object\]/);
+});
+
+test('security-review deliverables redact bearer credentials from all human report formats', () => {
+  const secret = 'Authorization: Bearer abc.def.ghi';
+  const model = buildReportModel({
+    run: { repositoryPath: '/tmp/example', head: 'snapshot:test', fileCount: 1 },
+    threatModel: { summary: 'Example.' },
+    findingsDocument: { engagement_id: 'eng', findings: [{
+      id: 'F-1', title: secret, severity: 'high', cwe_ids: ['CWE-532'], description: secret,
+      recommendation: secret, impact: secret, reachability: secret, counterevidence: secret,
+      proof_gaps: [secret], locations: [],
+    }] },
+    coverageDocument: { files: [{ path: 'a' }] }, receipt: { engagement_id: 'eng' },
+  });
+  for (const report of [findingMarkdown(model.findings[0]), combinedReportMarkdown(model), reportHtml(model)]) {
+    assert.doesNotMatch(report, /abc\.def\.ghi/);
+    assert.match(report, /\[REDACTED\]/);
+  }
+});
+
 test('security-review snippet redaction preserves code structure while removing literal secrets', () => {
   const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'lib/security-review/deliverables.js'), 'utf8');
-  assert.doesNotMatch(source, /token\|api\[_-\]\?key\)\\s\*\[:=\]/);
-  assert.match(source, /password\|passwd\|secret\|api/);
+  assert.match(source, /access\[_-\]\?token/);
+  assert.match(source, /Authorization\\s\*:\\s\*Bearer/);
+  assert.match(source, /REDACTED PRIVATE KEY/);
 });
 
 test('security-review deliverables calculate missing CVSS 3.1 base scores', () => {

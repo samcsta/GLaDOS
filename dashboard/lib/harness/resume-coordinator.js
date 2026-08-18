@@ -68,6 +68,18 @@ class ResumeCoordinator {
     if (this.paused.delete(this.key(sessionId, agentId))) this.persist();
   }
 
+  clearSession(sessionId = 'legacy') {
+    const prefix = `${String(sessionId || 'legacy')}\0`;
+    let changed = false;
+    for (const key of [...this.paused.keys()]) {
+      if (!key.startsWith(prefix)) continue;
+      this.paused.delete(key);
+      changed = true;
+    }
+    if (changed) this.persist();
+    return changed;
+  }
+
   clearAll() {
     this.paused.clear();
     this.persist();

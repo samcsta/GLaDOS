@@ -330,6 +330,10 @@ app.delete('/api/investigation-sessions/:id', (req, res) => {
   try {
     const result = investigationSessions.delete(sessionId);
     sdkSessionRegistry.clearSession(sessionId);
+    resumeCoordinator.clearSession(sessionId);
+    for (let index = resumeContinuationQueue.length - 1; index >= 0; index--) {
+      if (resumeContinuationQueue[index].investigationSessionId === sessionId) resumeContinuationQueue.splice(index, 1);
+    }
     try { fs.rmSync(path.join(attachmentsRoot(process.env), sessionId), { recursive: true, force: true }); }
     catch (error) { console.warn('[attachments] could not remove deleted session images:', error.message); }
     for (const key of [...buffers.keys()]) if (key.startsWith(prefix)) buffers.delete(key);
@@ -399,22 +403,6 @@ const approvedPlanQueue = [];
 const approvedPlanQueueIds = new Set();
 let approvedPlanQueueRunning = false;
 const pendingGladosKickoffs = new Map();
-const BLACKBOARD_STATE_TABLES = [
-  'controller_events',
-  'controller_jobs',
-  'controller_goals',
-  'dashboard_transcript_events',
-  'replan_proposals',
-  'plan_approvals',
-  'operator_action_approvals',
-  'plans',
-  'recon_steps',
-  'baseline_recon',
-  'tasks',
-  'findings',
-  'engagements',
-];
-
 function activeInvestigationSession() {
   return investigationSessions.getActive() || investigationSessions.ensureInitialSession();
 }
@@ -1244,15 +1232,21 @@ try {
 }
 if (process.env.GLADOS_CONTROLLER_WORKER !== '0') controller.start();
 
-function blackboardRowCounts() {
+function sessionBlackboardRowCounts(sessionId, { excludeTranscriptEventId = null } = {}) {
   const Database = require('better-sqlite3');
   let db;
   try {
     db = new Database(BLACKBOARD_DB, { readonly: true, fileMustExist: true });
-    const counts = {};
-    for (const table of BLACKBOARD_STATE_TABLES) {
-      counts[table] = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
-    }
+    const engagementFilter = 'engagement_id IN (SELECT id FROM engagements WHERE session_id=?)';
+    const counts = {
+      engagements: db.prepare('SELECT COUNT(*) AS n FROM engagements WHERE session_id=?').get(sessionId).n,
+      findings: db.prepare(`SELECT COUNT(*) AS n FROM findings WHERE ${engagementFilter}`).get(sessionId).n,
+      tasks: db.prepare(`SELECT COUNT(*) AS n FROM tasks WHERE ${engagementFilter}`).get(sessionId).n,
+      plans: db.prepare(`SELECT COUNT(*) AS n FROM plans WHERE ${engagementFilter}`).get(sessionId).n,
+      controller_jobs: db.prepare(`SELECT COUNT(*) AS n FROM controller_jobs WHERE ${engagementFilter}`).get(sessionId).n,
+      transcripts: db.prepare('SELECT COUNT(*) AS n FROM dashboard_transcript_events WHERE session_id=? AND (? IS NULL OR id<>?)')
+        .get(sessionId, excludeTranscriptEventId, excludeTranscriptEventId).n,
+    };
     return counts;
   } catch {
     return null;
@@ -1384,8 +1378,18 @@ function assessmentAgentIds() {
 function resetAgentSession(sessionId, agentId) {
   const key = runtimeKey(sessionId, agentId);
   const hadSession = !!currentSessionForAgent(agentId, sessionId);
-  if (agentId === 'glados') resumeCoordinator.clearAll();
+  if (agentId === 'glados') resumeCoordinator.clearSession(sessionId);
   else resumeCoordinator.clear(agentId, sessionId);
+  if (agentId === 'glados') {
+    for (let index = resumeContinuationQueue.length - 1; index >= 0; index--) {
+      if (resumeContinuationQueue[index].investigationSessionId === sessionId) resumeContinuationQueue.splice(index, 1);
+    }
+    for (let index = approvedPlanQueue.length - 1; index >= 0; index--) {
+      if (approvedPlanQueue[index].sessionId !== sessionId) continue;
+      approvedPlanQueueIds.delete(approvedPlanQueue[index].id);
+      approvedPlanQueue.splice(index, 1);
+    }
+  }
   const turn = activeChatTurns.get(key);
   if (turn) {
     turn.stopRequested = true;
@@ -1405,7 +1409,7 @@ function resetAgentSession(sessionId, agentId) {
     if (row.investigationSessionId === sessionId && row.agentId === agentId) activeSubagentTurns.delete(subagentKey);
   }
   for (const [childKey, child] of [...activeSubagentTurns.entries()]) {
-    if (child.parentAgentId === agentId) {
+    if (child.investigationSessionId === sessionId && child.parentAgentId === agentId) {
       activeSubagentTurns.delete(childKey);
       if (child.toolCallId) activeTaskToolIds.delete(child.toolCallId);
       const childAgentId = child.agentId || activeTaskToolIds.get(child.toolCallId)?.agentId || childKey.split('\0').at(-1);
@@ -1461,39 +1465,6 @@ function clearAllRuntimeSessions(reason = 'runtime restart') {
     broadcastLobby('session-reset', { investigationSessionId: activeInvestigationSession().id, agentId, runtime: 'agent-sdk', hadSession: true, reason });
   }
   return [...agentIds];
-}
-
-// Wipes the blackboard so a fresh GLaDOS session starts a clean investigation.
-// Engagement records, findings, tasks, plans, and recon state are all cleared.
-// Evidence files in ~/.glados/investigations/ and exported reports in
-// ~/.glados/reports/ are filesystem artifacts and are not touched here.
-function wipeBlackboard() {
-  const Database = require('better-sqlite3');
-  let db;
-  try {
-    db = new Database(BLACKBOARD_DB);
-  } catch (e) {
-    return { ok: false, error: `open blackboard: ${e.message}` };
-  }
-  try {
-    db.pragma('foreign_keys = OFF');
-    const counts = {};
-    const tx = db.transaction(() => {
-      for (const t of BLACKBOARD_STATE_TABLES) {
-        const n = db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
-        counts[t] = n;
-        db.prepare(`DELETE FROM ${t}`).run();
-      }
-      db.prepare(`DELETE FROM sqlite_sequence`).run();
-    });
-    tx();
-    db.pragma('foreign_keys = ON');
-    return { ok: true, tablesCleared: BLACKBOARD_STATE_TABLES, rowsDeleted: counts };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  } finally {
-    try { db.close(); } catch {}
-  }
 }
 
 // Clears short-term workspace recall that can leak prior-investigation context
@@ -1828,7 +1799,7 @@ app.post('/api/chat/glados', async (req, res) => {
   }
 
   if (!attachments.length && isFreshSessionQuestion(message)) {
-    const counts = blackboardRowCounts();
+    const counts = sessionBlackboardRowCounts(session.id, { excludeTranscriptEventId: admittedEvent.dashboardEventId });
     const rows = counts ? Object.values(counts).reduce((sum, n) => sum + Number(n || 0), 0) : null;
     const activeAgents = (() => {
       try {
@@ -1836,8 +1807,8 @@ app.post('/api/chat/glados', async (req, res) => {
       } catch { return 0; }
     })();
     const stateText = rows === 0 && activeAgents === 0
-      ? 'Yes — this is a fresh GLaDOS session. No active agents are running, and the blackboard is clean.'
-      : `Not completely fresh: ${activeAgents} active agent(s), ${rows ?? 'unknown'} blackboard row(s).`;
+      ? 'Yes — this investigation session has no prior engagements, plans, tasks, findings, or Agent SDK transcript history. Shared agent memory, proxy history, evidence, and reports are preserved across sessions.'
+      : `This investigation session contains ${rows ?? 'unknown'} scoped blackboard/transcript row(s) and ${activeAgents} active agent(s). Other sessions remain isolated by engagement ownership in the shared SQLite database.`;
     const ev = transcriptEvent(
       session.id, 'glados',
       'assistant-text',
@@ -2602,11 +2573,9 @@ app.post('/api/gateway/restart', async (req, res) => {
   res.status(ok ? 200 : 500).json(result);
 });
 
-// Clears SDK transcript/liveness state so the next turn starts fresh. When
-// agentId === 'glados', cascades to every assessment agent and wipes the
-// blackboard. Durable evidence files and exported reports on disk are
-// intentionally untouched; disposable browser captures at engagement roots
-// are removed during a full GLaDOS reset.
+// Clears only this investigation session's SDK conversation/liveness state.
+// Blackboard rows, durable transcript history, evidence, reports, and other
+// investigation sessions are intentionally preserved.
 app.post('/api/agents/:id/reset-session', (req, res) => {
   const agentId = req.params.id;
   const session = requireSession(req, res, { writable: true });

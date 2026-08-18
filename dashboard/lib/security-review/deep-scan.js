@@ -565,6 +565,26 @@ function markDeepScanCapped(artifactRoot, reason = 'security-review wall-clock l
   }
 }
 
+function markDeepScanSaturated(artifactRoot, completedAt = new Date().toISOString()) {
+  const runFile = path.join(artifactRoot, 'run.json');
+  const manifestFile = path.join(artifactRoot, 'discovery', 'deep', 'manifest.json');
+  const run = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+  if (run?.deepScan?.terminalState === 'CAPPED' || manifest?.status === 'CAPPED') {
+    throw new Error('refusing to mark a capped security review saturated');
+  }
+  run.deepScan = { ...(run.deepScan || {}), terminalState: 'SATURATED', completedAt };
+  delete run.deepScan.failureReason;
+  delete run.deepScan.capReason;
+  manifest.status = 'SATURATED';
+  manifest.completed_at = completedAt;
+  delete manifest.failure_reason;
+  delete manifest.cap_reason;
+  writeJson(runFile, run);
+  writeJson(manifestFile, manifest);
+  return { run, manifest };
+}
+
 function discoveryDispatchCheckpoint(artifactRoot, {
   nextWorkerId,
   retryOf = null,
@@ -761,7 +781,8 @@ function discoverySaturationCheckpoint(artifactRoot) {
   try {
     const run = JSON.parse(fs.readFileSync(path.join(artifactRoot, 'run.json'), 'utf8'));
     const manifest = JSON.parse(fs.readFileSync(path.join(artifactRoot, 'discovery/deep/manifest.json'), 'utf8'));
-    if (run?.deepScan?.terminalState === 'SATURATED' && manifest?.status === 'SATURATED') lifecycleState = 'SATURATED';
+    const runState = run?.deepScan?.terminalState;
+    if (runState === manifest?.status && ['RUNNING', 'SATURATED'].includes(runState)) lifecycleState = runState;
   } catch {}
   const chain = discoveryDispatchCheckpoint(artifactRoot, {
     nextWorkerId, retryOf: null, saturationProbe: true, lifecycleState,
@@ -1270,6 +1291,7 @@ module.exports = {
   discoverySaturationCheckpoint,
   initializeDeepScanRun,
   markDeepScanCapped,
+  markDeepScanSaturated,
   normalizeDeepScanConfig,
   projectSecurityReviewLedgers,
   reconcileActiveSecurityReviewWorkers,

@@ -2,7 +2,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const Database = require('better-sqlite3');
-const { REQUIRED_MODEL_ROLES, projectSecurityReviewLedgers } = require('./deep-scan');
+const { REQUIRED_MODEL_ROLES, discoverySaturationCheckpoint, markDeepScanSaturated, projectSecurityReviewLedgers } = require('./deep-scan');
 const { sourceReviewGateStatus } = require('./workflow');
 const { generateSecurityReviewDeliverables } = require('./deliverables');
 const { normalizeSecurityReviewArtifacts } = require('./normalize-artifacts');
@@ -139,17 +139,28 @@ function normalizeFinding(row) {
   delete out.finding_id;
   if (out.cvss_score == null && out.cvss?.score != null) out.cvss_score = out.cvss.score;
   if (!out.cvss_vector && out.cvss?.vector) out.cvss_vector = out.cvss.vector;
-  if (!out.description) out.description = out.source_to_sink_evidence || out.source_to_sink || out.summary;
+  if ((!Array.isArray(out.cwe_ids) || !out.cwe_ids.length) && Array.isArray(out.candidate_cwe_ids)) out.cwe_ids = out.candidate_cwe_ids;
+  if ((!Array.isArray(out.locations) || !out.locations.length) && Array.isArray(out.exact_candidate_evidence?.locations)) out.locations = out.exact_candidate_evidence.locations;
+  if (!out.counterevidence && out.exact_candidate_evidence?.counterevidence) out.counterevidence = out.exact_candidate_evidence.counterevidence;
+  if (!out.proof_gaps && Array.isArray(out.exact_candidate_evidence?.proof_gaps)) out.proof_gaps = out.exact_candidate_evidence.proof_gaps;
+  if (!out.description) out.description = out.source_to_sink_evidence || out.source_to_sink || out.summary || out.trace
+    || out.exact_candidate_evidence?.summary || out.exact_candidate_evidence?.evidence
+    || (Array.isArray(out.evidence) ? out.evidence.join(' ') : out.evidence);
+  if (!out.title) out.title = out.summary || out.description;
   const sourceLocations = Array.isArray(out.locations) ? out.locations.filter(item => item.role === 'source') : [];
   const sinkLocations = Array.isArray(out.locations) ? out.locations.filter(item => item.role === 'sink') : [];
   const locationText = items => items.map(item => `${item.path}:${item.start_line || item.line_range || '?'}${item.end_line ? `-${item.end_line}` : ''}`).join('; ');
   if (!out.source) out.source = locationText(sourceLocations) || locationText(out.locations || []);
   if (!out.sink) out.sink = locationText(sinkLocations) || out.title;
-  if (!out.reachability) out.reachability = out.reachable_entry_point || out.exploitability_assumptions;
-  if (!out.impact) out.impact = out.cvss_preconditions || out.cvss?.preconditions || out.reachability || out.exploitability_assumptions;
+  if (!out.reachability) out.reachability = out.reachable_entry_point || (Array.isArray(out.entry_points) ? out.entry_points.join('; ') : null)
+    || (Array.isArray(out.exploitability_assumptions) ? out.exploitability_assumptions.join(' ') : out.exploitability_assumptions);
+  if (!out.impact) out.impact = out.impact_description || out.severity_rationale || out.cvss_preconditions || out.cvss?.preconditions || out.reachability || out.exploitability_assumptions;
   if (!out.recommendation) out.recommendation = Array.isArray(out.proof_gaps) && out.proof_gaps.length
     ? `Resolve the documented proof gaps and remediate the cited source-to-sink control failure: ${out.proof_gaps[0]}`
     : 'Remediate the cited source-to-sink control failure and verify the fix in an isolated environment.';
+  if (!out.status && out.validated === true) {
+    out.status = 'REPORTABLE_SOURCE_VALIDATED';
+  }
   return out;
 }
 
@@ -169,23 +180,40 @@ function candidateObservationIds(artifactRoot) {
 
 function generateCanonicalFindings(artifactRoot, run) {
   const expected = candidateFindingIds(artifactRoot);
-  const candidates = new Map(readJsonLines(path.join(artifactRoot, 'discovery', 'candidates.jsonl'))
-    .map(row => [row.candidate_id, row]));
+  const candidateRows = readJsonLines(path.join(artifactRoot, 'discovery', 'candidates.jsonl'));
+  const validatorFile = path.join(artifactRoot, 'validation', 'new-candidates.jsonl');
+  if (fs.existsSync(validatorFile)) candidateRows.push(...readJsonLines(validatorFile));
+  const candidates = new Map(candidateRows.map(row => [row.candidate_id, row]));
+  const findingCandidates = new Map();
+  for (const row of readJsonLines(path.join(artifactRoot, 'validation', 'candidate-closure.jsonl'))) {
+    if (String(row.disposition || '').toUpperCase() !== 'REPORTABLE') continue;
+    for (const findingId of row.finding_ids || []) if (!findingCandidates.has(findingId)) findingCandidates.set(findingId, row.candidate_id);
+  }
   const sources = [];
-  for (const relative of ['findings.json', 'discovery/findings.jsonl', 'validation/new-candidates.jsonl']) {
+  for (const track of ['authorization-access-control', 'data-flow-injection', 'secrets-history', 'resilience-error-handling', 'iac-config-manifests', 'cryptography-suppressions']) {
+    const file = path.join(artifactRoot, 'tracks', track, 'findings.jsonl');
+    if (fs.existsSync(file)) sources.push(...readJsonLines(file));
+  }
+  for (const relative of ['discovery/findings.jsonl']) {
     const file = path.join(artifactRoot, relative);
     if (!fs.existsSync(file)) continue;
     const value = relative.endsWith('.jsonl') ? readJsonLines(file) : readJson(file).findings || [];
     sources.push(...value.map(row => row.finding_id || row.id ? row : { ...row, finding_id: row.candidate_id, title: row.title || row.summary }));
   }
-  for (const track of ['authorization-access-control', 'data-flow-injection', 'secrets-history', 'resilience-error-handling', 'iac-config-manifests', 'cryptography-suppressions']) {
-    const file = path.join(artifactRoot, 'tracks', track, 'findings.jsonl');
-    if (fs.existsSync(file)) sources.push(...readJsonLines(file));
-  }
   const byId = new Map();
   for (const row of sources) {
     const id = findingId(row);
-    if (id && !byId.has(id)) byId.set(id, row);
+    if (!id) continue;
+    if (!byId.has(id)) {
+      byId.set(id, row);
+      continue;
+    }
+    const current = byId.get(id);
+    for (const [field, value] of Object.entries(row)) {
+      if ((current[field] == null || current[field] === '' || (Array.isArray(current[field]) && current[field].length === 0)) && value != null) {
+        current[field] = value;
+      }
+    }
   }
   const missing = expected.filter(id => !byId.has(id));
   if (missing.length) throw new Error(`reportable findings are missing source rows: ${missing.join(', ')}`);
@@ -196,7 +224,7 @@ function generateCanonicalFindings(artifactRoot, run) {
     repository_head: run.head,
     findings: expected.map(id => {
       const finding = normalizeFinding(byId.get(id));
-      const candidate = candidates.get(id);
+      const candidate = candidates.get(findingCandidates.get(id)) || candidates.get(id);
       if (!candidate) return finding;
       if (!finding.description) finding.description = candidate.summary;
       if (!Array.isArray(finding.locations) || !finding.locations.length) finding.locations = candidate.locations;
@@ -211,23 +239,26 @@ function generateCanonicalFindings(artifactRoot, run) {
 }
 
 function generateCanonicalObservations(artifactRoot, run) {
-  const expected = candidateObservationIds(artifactRoot);
-  const candidates = new Map(readJsonLines(path.join(artifactRoot, 'discovery', 'candidates.jsonl'))
-    .map(row => [row.candidate_id, row]));
-  const closure = new Map(readJsonLines(path.join(artifactRoot, 'validation', 'candidate-closure.jsonl'))
-    .map(row => [row.candidate_id, row]));
+  const candidateRows = readJsonLines(path.join(artifactRoot, 'discovery', 'candidates.jsonl'));
+  const validatorFile = path.join(artifactRoot, 'validation', 'new-candidates.jsonl');
+  if (fs.existsSync(validatorFile)) candidateRows.push(...readJsonLines(validatorFile));
+  const candidates = new Map(candidateRows.map(row => [row.candidate_id, row]));
+  const expected = [];
+  for (const disposition of readJsonLines(path.join(artifactRoot, 'validation', 'candidate-closure.jsonl'))) {
+    if (String(disposition.disposition || '').toUpperCase() !== 'OBSERVATION') continue;
+    for (const id of disposition.observation_ids || []) expected.push({ id, disposition });
+  }
   return {
     schema_version: 1,
     producer: 'glados-security-review/v1',
     engagement_id: run.engagementId || path.basename(path.dirname(artifactRoot)),
     repository_head: run.head,
-    observations: expected.map(id => {
-      const candidate = candidates.get(id);
-      const disposition = closure.get(id);
-      if (!candidate || !disposition) throw new Error(`observation ${id} is missing retained candidate or closure evidence`);
+    observations: expected.map(({ id, disposition }) => {
+      const candidate = candidates.get(disposition.candidate_id);
+      if (!candidate) throw new Error(`observation ${id} is missing retained candidate ${disposition.candidate_id}`);
       return {
         id,
-        candidate_id: id,
+        candidate_id: disposition.candidate_id,
         title: candidate.summary,
         category: disposition.observation_category || 'conditional-security-observation',
         rationale: disposition.reportability_rationale,
@@ -308,10 +339,21 @@ function finalizeSecurityReview({ db, artifactRoot, engagementId, campaignExpect
     projectSecurityReviewLedgers({ db, artifactRoot, engagementId });
     const authority = authoritativeRows(db, engagementId);
     const runFile = path.join(artifactRoot, 'run.json');
-    const run = readJson(runFile);
+    let run = readJson(runFile);
     run.engagementId = engagementId;
     if (run?.deepScan?.terminalState !== 'SATURATED') {
-      return { passed: false, recoverable: false, blockers: [`run.json.deepScan.terminalState is ${run?.deepScan?.terminalState || '(missing)'}, expected SATURATED`] };
+      if (run?.deepScan?.terminalState !== 'RUNNING') {
+        return { passed: false, recoverable: false, blockers: [`run.json.deepScan.terminalState is ${run?.deepScan?.terminalState || '(missing)'}, expected RUNNING or SATURATED`] };
+      }
+      const saturation = discoverySaturationCheckpoint(artifactRoot);
+      if (!saturation.passed) {
+        return { passed: false, recoverable: false, blockers: saturation.invalid.length
+          ? saturation.invalid
+          : [`run.json.deepScan.terminalState is ${run?.deepScan?.terminalState || '(missing)'}, expected SATURATED`] };
+      }
+      markDeepScanSaturated(artifactRoot);
+      run = readJson(runFile);
+      run.engagementId = engagementId;
     }
     normalizeSecurityReviewArtifacts(artifactRoot);
     writeJsonLines(path.join(artifactRoot, 'validation', 'model-receipts.jsonl'), generateModelReceipts(authority.observations));
@@ -335,7 +377,16 @@ function finalizeSecurityReview({ db, artifactRoot, engagementId, campaignExpect
       authoritativeModelObservations: authority.observations,
       campaignExpected,
     });
-    if (gate.passed) generateSecurityReviewDeliverables(artifactRoot);
+    if (!gate.passed) {
+      invalidateSecurityReviewSeal(artifactRoot);
+      return { passed: false, recoverable: false, blockers: [...gate.missing, ...gate.invalid], gate };
+    }
+    try {
+      generateSecurityReviewDeliverables(artifactRoot);
+    } catch (error) {
+      invalidateSecurityReviewSeal(artifactRoot);
+      throw error;
+    }
     return { passed: gate.passed, recoverable: false, blockers: [...gate.missing, ...gate.invalid], gate };
   } catch (error) {
     return { passed: false, recoverable: false, blockers: [error.message] };

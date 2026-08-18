@@ -72,6 +72,18 @@ test('resume coordinator preserves the exact interrupted specialist assignment',
   assert.equal(new ResumeCoordinator({ filePath }).take('webapp-recon', 'session-a'), null, 'consumption persists across restarts');
 });
 
+test('resume coordinator clears paused work for only one investigation session', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-resume-session-clear-'));
+  const filePath = path.join(root, 'state', 'paused-agent-work.json');
+  const coordinator = new ResumeCoordinator({ filePath });
+  coordinator.capture('webapp-recon', { investigationSessionId: 'session-a', taskPrompt: 'A' });
+  coordinator.capture('webapp-recon', { investigationSessionId: 'session-b', taskPrompt: 'B' });
+  assert.equal(coordinator.clearSession('session-a'), true);
+  const restored = new ResumeCoordinator({ filePath });
+  assert.equal(restored.take('webapp-recon', 'session-a'), null);
+  assert.equal(restored.take('webapp-recon', 'session-b').taskPrompt, 'B');
+});
+
 test('normalizes LiteLLM model aliases for the Anthropic Messages route', () => {
   assert.equal(bareModelAlias(' custom-llmapi-redteamstuff-com/claude-sonnet-4-6 '), 'claude-sonnet-4-6');
   assert.equal(bareModelAlias(' claude-sonnet-4-6 '), 'claude-sonnet-4-6');
@@ -783,6 +795,30 @@ test('snapshot security reviews deny Git, memory intake, and duplicate engagemen
   ]) {
     assert.match(decideToolUse({ agentId: 'glados', toolName, input: {}, policy, env }).reason, /source-only security review/);
   }
+});
+
+test('security-review artifact writes cannot escape the assigned artifact root', () => {
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-review-write-boundary-'));
+  const artifactRoot = path.join(runtime, 'investigations', 'eng-1', 'security-review');
+  fs.mkdirSync(artifactRoot, { recursive: true });
+  const env = baseTestEnv({
+    GLADOS_RUNTIME_DIR: runtime,
+    GLADOS_SECURITY_REVIEW: '1',
+    GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT: artifactRoot,
+  });
+  const policy = loadPolicy();
+  assert.equal(decideToolUse({
+    agentId: 'source-review-validator', toolName: 'Write',
+    input: { file_path: path.join(artifactRoot, 'validation', 'candidate-closure.jsonl') }, policy, env,
+  }).allowed, true);
+  assert.match(decideToolUse({
+    agentId: 'source-review-validator', toolName: 'Write',
+    input: { file_path: path.join(runtime, 'workspaces', 'agents', 'source-review-validator', 'generated', 'candidate-closure.jsonl') }, policy, env,
+  }).reason, /must stay below the assigned artifact_root/);
+  assert.match(decideToolUse({
+    agentId: 'source-review-validator', toolName: 'Bash',
+    input: { command: `python3 -c 'open("${path.join(runtime, 'outside.txt')}","w").write("x")'` }, policy, env,
+  }).reason, /Bash is read-only/);
 });
 
 test('security-review SDK options omit desktop, local-auth, browser, and Full Access capabilities', () => {

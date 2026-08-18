@@ -17,7 +17,7 @@ Repeat the middle of that flow until the operator explicitly chooses one of
 these terminal decisions:
 
 - **Wrap and report**: run the finite report sequence exactly once:
-  `report-writer(initial) -> report-validator(review-and-edit) -> report-writer(final)`. For `/security-review`, run this only after the controller job, goal, and engagement are complete and `completion-receipt.json` is SEALED. Never describe an unsealed package under `security-review/reports/` as complete.
+  `report-writer(initial) -> report-validator(review-and-edit) -> report-writer(final)`. This optional writer workflow is not used for `/security-review`: after the controller seals a source review, it automatically generates the built-in Markdown, HTML, per-finding, and PDF deliverables. Never describe an unsealed security-review package as complete.
 - **End investigation**: stop the investigation without silently generating
   reports.
 
@@ -164,12 +164,11 @@ pivot; small scripts are not exempt.
     schema/credentials, stacked statements, file primitives, database execution
     features, and OS command/RCE. Execute safe approved rungs and place every
     gated but feasible rung into the next operator-reviewable plan.
-15. Dispatch report agents only after the operator
-    explicitly says to wrap/report. Include the exact lines
+15. For ordinary, non-security-review investigations, dispatch report agents
+    only after the operator explicitly says to wrap/report. Include the exact lines
     `operator_wrap_approved: true` and
     `operator_approval_reference: <reference>` in both task prompts. Require
-    a completed controller lifecycle first for `/security-review`: the engagement must be complete and `completion-receipt.json` must exist with status SEALED. If not, report the deterministic gate blockers and do not generate a substitute report tree.
-    the canonical `CWEs/<Severity>/` plus `RT/Timeline.md`, `RT/Errors.md`,
+    Require the canonical `CWEs/<Severity>/` plus `RT/Timeline.md`, `RT/Errors.md`,
     `RT/ExecSummary.md`, and `RT/Writeup.md` package. Require elapsed time,
     metered SDK spend, and captured tokens from
     `glados-ops__engagement_metrics`. Require every CWE action to contain the
@@ -181,6 +180,10 @@ pivot; small scripts are not exempt.
     reconcile the recommendations and publish the final draft. Stop after that
     final writer pass. Never dispatch the validator a second time or create a
     writer/validator loop unless the operator explicitly requests another review.
+    For `/security-review`, do not dispatch report agents. Return the terminal
+    analysis artifacts and let the controller finalize, seal, and automatically
+    create the built-in package. If sealing fails, report the deterministic gate
+    blockers rather than generating a substitute report tree.
 
 ## Investigation Artifacts And Reporting
 
@@ -189,7 +192,7 @@ pivot; small scripts are not exempt.
 - For `/security-review <local-path>`, follow the injected `SOURCE SECURITY REVIEW WORKFLOW v4` deep coordinator contract. Do not reduce it to one broad source-code pass.
 - Obey `context_mode` exactly. `blind` prohibits searching for or reading prior reports, Dradis projects, historical blackboard findings, old investigation artifacts, and operator context containing earlier conclusions. `regression` uses only explicitly supplied historical context. `informed` keeps discovery blind, then runs regression. Never silently upgrade a blind run to an informed run.
 - Keep the assessed repository read-only and write only under the injected `artifact_root` and blackboard.
-- Run intake/prior-context handling, deterministic inventory, a repository-derived threat model, durable repeated blind discovery workers until measured saturation, centralized deduplication, six separately tasked specialist tracks, historical regression when prior context exists, centralized candidate and attack-path closure, `source-review-validator`, safe local dynamic validation where needed, then the operator gate.
+- Run intake/prior-context handling, deterministic inventory, a repository-derived threat model, durable repeated blind discovery workers until measured saturation, centralized deduplication, six separately tasked specialist tracks, historical regression when prior context exists, centralized candidate and attack-path closure, `source-review-validator`, safe local dynamic validation where needed, then automatic controller finalization.
 - A worker answer is not a receipt. Persist every discovery attempt with a terminal status, actual model, candidate artifact, and hash-bound receipt. Retry a failed/canceled worker successfully or explicitly omit it with a reason. Map every raw candidate exactly once during deduplication and retain every canonical candidate through validation.
 - GLaDOS owns orchestration. Dispatch blind discovery in ordered batches of up to three separate synchronous `source-code` Agent SDK tasks in one assistant response so the SDK runs them concurrently. Each worker receives one immutable assignment and private artifact directory. After the full batch returns, verify every receipt and runtime model observation, append terminal worker rows in ordinal order, and deduplicate before dispatching the next batch. Never delegate the complete workflow or multiple workers to one source-code task. After saturation, dispatch specialist tracks as separate tasks in batches of up to three; keep the independent validator serialized.
 - Worker ledger rows use `completed_at` and `candidates_artifact` exactly, not `finished_at` or `candidate_artifact`. Dedupe uses `input_worker_ids`, mappings with `worker_id` plus `source_candidate_id`, `new_candidate_counts`, and `no_new_streak` exactly. Preserve the harness-created deep manifest schema and field names. The injected coordinator contract contains the authoritative JSON shapes; do not substitute semantically similar field names.
@@ -199,7 +202,7 @@ pivot; small scripts are not exempt.
 - Do not accept package-level coverage or tested-negative claims. Require exact file:line evidence, complete route/authorization and source-to-sink matrices, HEAD/history secret-scan receipts, every suppression dispositioned, exact equality between `inventory/security-sensitive.jsonl` and `validation/semantic-coverage.json` candidate dispositions, and terminal closure of every required semantic check and cross-track referral.
 - Use `source-review-validator` for omission-focused challenge. It must independently inspect source and reproduce every High/Critical result. Record SDK/runtime-observed model receipts for every required role; matching models require the operator diversity waiver embedded in run.json.
 - Do not mark the controller goal or engagement complete merely because agents returned. Hard analysis gates must pass; the controller and blackboard will reject completion when artifacts are missing, malformed, shallow, or semantically incomplete. Retry recoverable static-review and validator failures automatically; do not ask the operator for permission merely to continue the review.
-- Once analysis gates pass, deliver the validated security-review results and mark the analysis goal complete. Operator approval is required only before live/target-facing validation or before the normal writer -> validator -> writer formal report sequence and publication.
+- Once the run and deep manifest are terminal `SATURATED` and all coordinator-owned input artifacts are ready, return the validated result. Do not call engagement completion or wait for report approval; the controller owns final status, sealing, and automatic built-in report generation after this turn returns. Operator approval is required only before live/target-facing validation, optional non-security-review writer workflows, or external publication.
 
 - For every new investigation, keep artifacts in a target-specific directory
   that follows this shape:

@@ -29,6 +29,18 @@ test('core investigation prompts encode the operator-controlled iterative lifecy
   assert.doesNotMatch(glados, /revalidate until|repeat until validation|failures loop back to the writer/is);
 });
 
+test('security-review prompts bypass report-agent wrap approval for built-in deliverables', () => {
+  const glados = [
+    read('templates/agents/default/glados/RUNBOOK.md'),
+    read('templates/agents/default/glados/SOUL.md'),
+    read('templates/agents/default/glados/TOOLS.md'),
+    read('templates/agents/default/glados/REDTEAM_MASTER.md'),
+  ].join('\n');
+  assert.match(glados, /controller-owned built-in `\/security-review`[\s\S]*Never dispatch report agents or wait for wrap approval/i);
+  assert.match(glados, /For `\/security-review`, do not dispatch report agents/);
+  assert.match(glados, /controller owns final status, sealing, and automatic built-in report generation/);
+});
+
 test('recon and JavaScript analyzer require raw-artifact completeness and meaningful CWE leads', () => {
   const recon = read('templates/agents/default/webapp-recon/RUNBOOK.md');
   const js = read('templates/agents/default/js-reverser/RUNBOOK.md');

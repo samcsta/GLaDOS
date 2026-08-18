@@ -56,6 +56,7 @@ const SEMANTIC_REVIEW_CHECKS = [
   { id: 'pii-identification-and-exposure', requirement: 'Distinguish PII schema and pattern candidates from confirmed natural-person data and trace any exposure or authorization weakness without external enrichment.' },
 ];
 const TERMINAL_SEMANTIC_STATUSES = new Set(['FINDING', 'TESTED_NEGATIVE', 'NOT_APPLICABLE']);
+const TERMINAL_REFERRAL_STATUSES = new Set([...TERMINAL_SEMANTIC_STATUSES, 'OBSERVATION']);
 
 function securityReviewArtifactRoot(runtimeDir, engagementId) {
   return path.join(runtimeDir, 'investigations', engagementId, 'security-review');
@@ -187,12 +188,12 @@ function securityReviewCoordinatorPrompt({
     '- For medium-or-lower-confidence findings, perform only local/isolated safe validation when feasible; otherwise record the precise blocker. Never contact production merely to raise confidence.',
     '- Write every dynamic-validation disposition to dynamic-validation/matrix.jsonl. Do not use validation/dynamic-validation.jsonl or another alias.',
     '',
-    'Stage 8 — Operator gate and reporting:',
+    'Stage 8 — Automatic finalization and reporting:',
     '- Automatically retry incomplete static-analysis/validation tasks and resolve recoverable registry/tooling errors without asking the operator. Do not pause merely to continue analysis.',
     '- When all analysis gates pass, deliver the validated findings, prior dispositions when applicable, delta table, challenge matrix, and residual blockers directly to the operator. Do not require approval to complete or present a security review.',
     '- Prepare discovery/findings.jsonl, discovery/coverage-ledger.jsonl, validation closure, attack paths, semantic coverage, challenge matrix, specialist artifacts, and dynamic-validation blockers. Do not write validation/model-receipts.jsonl, findings.json, coverage.json, scan-manifest.json, or completion-receipt.json. The controller normalizes those final artifacts and seals digests after runtime observations quiesce.',
     '- SATURATED is the only successful terminal state. If an operator-set deadline or maximum-run ceiling arrives first, write CAPPED with exact residual work and stop; never convert CAPPED into CLEAN, COMPLETE, or SATURATED.',
-    '- Explicit operator approval is required only for live/target-facing actions and for generating or publishing the formal report package. Do not dispatch report agents without explicit operator wrap approval.',
+    '- After all gates pass, the controller automatically generates and indexes the sealed security-review Markdown, HTML, per-finding, and desktop PDF deliverables. Do not wait for wrap approval and do not dispatch report agents for this built-in package. Explicit operator approval remains required for live/target-facing actions and external publication.',
     '',
     'Hard completion gates:',
     ...(campaign ? [
@@ -215,7 +216,7 @@ function securityReviewCoordinatorPrompt({
     '15. Canonical findings and coverage have exact closure with candidate dispositions and deterministic inventory, and all sealed artifact digests verify.',
     '16. No unexplained file, route, prior-finding, suppression, worker, raw candidate, canonical candidate, track, referral, model, or validation gap remains.',
     '',
-    'Create one blackboard task per stage/track and include engagement_id in every blackboard_task_update. A returned model answer is not proof that a gate passed. Mark the analysis goal complete and deliver validated results once analysis gates pass; wait for operator approval only before live actions or formal report generation/publication.',
+    'Create one blackboard task per stage/track and include engagement_id in every blackboard_task_update. A returned model answer is not proof that a gate passed. Once run.json and the deep manifest are terminal SATURATED and all terminal analysis artifacts are ready, return the validated result. Do not call engagement completion or wait for report approval; the controller owns final status, sealing, and built-in report generation. Wait for operator approval only before live actions or external publication.',
   ].join('\n');
 }
 
@@ -440,7 +441,7 @@ function sourceReviewGateStatus(artifactRoot, options = {}) {
     for (const [index, referral] of (Array.isArray(semantic.referrals) ? semantic.referrals : []).entries()) {
       requireText(referral?.id, `semantic referral[${index}].id`, invalid);
       const status = String(referral?.status || '').toUpperCase();
-      if (!TERMINAL_SEMANTIC_STATUSES.has(status)) {
+      if (!TERMINAL_REFERRAL_STATUSES.has(status)) {
         invalid.push(`semantic referral ${referral?.id || index}: status ${status || '(missing)'} is not terminal`);
       }
       const hasFinding = Array.isArray(referral?.finding_ids) && referral.finding_ids.length > 0;

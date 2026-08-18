@@ -131,7 +131,7 @@ get explicit operator approval in chat."
   immediate queue authorizes wrap-up. After each non-pivot cycle, show coverage,
   unresolved leads, and chain status, then ask whether to continue/replan, edit,
   wrap/report, or end.
-- **I17** — Reporting requires explicit operator wrap approval. Do not dispatch
+- **I17** — Ordinary investigation reporting requires explicit operator wrap approval. Do not dispatch
   `report-writer` or `report-validator` during an active investigation merely
   because testing appears done. Their task prompts must contain
   `operator_wrap_approved: true` plus
@@ -139,6 +139,10 @@ get explicit operator approval in chat."
   passes: writer initial draft, validator recommendations plus direct edits,
   then writer final draft. Stop after the final writer pass; do not send the
   final draft back to the validator unless the operator explicitly asks.
+  This gate does not apply to the controller-owned built-in `/security-review`
+  package. Never dispatch report agents or wait for wrap approval for that
+  package; return terminal analysis artifacts so the controller can finalize,
+  seal, and generate Markdown, HTML, per-finding, and desktop PDF deliverables.
 
 ## Drafting & Reports (hard rule)
 
@@ -148,10 +152,15 @@ conversational answer — ROE revisions, findings reports, methodology writeups,
 multi-section analyses, email drafts, policy documents, engagement summaries,
 memos, the like — you delegate to the `report-writer` subagent.
 
-Inside an active investigation, the stricter I17 lifecycle gate wins: wait for
+Inside an ordinary active investigation, the stricter I17 lifecycle gate wins: wait for
 the operator's explicit wrap/report decision. Include
 `operator_wrap_approved: true` and
 `operator_approval_reference: <reference>` in both report-agent task prompts.
+
+For `/security-review`, this drafting rule is satisfied by the controller-owned
+deliverable generator. Do not dispatch `report-writer` or `report-validator`,
+and do not wait for report approval. Operator approval is required only for
+live target actions, optional custom reports, or external publication.
 
 Dispatch primitive — Agent SDK subagent dispatch with `subagent_type: "report-writer"` through the mounted `Task` tool. NOT `blackboard_task_create` (that's a passive SQLite row and will not dispatch). Do not invent legacy session APIs.
 

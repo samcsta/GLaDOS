@@ -392,6 +392,23 @@ test('v4 report library provides searchable, source-filtered navigation with dur
   assert.match(css, /\.report-tree-rename/);
 });
 
+test('investigation UI describes scoped blackboard and SDK reset behavior accurately', () => {
+  const app = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
+  assert.match(app, /Open a new blackboard and SDK scope/);
+  assert.match(app, /Reset SDK conversations/);
+  assert.match(app, /Existing transcript history and investigation data are preserved/);
+  assert.match(app, /chat attachments\? Investigation evidence and exported report files are preserved/);
+  assert.doesNotMatch(app, /Open a clean, isolated session/);
+});
+
+test('fresh-session diagnostics are scoped and exclude their own transcript event', () => {
+  const server = fs.readFileSync(path.join(ROOT, 'dashboard/server.js'), 'utf8');
+  assert.match(server, /function sessionBlackboardRowCounts\(sessionId/);
+  assert.match(server, /excludeTranscriptEventId: admittedEvent\.dashboardEventId/);
+  assert.match(server, /Other sessions remain isolated by engagement ownership/);
+  assert.doesNotMatch(server, /function wipeBlackboard\(/);
+});
+
 test('desktop dashboard exits surface supervised restart state instead of a misleading proxy failure', () => {
   const app = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
   assert.match(app, /gladosDesktop\?\.onDashboardExit/);
