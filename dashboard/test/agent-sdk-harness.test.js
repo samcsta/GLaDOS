@@ -20,6 +20,7 @@ const {
   mapSdkMessageToEvents,
   waitForCoreMcpServers,
   enhanceFirstActivityTimeoutError,
+  suppressSecurityReviewWorkerTranscriptEvent,
   streamAgentTurn,
   browserServerName,
   normalizeToolInput,
@@ -187,7 +188,7 @@ test('security-review pre-tool hook admits at most three foreground tasks', asyn
     tool_use_id: toolUseId,
   });
   const decisions = await Promise.all(['tool-1', 'tool-2', 'tool-3', 'tool-4'].map(call));
-  assert.deepEqual(decisions.map(row => row.hookSpecificOutput.permissionDecision), ['allow', 'allow', 'allow', 'deny']);
+  assert.deepEqual(decisions.map(row => row.hookSpecificOutput.permissionDecision), [undefined, undefined, undefined, 'deny']);
   assert.match(decisions[3].hookSpecificOutput.permissionDecisionReason, /concurrency limit 3/);
   assert.equal(reservations.size, 3);
 });
@@ -211,7 +212,7 @@ test('uses the caller tool policy and PreToolUse hard deny for direct turns', as
   const intendedTools = mountedToolsForAgent('webapp-recon');
   assert.equal(opts.includePartialMessages, true);
   assert.equal(opts.forwardSubagentText, true);
-  assert.equal(opts.permissionMode, 'dontAsk');
+  assert.equal(opts.permissionMode, 'default');
   assert.deepEqual(opts.tools, intendedTools.filter(tool => !tool.startsWith('mcp__')));
   assert.deepEqual(opts.gladosMountedTools, intendedTools);
   assert.equal(intendedTools.includes('Task'), false);
@@ -230,7 +231,7 @@ test('uses the caller tool policy and PreToolUse hard deny for direct turns', as
   assert.equal(intendedTools.includes('mcp__glados-ops'), false);
   assert.equal(opts.allowedTools.includes('Task'), false);
   assert.equal(opts.allowedTools.includes('Agent'), false);
-  assert.deepEqual(opts.allowedTools, autoApprovedToolsForAgent(intendedTools));
+  assert.deepEqual(opts.allowedTools, []);
   assert.equal(opts.disallowedTools.includes('Bash'), false);
   assert.equal(opts.disallowedTools.includes('ToolSearch'), false);
   assert.ok(opts.env.GLADOS_PROXY_URL.endsWith(':18080'));
@@ -239,13 +240,11 @@ test('uses the caller tool policy and PreToolUse hard deny for direct turns', as
   assert.equal(
     (await hook({ tool_name: 'Bash', tool_input: { command: '/usr/bin/curl -x http://127.0.0.1:18080 -k -H "X-GLaDOS-Agent: webapp-recon" https://ford.com' }, tool_use_id: 't1' }))
       .hookSpecificOutput.permissionDecision,
-    'allow'
+    undefined
   );
   assert.deepEqual(await hook({ tool_name: 'NotebookEdit', tool_input: { notebook_path: '/tmp/glados-test.ipynb' }, tool_use_id: 't1b' }), {
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
-      permissionDecision: 'allow',
-      permissionDecisionReason: 'NotebookEdit is a local or passive operation',
     },
   });
   assert.deepEqual(await hook({ tool_name: 'MultiEdit', tool_input: {}, tool_use_id: 't1c' }), {
@@ -271,7 +270,12 @@ test('uses the caller tool policy and PreToolUse hard deny for direct turns', as
 });
 
 test('GLaDOS process mounts fleet tools but enforces caller-specific permissions', async () => {
-  const env = baseTestEnv({ GLADOS_BROWSER_MCP: '1' });
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-process-policy-'));
+  const env = baseTestEnv({
+    GLADOS_BROWSER_MCP: '1',
+    GLADOS_RUNTIME_DIR: runtimeRoot,
+    GLADOS_AGENT_WORKSPACES: path.join(runtimeRoot, 'workspaces', 'agents'),
+  });
   const opts = buildAgentSdkOptions('glados', { env, turnTargets: ['https://example.test'] });
   const rootTools = mountedToolsForAgent('glados', loadPolicy(), { env });
   const webappBrowserMount = `mcp__${browserServerName('webapp-recon')}`;
@@ -285,13 +289,13 @@ test('GLaDOS process mounts fleet tools but enforces caller-specific permissions
   assert.equal(rootTools.includes('Bash'), true);
   assert.equal(rootTools.some(tool => tool.startsWith('mcp__browser-')), false);
   assert.equal(opts.allowedTools.includes('Agent'), false);
-  assert.equal(opts.allowedTools.includes('SendMessage'), true);
+  assert.equal(opts.allowedTools.includes('SendMessage'), false);
   assert.equal(opts.maxTurns, 40);
-  assert.equal(opts.allowedTools.includes('Bash'), true);
+  assert.equal(opts.allowedTools.includes('Bash'), false);
   assert.equal(opts.allowedTools.includes(webappBrowserMount), false);
-  assert.equal(opts.allowedTools.includes(`${webappBrowserMount}__browser_navigate`), true);
-  assert.equal(opts.allowedTools.includes(`${webappBrowserMount}__browser_snapshot`), true);
-  assert.equal(opts.allowedTools.includes(`${webappBrowserMount}__browser_take_screenshot`), true);
+  assert.equal(opts.allowedTools.includes(`${webappBrowserMount}__browser_navigate`), false);
+  assert.equal(opts.allowedTools.includes(`${webappBrowserMount}__browser_snapshot`), false);
+  assert.equal(opts.allowedTools.includes(`${webappBrowserMount}__browser_take_screenshot`), false);
   assert.equal('glados' in opts.agents, false);
   assert.equal('claude' in opts.agents, false);
   assert.ok(opts.agents['webapp-recon'].tools.includes('Bash'));
@@ -312,7 +316,7 @@ test('GLaDOS process mounts fleet tools but enforces caller-specific permissions
     tool_name: 'Bash',
     tool_input: { command: 'true' },
     tool_use_id: 'bash-1',
-  })).hookSpecificOutput.permissionDecision, 'allow');
+  })).hookSpecificOutput.permissionDecision, undefined);
   assert.equal((await hook({
     hook_event_name: 'PreToolUse',
     agent_id: 'worker-1',
@@ -320,7 +324,7 @@ test('GLaDOS process mounts fleet tools but enforces caller-specific permissions
     tool_name: `${webappBrowserMount}__browser_navigate`,
     tool_input: { url: 'https://example.test' },
     tool_use_id: 'browser-1',
-  })).hookSpecificOutput.permissionDecision, 'allow');
+  })).hookSpecificOutput.permissionDecision, undefined);
   assert.deepEqual(await hook({
     hook_event_name: 'PreToolUse',
     agent_id: 'worker-1',
@@ -340,14 +344,14 @@ test('GLaDOS process mounts fleet tools but enforces caller-specific permissions
     tool_name: 'Bash',
     tool_input: { command: 'true' },
     tool_use_id: 'root-bash-1',
-  })).hookSpecificOutput.permissionDecision, 'allow');
+  })).hookSpecificOutput.permissionDecision, undefined);
   const dispatchDecision = await hook({
     hook_event_name: 'PreToolUse',
     tool_name: 'Agent',
     tool_input: { subagent_type: 'webapp-recon', isolation: 'worktree' },
     tool_use_id: 'root-agent-1',
   });
-  assert.equal(dispatchDecision.hookSpecificOutput.permissionDecision, 'allow');
+  assert.equal(dispatchDecision.hookSpecificOutput.permissionDecision, undefined);
   assert.deepEqual(dispatchDecision.hookSpecificOutput.updatedInput, {
     subagent_type: 'webapp-recon',
     name: 'webapp-recon',
@@ -488,9 +492,9 @@ test('optional browser MCP mounts only when enabled and uses the active GLaDOS p
   assert.equal(enabled.gladosMountedTools.includes(mount), false);
   assert.ok(enabled.gladosMountedTools.includes(`${mount}__browser_navigate`));
   assert.equal(enabled.allowedTools.includes(`${mount}__*`), false);
-  assert.ok(enabled.allowedTools.includes(`${mount}__browser_navigate`));
-  assert.ok(enabled.allowedTools.includes(`${mount}__browser_snapshot`));
-  assert.ok(enabled.allowedTools.includes(`${mount}__browser_take_screenshot`));
+  assert.equal(enabled.allowedTools.includes(`${mount}__browser_navigate`), false);
+  assert.equal(enabled.allowedTools.includes(`${mount}__browser_snapshot`), false);
+  assert.equal(enabled.allowedTools.includes(`${mount}__browser_take_screenshot`), false);
   assert.ok(enabled.mcpServers[serverName].command);
   const configFlag = enabled.mcpServers[serverName].args.indexOf('--config');
   assert.notEqual(configFlag, -1);
@@ -528,7 +532,7 @@ test('optional browser MCP mounts only when enabled and uses the active GLaDOS p
     turnTargets: ['https://ford.com'],
   }).allowed, true);
   return fillDecision.then(result => {
-    assert.equal(result.hookSpecificOutput.permissionDecision, 'allow');
+    assert.equal(result.hookSpecificOutput.permissionDecision, undefined);
     assert.deepEqual(result.hookSpecificOutput.updatedInput.fields, [{
       element: 'Username',
       name: 'Username',
@@ -569,7 +573,7 @@ test('successful browser navigation authorizes current-page actions for that age
     tool_input: { url: 'https://ford.com/account' },
     tool_use_id: 'navigate-remember-target',
   });
-  assert.equal(navigate.hookSpecificOutput.permissionDecision, 'allow');
+  assert.equal(navigate.hookSpecificOutput.permissionDecision, undefined);
 
   const click = await hook({
     hook_event_name: 'PreToolUse',
@@ -577,7 +581,7 @@ test('successful browser navigation authorizes current-page actions for that age
     tool_input: { ref: 'save-button' },
     tool_use_id: 'click-remembered-target',
   });
-  assert.equal(click.hookSpecificOutput.permissionDecision, 'allow');
+  assert.equal(click.hookSpecificOutput.permissionDecision, undefined);
 });
 
 test('runtime prompt requires absolute browser evidence filenames', () => {
@@ -622,7 +626,7 @@ test('browser contract rejects unsupported Node globals and upload paths before 
     tool_input: { paths: [allowedPath] },
     tool_use_id: 'inside-upload-root',
   });
-  assert.equal(insideRoot.hookSpecificOutput.permissionDecision, 'allow');
+  assert.equal(insideRoot.hookSpecificOutput.permissionDecision, undefined);
 });
 
 test('Bash contract denies root-wide find while allowing bounded absolute searches', () => {
@@ -710,6 +714,113 @@ test('task input normalization preserves AgentDefinition model ownership and str
   });
 });
 
+test('security-review dispatch normalization mechanically binds immutable scope identifiers', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-review-binding-'));
+  const engagementId = 'repo-20260822-abcdef';
+  const artifactRoot = path.join(root, 'investigations', engagementId, 'security-review');
+  const repository = path.join(root, 'repo');
+  fs.mkdirSync(artifactRoot, { recursive: true });
+  fs.mkdirSync(repository, { recursive: true });
+  const env = baseTestEnv({
+    GLADOS_RUNTIME_DIR: path.join(root, '.glados'),
+    GLADOS_SECURITY_REVIEW: '1',
+    GLADOS_SECURITY_REVIEW_ENGAGEMENT_ID: engagementId,
+    GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT: artifactRoot,
+    GLADOS_SECURITY_REVIEW_REPOSITORY: repository,
+  });
+
+  const specialist = normalizeToolInput('Agent', {
+    subagent_type: 'source-code',
+    prompt: [
+      'security_review_role: iac-deployment',
+      'artifact_root: /tmp/mistyped/security-review',
+      'engagement_id: wrong',
+      'repository_path: /tmp/wrong-repo',
+      'Review every deployment manifest.',
+    ].join('\n'),
+  }, { agentId: 'glados', env });
+  assert.equal(specialist.prompt, [
+    'security_review_role: iac-deployment',
+    `artifact_root: ${artifactRoot}`,
+    `engagement_id: ${engagementId}`,
+    `repository_path: ${repository}`,
+    'Review every deployment manifest.',
+  ].join('\n'));
+
+  const discovery = normalizeToolInput('Task', {
+    subagent_type: 'source-code',
+    prompt: [
+      'Some preamble that must move below the machine header.',
+      'security_review_role: blind-discovery',
+      'worker_id: worker-012',
+      'artifact_root: /tmp/wrong/security-review',
+      'retry_of: worker-001',
+      'Inspect authorization paths.',
+    ].join('\n'),
+  }, { agentId: 'glados', env });
+  assert.deepEqual(discovery.prompt.split('\n').slice(0, 6), [
+    'security_review_role: blind-discovery',
+    'worker_id: worker-012',
+    `artifact_root: ${artifactRoot}`,
+    'retry_of: worker-001',
+    `engagement_id: ${engagementId}`,
+    `repository_path: ${repository}`,
+  ]);
+  assert.match(discovery.prompt, /Some preamble that must move below the machine header/);
+});
+
+test('security-review tool normalization repairs artifact-root transcription errors and engagement ids', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-review-path-repair-'));
+  const engagementId = 'repo-20260822-current';
+  const artifactRoot = path.join(root, '.glados', 'investigations', engagementId, 'security-review');
+  const repository = path.join(root, 'repo');
+  fs.mkdirSync(path.join(artifactRoot, 'validation'), { recursive: true });
+  fs.mkdirSync(repository, { recursive: true });
+  const env = baseTestEnv({
+    GLADOS_RUNTIME_DIR: path.join(root, '.glados'),
+    GLADOS_SECURITY_REVIEW: '1',
+    GLADOS_SECURITY_REVIEW_ENGAGEMENT_ID: engagementId,
+    GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT: artifactRoot,
+    GLADOS_SECURITY_REVIEW_REPOSITORY: repository,
+  });
+  const mistyped = path.join(root, '.glados', 'investigations', 'repo-20220822-curent', 'security-review', 'validation', 'semantic-coverage.json');
+  assert.deepEqual(normalizeToolInput('Read', { file_path: mistyped }, { agentId: 'source-code', env }), {
+    file_path: path.join(artifactRoot, 'validation', 'semantic-coverage.json'),
+    pages: '1',
+    limit: 300,
+  });
+  assert.deepEqual(normalizeToolInput('Write', { file_path: mistyped, content: '{}' }, { agentId: 'source-code', env }), {
+    file_path: path.join(artifactRoot, 'validation', 'semantic-coverage.json'),
+    content: '{}',
+  });
+  assert.deepEqual(normalizeToolInput('mcp__blackboard__blackboard_task_create', {
+    engagement_id: '',
+    assigned_to: 'source-code',
+  }, { agentId: 'glados', env }), {
+    engagement_id: engagementId,
+    assigned_to: 'source-code',
+  });
+  assert.deepEqual(normalizeToolInput('Grep', {
+    pattern: 'finding_id',
+    path: artifactRoot,
+    head_limit: 500,
+  }, { agentId: 'source-code', env }), {
+    pattern: 'finding_id',
+    path: artifactRoot,
+    head_limit: 20,
+  });
+  assert.deepEqual(normalizeToolInput('Grep', {
+    pattern: 'route_key',
+    path: path.join(root, '.glados'),
+    glob: '**/route-authz-matrix.jsonl',
+  }, { agentId: 'source-review-validator', env }), {
+    pattern: 'route_key',
+    path: artifactRoot,
+    glob: '**/route-authz-matrix.jsonl',
+    head_limit: 20,
+  });
+});
+
 test('runtime model overrides become the named specialist AgentDefinition models', () => {
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-model-ownership-'));
   fs.writeFileSync(path.join(runtimeDir, 'model-overrides.json'), JSON.stringify({
@@ -731,11 +842,13 @@ test('runtime model overrides become the named specialist AgentDefinition models
 test('reporting tool normalization paginates reads and requests compact baseline data', () => {
   assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/large.md' }, { agentId: 'report-writer' }), {
     file_path: '/tmp/large.md',
+    pages: '1',
     limit: 300,
   });
   assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/large.md', offset: 301, limit: 900 }, { agentId: 'report-validator' }), {
     file_path: '/tmp/large.md',
     offset: 301,
+    pages: '1',
     limit: 300,
   });
   assert.deepEqual(normalizeToolInput('mcp__blackboard__blackboard_baseline_get', {
@@ -747,41 +860,114 @@ test('reporting tool normalization paginates reads and requests compact baseline
   });
   assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/large.md' }, { agentId: 'webapp-recon' }), {
     file_path: '/tmp/large.md',
+    pages: '1',
     limit: 300,
   });
 });
 
-test('read normalization removes empty optional pages while preserving valid ranges', () => {
-  assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/a.md', pages: '' }), { file_path: '/tmp/a.md', limit: 300 });
-  assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/a.md', pages: '   ' }), { file_path: '/tmp/a.md', limit: 300 });
-  assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/a.md', pages: null }), { file_path: '/tmp/a.md', limit: 300 });
+test('read normalization replaces the SDK empty-page default while preserving valid ranges', () => {
+  assert.deepEqual(normalizeToolInput('Read', { file_path: '~/ordinary.md' }), {
+    file_path: path.join(os.homedir(), 'ordinary.md'), pages: '1', limit: 300,
+  });
+  assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/a.md', pages: '' }), { file_path: '/tmp/a.md', pages: '1', limit: 300 });
+  assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/a.md', pages: '   ' }), { file_path: '/tmp/a.md', pages: '1', limit: 300 });
+  assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/a.md', pages: null }), { file_path: '/tmp/a.md', pages: '1', limit: 300 });
   assert.deepEqual(normalizeToolInput('mcp__filesystem__Read', { file_path: '/tmp/a.md', pages: '', limit: 900 }), {
-    file_path: '/tmp/a.md', limit: 300,
+    file_path: '/tmp/a.md', pages: '1', limit: 300,
   });
   assert.deepEqual(normalizeToolInput('Read', { file_path: '/tmp/a.pdf', pages: '1-3' }), {
     file_path: '/tmp/a.pdf', pages: '1-3', limit: 300,
+  });
+  const denseJsonl = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'glados-dense-read-')), 'ledger.jsonl');
+  fs.writeFileSync(denseJsonl, `${'x'.repeat(700)}\n`.repeat(170));
+  assert.deepEqual(normalizeToolInput('Read', { file_path: denseJsonl }, { agentId: 'source-code' }), {
+    file_path: denseJsonl,
+    pages: '1',
+    limit: 80,
+  });
+});
+
+test('ordinary SDK tool calls stay callback-routed so subagent input repair is applied', async () => {
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-callback-routing-'));
+  const opts = buildAgentSdkOptions('glados', {
+    env: baseTestEnv({
+      GLADOS_RUNTIME_DIR: runtimeRoot,
+      GLADOS_AGENT_WORKSPACES: path.join(runtimeRoot, 'workspaces', 'agents'),
+    }),
+  });
+  assert.deepEqual(opts.allowedTools, []);
+  await opts.hooks.SubagentStart[0].hooks[0]({
+    agent_id: 'validator-instance',
+    agent_type: 'source-review-validator',
+  });
+  assert.deepEqual(await opts.hooks.PreToolUse[0].hooks[0]({
+    agent_id: 'validator-instance',
+    tool_name: 'Read',
+    tool_input: { file_path: '/tmp/a.md', pages: '' },
+    tool_use_id: 'read-hook-1',
+  }), {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      updatedInput: { file_path: '/tmp/a.md', pages: '1', limit: 300 },
+    },
+  });
+  assert.deepEqual(await opts.canUseTool('Read', {
+    file_path: '/tmp/a.md',
+    pages: '',
+  }, {
+    agentID: 'validator-instance',
+    toolUseID: 'read-1',
+  }), {
+    behavior: 'allow',
+    toolUseID: 'read-1',
+    updatedInput: { file_path: '/tmp/a.md', pages: '1', limit: 300 },
   });
 });
 
 test('snapshot security reviews deny Git, memory intake, and duplicate engagement creation', () => {
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-review-tool-policy-'));
+  const repo = path.join(runtimeDir, 'repo');
+  const artifactRoot = path.join(runtimeDir, 'investigations', 'eng-1', 'security-review');
+  fs.mkdirSync(repo, { recursive: true });
+  fs.mkdirSync(artifactRoot, { recursive: true });
   const env = baseTestEnv({
     GLADOS_RUNTIME_DIR: runtimeDir,
     GLADOS_AGENT_WORKSPACES: path.join(runtimeDir, 'agents'),
     GLADOS_SECURITY_REVIEW: '1',
     GLADOS_SECURITY_REVIEW_GIT_HISTORY: '0',
+    GLADOS_SECURITY_REVIEW_REPOSITORY: repo,
+    GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT: artifactRoot,
   });
   const policy = loadPolicy();
+  const base = { agentId: 'source-code', policy, env };
   assert.equal(decideToolUse({ agentId: 'source-code', toolName: 'Bash', input: { command: 'git status' }, policy, env }).allowed, false);
   assert.equal(decideToolUse({
     agentId: 'source-code', toolName: 'Read',
     input: { file_path: path.join(env.GLADOS_AGENT_WORKSPACES, 'source-code', 'MEMORY.md') }, policy, env,
   }).allowed, false);
+  assert.match(decideToolUse({
+    ...base,
+    toolName: 'Read',
+    input: { file_path: path.join(runtimeDir, 'workspaces', 'agents', 'source-code', 'repair_previous_review.py') },
+  }).reason, /selected repository or current artifact_root/);
+  assert.match(decideToolUse({
+    ...base,
+    toolName: 'Glob',
+    input: { pattern: '**/*' },
+  }).reason, /absolute path/);
+  assert.equal(decideToolUse({
+    ...base,
+    toolName: 'Grep',
+    input: { path: repo, pattern: 'StrictHostKeyChecking' },
+  }).allowed, true);
   assert.equal(decideToolUse({
     agentId: 'glados', toolName: 'mcp__blackboard__blackboard_engagement_create', input: {}, policy, env,
   }).allowed, false);
   assert.equal(decideToolUse({
     agentId: 'source-code', toolName: 'Write', input: { file_path: '/tmp/security-review/discovery/deep/workers.jsonl' }, policy, env,
+  }).allowed, false);
+  assert.equal(decideToolUse({
+    agentId: 'source-code', toolName: 'Write', input: { file_path: '/tmp/security-review/discovery/deep/worker-001/receipt.json' }, policy, env,
   }).allowed, false);
   assert.equal(decideToolUse({
     agentId: 'source-code', toolName: 'Bash', input: { command: 'sqlite3 "$BLACKBOARD_DB" "UPDATE security_review_worker_runs SET status=\"SUCCEEDED\""' }, policy, env,
@@ -795,6 +981,33 @@ test('snapshot security reviews deny Git, memory intake, and duplicate engagemen
   ]) {
     assert.match(decideToolUse({ agentId: 'glados', toolName, input: {}, policy, env }).reason, /source-only security review/);
   }
+});
+
+test('security-review read scope expands home-relative paths before policy checks', async () => {
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-review-home-path-'));
+  const home = os.homedir();
+  const env = baseTestEnv({
+    GLADOS_SECURITY_REVIEW: '1',
+    GLADOS_SECURITY_REVIEW_REPOSITORY: home,
+    GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT: path.join(runtimeRoot, 'artifact'),
+    GLADOS_SECURITY_REVIEW_GIT_HISTORY: '0',
+    GLADOS_RUNTIME_DIR: runtimeRoot,
+    GLADOS_AGENT_WORKSPACES: path.join(runtimeRoot, 'workspaces', 'agents'),
+  });
+  const opts = buildAgentSdkOptions('source-code', {
+    env,
+    workspaceRoot: env.GLADOS_AGENT_WORKSPACES,
+  });
+
+  assert.deepEqual(await opts.canUseTool('Read', {
+    file_path: '~/review/input.jsonl', pages: '',
+  }, {
+    toolUseID: 'home-read-1',
+  }), {
+    behavior: 'allow',
+    toolUseID: 'home-read-1',
+    updatedInput: { file_path: path.join(home, 'review/input.jsonl'), pages: '1', limit: 300 },
+  });
 });
 
 test('security-review artifact writes cannot escape the assigned artifact root', () => {
@@ -811,6 +1024,14 @@ test('security-review artifact writes cannot escape the assigned artifact root',
     agentId: 'source-review-validator', toolName: 'Write',
     input: { file_path: path.join(artifactRoot, 'validation', 'candidate-closure.jsonl') }, policy, env,
   }).allowed, true);
+  assert.match(decideToolUse({
+    agentId: 'source-review-validator', toolName: 'Write',
+    input: { file_path: path.join(artifactRoot, 'controller', 'workflow-contract.txt') }, policy, env,
+  }).reason, /controller-owned/);
+  assert.match(decideToolUse({
+    agentId: 'source-review-validator', toolName: 'Edit',
+    input: { file_path: path.join(artifactRoot, 'observations.json') }, policy, env,
+  }).reason, /controller-owned/);
   assert.match(decideToolUse({
     agentId: 'source-review-validator', toolName: 'Write',
     input: { file_path: path.join(runtime, 'workspaces', 'agents', 'source-review-validator', 'generated', 'candidate-closure.jsonl') }, policy, env,
@@ -836,7 +1057,7 @@ test('security-review SDK options omit desktop, local-auth, browser, and Full Ac
   assert.deepEqual(Object.keys(opts.mcpServers).sort(), ['blackboard', 'watchdog']);
   assert.equal(opts.gladosMountedTools.some(tool => /^mcp__(?:glados-ops|browser-)/.test(tool)), false);
   assert.equal(opts.allowedTools.some(tool => /^mcp__(?:glados-ops|browser-)/.test(tool)), false);
-  assert.equal(opts.permissionMode, 'dontAsk');
+  assert.equal(opts.permissionMode, 'default');
   assert.equal(opts.allowDangerouslySkipPermissions, false);
   assert.match(opts.systemPrompt, /Full Access is ignored for this source-only review/);
   assert.doesNotMatch(opts.systemPrompt, /Full Access is ENABLED/);
@@ -1030,6 +1251,55 @@ test('operator workspace edits change assembled prompts and expose skills', () =
   assert.deepEqual(opts.gladosPromptSkills, ['operator-skill']);
 });
 
+test('security-review prompts use the compact versioned contract and propagate isolation to workers', () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-review-prompt-'));
+  for (const agentId of ['glados', 'source-code', 'source-review-validator']) {
+    const agentDir = path.join(workspaceRoot, agentId);
+    fs.mkdirSync(path.join(agentDir, 'skills', 'workspace-only'), { recursive: true });
+    for (const name of PROMPT_FILE_ORDER) {
+      fs.writeFileSync(path.join(agentDir, name), `${agentId}-${name}-WORKSPACE-STARTUP\n`);
+    }
+    fs.writeFileSync(path.join(agentDir, 'skills', 'workspace-only', 'SKILL.md'), 'description: workspace-only review skill\n');
+  }
+  const repository = path.join(workspaceRoot, 'repository');
+  const artifactRoot = path.join(workspaceRoot, 'artifacts');
+  const env = baseTestEnv({
+    GLADOS_SECURITY_REVIEW: '1',
+    GLADOS_SECURITY_REVIEW_ENGAGEMENT_ID: 'eng-review-prompt',
+    GLADOS_SECURITY_REVIEW_REPOSITORY: repository,
+    GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT: artifactRoot,
+  });
+
+  const assembled = assembleAgentPrompt('source-code', { workspaceRoot, env });
+  assert.deepEqual(assembled.files, []);
+  assert.deepEqual(assembled.skills, []);
+  assert.match(assembled.prompt, /GLaDOS v4 security-review contract \(source-code\/RUNBOOK\.md\)/);
+  assert.doesNotMatch(assembled.prompt, /WORKSPACE-STARTUP|workspace-only review skill/);
+
+  const definitions = buildAgentDefinitions(loadPolicy(), {
+    workspaceRoot,
+    env,
+    subagentAllowlist: ['source-code', 'source-review-validator'],
+  });
+  for (const agentId of ['source-code', 'source-review-validator']) {
+    assert.match(definitions[agentId].prompt, new RegExp(`Security-review repository root: ${repository}`));
+    assert.match(definitions[agentId].prompt, new RegExp(`Security-review artifact root: ${artifactRoot}`));
+    assert.match(definitions[agentId].prompt, /Security-review engagement id: eng-review-prompt/);
+    assert.match(definitions[agentId].prompt, /do not read or write agent-owned files/);
+    assert.match(definitions[agentId].prompt, /Do not reread SOUL\.md, USER\.md/);
+    assert.match(definitions[agentId].prompt, /Bash is intentionally unavailable in source-review isolation/);
+    assert.match(definitions[agentId].prompt, /Every Read tool call must explicitly include pages: "1"/);
+    assert.doesNotMatch(definitions[agentId].prompt, /WORKSPACE-STARTUP|workspace-only review skill/);
+    assert.match(definitions[agentId].criticalSystemReminder_EXPERIMENTAL, /do not read the persistent agent workspace/);
+  }
+
+  const glados = buildAgentSdkOptions('glados', { workspaceRoot, env });
+  assert.deepEqual(glados.gladosPromptFiles, []);
+  assert.deepEqual(glados.gladosPromptSkills, []);
+  assert.match(glados.systemPrompt, /GLaDOS v4 security-review contract \(glados\/RUNBOOK\.md\)/);
+  assert.doesNotMatch(glados.systemPrompt, /WORKSPACE-STARTUP|workspace-only review skill/);
+});
+
 test('proxy smoke-test instructions override formal investigation preflight', () => {
   const env = baseTestEnv({ GLADOS_BROWSER_MCP: '1' });
   const glados = buildAgentSdkOptions('glados', { env });
@@ -1063,7 +1333,7 @@ test('proxy smoke-test instructions override formal investigation preflight', ()
   const definitions = buildAgentDefinitions(loadPolicy(), { env });
   assert.ok(definitions['webapp-recon'].tools.includes('Bash'));
   assert.ok(definitions['webapp-recon'].tools.includes(`mcp__${browserServerName('webapp-recon')}__browser_navigate`));
-  assert.equal(definitions['webapp-recon'].permissionMode, 'dontAsk');
+  assert.equal(definitions['webapp-recon'].permissionMode, 'default');
   assert.equal(definitions['webapp-recon'].background, false);
   assert.match(definitions['webapp-recon'].criticalSystemReminder_EXPERIMENTAL, /GLaDOS subagent named webapp-recon/);
 });
@@ -1173,6 +1443,68 @@ test('maps SDK partial stream, tool calls, tool results, result, and liveness ev
   assert.equal(events[5].durationMs, 500);
   assert.deepEqual(events[5].usage, { input_tokens: 100, output_tokens: 20 });
   assert.deepEqual(events[5].modelUsage, { 'claude-sonnet-5': { costUSD: 1.25 } });
+});
+
+test('security-review worker prose stays out of operator chat while audit events remain visible', () => {
+  const env = baseTestEnv({ GLADOS_SECURITY_REVIEW: '1' });
+  assert.equal(suppressSecurityReviewWorkerTranscriptEvent({
+    kind: 'assistant-text', parentAgentId: 'glados', agentId: 'source-code',
+  }, { agentId: 'glados', env }), true);
+  assert.equal(suppressSecurityReviewWorkerTranscriptEvent({
+    kind: 'text-stream', parentAgentId: 'glados', agentId: 'source-code',
+  }, { agentId: 'glados', env }), true);
+  for (const kind of ['tool-call', 'tool-result', 'liveness', 'result']) {
+    assert.equal(suppressSecurityReviewWorkerTranscriptEvent({
+      kind, parentAgentId: 'glados', agentId: 'source-code',
+    }, { agentId: 'glados', env }), false, kind);
+  }
+  assert.equal(suppressSecurityReviewWorkerTranscriptEvent({
+    kind: 'assistant-text', parentAgentId: null, agentId: 'glados',
+  }, { agentId: 'glados', env }), false);
+  assert.equal(suppressSecurityReviewWorkerTranscriptEvent({
+    kind: 'assistant-text', parentAgentId: 'glados', agentId: 'source-code',
+  }, { agentId: 'glados', env: baseTestEnv() }), false);
+});
+
+test('security-review transcript keeps internal dispatches and worker returns compact', () => {
+  const env = baseTestEnv({ GLADOS_SECURITY_REVIEW: '1' });
+  const context = { env };
+  const [dispatch] = mapSdkMessageToEvents('glados', {
+    type: 'assistant',
+    message: { content: [{
+      type: 'tool_use',
+      id: 'review-tool-1',
+      name: 'Agent',
+      input: {
+        subagent_type: 'source-code',
+        prompt: `security_review_role: iac-config-manifests\n${'long internal assignment '.repeat(200)}`,
+      },
+    }] },
+  }, context);
+  assert.match(dispatch.toolInput.prompt, /security_review_role: iac-config-manifests/);
+  assert.match(dispatch.toolInput.prompt, /managed security-review assignment/);
+  assert.ok(dispatch.toolInput.prompt.length < 180);
+
+  const [result] = mapSdkMessageToEvents('glados', {
+    type: 'user',
+    message: { content: [{
+      type: 'tool_result',
+      tool_use_id: 'review-tool-1',
+      content: `Completed specialist track.\n${'finding prose '.repeat(500)}`,
+    }] },
+  }, context);
+  assert.equal(result.text, 'Internal security-review worker completed; durable artifacts and task state were retained.');
+
+  const [completed] = mapSdkMessageToEvents('glados', {
+    type: 'system',
+    subtype: 'task_notification',
+    task_id: 'review-task-1',
+    tool_use_id: 'review-tool-1',
+    subagent_type: 'source-code',
+    status: 'completed',
+    summary: 'A very long duplicate worker summary that belongs in durable artifacts.',
+  }, context);
+  assert.equal(completed.text, 'Security-review worker completed.');
 });
 
 test('redacts generated and browser-entered credentials from durable transcript events', () => {
@@ -1632,6 +1964,43 @@ test('streamAgentTurn interrupts a turn that produces no first model activity', 
   assert.equal(interrupted, true);
 });
 
+test('streamAgentTurn interrupts a wedged active turn after its idle deadline', async () => {
+  let interrupted = false;
+  function fakeQuery() {
+    let calls = 0;
+    return {
+      [Symbol.asyncIterator]() { return this; },
+      async next() {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            done: false,
+            value: {
+              type: 'assistant',
+              message: { content: [{ type: 'text', text: 'validator active' }] },
+              uuid: 'active-before-stall',
+              session_id: 's-active-stall',
+            },
+          };
+        }
+        return new Promise(() => {});
+      },
+      async interrupt() { interrupted = true; },
+    };
+  }
+  await assert.rejects(streamAgentTurn({
+    agentId: 'glados',
+    prompt: 'test active turn idle watchdog',
+    queryImpl: fakeQuery,
+    store: false,
+    options: {
+      sdkOptions: { model: 'gpt-5.6-terra', mcpServers: {} },
+      turnIdleTimeoutMs: 25,
+    },
+  }), error => error?.code === 'GLADOS_TURN_IDLE_TIMEOUT');
+  assert.equal(interrupted, true);
+});
+
 test('streamAgentTurn reports the configured first-activity deadline after non-model SDK initialization', async () => {
   let calls = 0;
   const queryImpl = () => ({
@@ -1705,6 +2074,54 @@ test('streamAgentTurn drops a resumed session and retries once after first-activ
   assert.equal(calls, 2);
   assert.deepEqual(invalidated, { sessionId: 'stale-session', code: 'GLADOS_FIRST_ACTIVITY_TIMEOUT' });
   assert.equal(events.some(event => event.kind === 'assistant-text' && event.text === 'recovered'), true);
+});
+
+test('streamAgentTurn drops a resumed session and retries once after active-turn idleness', async () => {
+  let calls = 0;
+  let invalidated = null;
+  const queryImpl = ({ options }) => {
+    calls += 1;
+    if (options.resume) {
+      let yielded = false;
+      return {
+        interrupt: async () => {},
+        [Symbol.asyncIterator]() { return this; },
+        next() {
+          if (!yielded) {
+            yielded = true;
+            return Promise.resolve({ done: false, value: {
+              type: 'assistant',
+              message: { content: [{ type: 'text', text: 'working before stall' }] },
+              session_id: 'stalled-session',
+            } });
+          }
+          return new Promise(() => {});
+        },
+      };
+    }
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'assistant', message: { content: [{ type: 'text', text: 'idle recovered' }] }, session_id: 'fresh-session' };
+        yield { type: 'result', subtype: 'success', result: 'idle recovered', session_id: 'fresh-session' };
+      },
+    };
+  };
+
+  const events = await streamAgentTurn({
+    agentId: 'glados',
+    prompt: 'continue the durable review',
+    store: false,
+    queryImpl,
+    options: {
+      resumeSessionId: 'stale-session',
+      turnIdleTimeoutMs: 25,
+      haltPollMs: 0,
+      onInvalidSession: (sessionId, error) => { invalidated = { sessionId, code: error.code }; },
+    },
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(invalidated, { sessionId: 'stale-session', code: 'GLADOS_TURN_IDLE_TIMEOUT' });
+  assert.equal(events.some(event => event.kind === 'assistant-text' && event.text === 'idle recovered'), true);
 });
 
 test('streamAgentTurn interrupts an in-flight agent when its halt marker becomes active', async () => {

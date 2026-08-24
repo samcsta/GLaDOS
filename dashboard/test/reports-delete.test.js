@@ -35,6 +35,29 @@ test('Reports indexes sealed security reviews as a dedicated collection', () => 
   assert.equal(reports.readFile('investigations/eng-1/security-review/EXECUTIVE-SUMMARY.md').kind, 'markdown');
 });
 
+test('Reports preserve the engagement identity when a sealed review folder is renamed in Finder', () => {
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-reports-renamed-review-'));
+  const review = path.join(runtime, 'investigations', 'friendly-folder', 'security-review');
+  fs.mkdirSync(path.join(runtime, 'investigations', 'eng-immutable', 'security-review'), { recursive: true });
+  fs.mkdirSync(path.join(review, 'deliverables'), { recursive: true });
+  fs.writeFileSync(path.join(review, 'completion-receipt.json'), JSON.stringify({
+    status: 'SEALED', terminal_state: 'SATURATED', engagement_id: 'eng-immutable',
+  }));
+  fs.writeFileSync(path.join(review, 'deliverables', 'SECURITY-REVIEW.md'), '# review\n');
+  fs.writeFileSync(path.join(review, 'deliverables', 'security-review-report.html'), '<h1>renamed review</h1>\n');
+  fs.writeFileSync(path.join(review, 'deliverables', 'security-review-report.pdf'), '%PDF-1.4 renamed review\n');
+  fs.writeFileSync(path.join(review, 'context.json'), '{}\n');
+  const reports = loadReports(runtime);
+
+  const index = JSON.stringify(reports.tree());
+  assert.match(index, /security-reviews\/eng-immutable\/SECURITY-REVIEW\.md/);
+  assert.match(index, /friendly-folder/);
+  assert.equal(reports.readFile('security-reviews/eng-immutable/SECURITY-REVIEW.md').kind, 'markdown');
+  assert.equal(reports.readFile('security-reviews/eng-immutable/security-review-report.html').content, '<h1>renamed review</h1>\n');
+  assert.equal(reports.readFile('security-reviews/eng-immutable/security-review-report.pdf').kind, 'pdf');
+  assert.equal(reports.readFile('security-reviews/eng-immutable/raw/context.json').kind, 'text');
+});
+
 test('Reports can delete published reports, investigation workspaces, security reviews, and collection contents', () => {
   const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-reports-delete-'));
   const folder = path.join(runtime, 'reports', 'old-report');

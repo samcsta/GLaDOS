@@ -205,10 +205,28 @@ class LiteLlmResponseRelay {
       }
       // The Agent SDK only surfaces the conventional request-id header. LiteLLM
       // publishes its authoritative call identifier as x-litellm-call-id.
-       res.setHeader('request-id', requestId);
+      res.setHeader('request-id', requestId);
       res.statusCode = upstreamResponse.status;
-      if (upstreamResponse.body) Readable.fromWeb(upstreamResponse.body).pipe(res);
-      else res.end();
+      if (!upstreamResponse.body) {
+        res.end();
+        return;
+      }
+      const stream = Readable.fromWeb(upstreamResponse.body);
+      let downstreamClosed = false;
+      stream.on('error', error => {
+        // When the SDK has already accepted the terminal response and closes
+        // its side, destroying the upstream reader can surface undici's
+        // synthetic "terminated" error. That is teardown, not an upstream
+        // model failure, and must not pollute operator-visible diagnostics.
+        if (downstreamClosed || res.destroyed || res.writableEnded) return;
+        console.warn('[litellm-relay] upstream response stream error:', error.message);
+        res.destroy(error);
+      });
+      res.on('close', () => {
+        downstreamClosed = true;
+        if (!stream.destroyed) stream.destroy();
+      });
+      stream.pipe(res);
     } catch (error) {
       if (res.headersSent) {
         try { res.destroy(error); } catch {}

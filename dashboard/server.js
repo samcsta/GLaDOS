@@ -584,7 +584,10 @@ function sendMessageToAgentTrackedRuntime(agentId, message, sessionId = activeIn
   const turn = activeChatTurns.get(runtimeKey(sessionId, agentId));
   const promise = sendMessageToAgentRuntime(sessionId, agentId, message, {
     turnId,
-    recordPrompt: true,
+    // Controller prompts are durable machine control records, not operator
+    // chat. Keep them in controller_jobs/controller_events without rendering
+    // another multi-kilobyte user bubble on every automatic continuation.
+    recordPrompt: !context.controllerJobId,
     securityReviewArtifactRoot: securityReviewArtifactRootFromPrompt(message),
     engagementId: context.engagementId || null,
     controllerJobId: context.controllerJobId || null,
@@ -809,23 +812,25 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
       try {
         db.prepare(`
           INSERT INTO security_review_llm_requests
-            (request_id, engagement_id, controller_job_id, agent_id, review_role, worker_id, requested_model, status, observed_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+            (request_id, engagement_id, controller_job_id, agent_id, review_role, worker_id,
+             worker_tool_call_id, requested_model, status, observed_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
           ON CONFLICT(request_id) DO NOTHING
         `).run(request.requestId, engagementId, controllerJobId, request.agentId, request.reviewRole,
-          request.workerId, request.requestedModel, stamp);
+          request.workerId, request.workerToolCallId, request.requestedModel, stamp);
         const owner = db.prepare('SELECT engagement_id FROM security_review_llm_requests WHERE request_id=?').get(request.requestId);
         if (owner?.engagement_id !== engagementId) {
           db.prepare("UPDATE security_review_llm_requests SET status='CONFLICT', last_error='request ID reused across engagements' WHERE request_id=?").run(request.requestId);
           return null;
         }
         const identity = db.prepare(`
-          SELECT agent_id, review_role, worker_id, requested_model, controller_job_id
+          SELECT agent_id, review_role, worker_id, worker_tool_call_id, requested_model, controller_job_id
           FROM security_review_llm_requests WHERE request_id=?
         `).get(request.requestId);
         if (identity && (identity.agent_id !== request.agentId
             || (identity.review_role || null) !== (request.reviewRole || null)
             || (identity.worker_id || null) !== (request.workerId || null)
+            || (identity.worker_tool_call_id || null) !== (request.workerToolCallId || null)
             || (identity.requested_model || null) !== (request.requestedModel || null)
             || (identity.controller_job_id || null) !== (controllerJobId || null))) {
           db.prepare("UPDATE security_review_llm_requests SET status='CONFLICT', last_error='request ID reused for a different work unit' WHERE request_id=?").run(request.requestId);
@@ -860,20 +865,22 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
       const requestedModel = request.requestedModel || evidence.requestedModel;
       const id = observationId({
         engagementId, requestId: request.requestId, role: request.reviewRole,
-        workerId: request.workerId, gatewayModelId: evidence.gatewayModelId,
+        workerId: request.workerId, workerToolCallId: request.workerToolCallId,
+        gatewayModelId: evidence.gatewayModelId,
       });
       const settledAt = new Date().toISOString();
       const settled = new Database(BLACKBOARD_DB);
       try {
         settled.prepare(`
           INSERT INTO security_review_model_observations
-            (observation_id, engagement_id, controller_job_id, agent_id, review_role, worker_id,
+            (observation_id, engagement_id, controller_job_id, agent_id, review_role, worker_id, worker_tool_call_id,
              requested_model, actual_model, billed_model_name, source, request_id, gateway_model_id, cost_usd,
              logical_model_alias, provider_model, attestation_level, gateway_call_id, observed_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(observation_id) DO NOTHING
         `).run(id, engagementId, controllerJobId, request.agentId, request.reviewRole, request.workerId,
-          requestedModel, evidence.actualModel, evidence.billedModelName, evidence.source || 'litellm:spend-log', request.requestId,
+          request.workerToolCallId, requestedModel, evidence.actualModel, evidence.billedModelName,
+          evidence.source || 'litellm:spend-log', request.requestId,
           evidence.gatewayModelId, evidence.costUsd, evidence.logicalModelAlias || requestedModel,
           evidence.providerModel || null, evidence.attestationLevel || 'deployment', evidence.gatewayCallId || request.requestId, settledAt);
         settled.prepare(`
@@ -882,7 +889,13 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
           WHERE request_id=? AND engagement_id=?
         `).run(Number(evidence.attempts || 1), settledAt, request.requestId, engagementId);
       } finally { settled.close(); }
-      projectSecurityReviewLedgers({ dbPath: BLACKBOARD_DB, artifactRoot: securityReviewArtifactRoot, engagementId });
+      const projection = projectSecurityReviewLedgers({ dbPath: BLACKBOARD_DB, artifactRoot: securityReviewArtifactRoot, engagementId });
+      if (projection.sealInvalidated) {
+        setImmediate(() => {
+          try { controller.revalidateSecurityReviewAfterAuthorityChange(engagementId); }
+          catch (error) { console.warn('[security-review] automatic reseal after authority change failed:', error.message); }
+        });
+      }
       if (headerReceipt?.gatewayCallId) {
         setTimeout(async () => {
           try {
@@ -910,6 +923,7 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
       let run = null;
       try { run = JSON.parse(fs.readFileSync(path.join(securityReviewArtifactRoot, 'run.json'), 'utf8')); } catch {}
       turnEnv.GLADOS_SECURITY_REVIEW = '1';
+      turnEnv.GLADOS_SECURITY_REVIEW_ENGAGEMENT_ID = engagementId || path.basename(path.dirname(securityReviewArtifactRoot));
       turnEnv.GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT = securityReviewArtifactRoot;
       turnEnv.GLADOS_SECURITY_REVIEW_REPOSITORY = run?.repositoryPath || '';
       turnEnv.GLADOS_SECURITY_REVIEW_SOURCE_TYPE = run?.sourceType || '';
@@ -943,7 +957,10 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
               messagePreview: ev.toolInput?.description || childPrompt || ev.text || '',
               taskPrompt: childPrompt,
             });
-            if (childPrompt) {
+            // Security-review worker contracts are machine-to-machine control
+            // payloads. Their role/liveness remains visible, while the full
+            // prompt stays in the SDK audit trail instead of flooding chat.
+            if (childPrompt && !securityReviewArtifactRoot) {
               recordUserTranscript(sessionId, child, childPrompt, {
                 id: `subagent-prompt:${ev.toolCallId}`,
                 runtime: 'agent-sdk',
@@ -1032,13 +1049,15 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
           const targetAgent = sdkMessage.subagent_type
             || sdkContext?.subagentByParentToolUseId?.get(parentToolUseId)
             || agentId;
+          const workerId = targetAgent === agentId ? null : securityReviewWorkersByToolCall.get(parentToolUseId)
+            || discoveryWorkerIdFromPrompt([...activeSubagentTurns.values()].find(row => row.toolCallId === parentToolUseId)?.taskPrompt || '')
+            || null;
           await persistAttestation({
             requestId: sdkMessage.request_id,
             agentId: targetAgent,
             requestedModel: sdkMessage?.message?.model ? bareModelAlias(sdkMessage.message.model, { fallback: null }) : null,
-            workerId: targetAgent === agentId ? null : securityReviewWorkersByToolCall.get(parentToolUseId)
-              || discoveryWorkerIdFromPrompt([...activeSubagentTurns.values()].find(row => row.toolCallId === parentToolUseId)?.taskPrompt || '')
-              || null,
+            workerId,
+            workerToolCallId: workerId ? parentToolUseId : null,
             reviewRole: targetAgent === agentId
               ? securityReviewRoleFromDispatch(agentId, message)
               : securityReviewRolesByToolCall.get(parentToolUseId) || securityReviewRoleFromDispatch(targetAgent, ''),
@@ -1057,7 +1076,13 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
           if (!recovered) finalizeDiscoveryWorker({ dbPath: BLACKBOARD_DB, engagementId, toolCallId, status: 'CANCELED', error: 'parent turn ended before worker reconciliation' });
         } catch (error) { console.warn(`[security-review] could not cancel ${workerId}:`, error.message); }
       }
-      projectSecurityReviewLedgers({ dbPath: BLACKBOARD_DB, artifactRoot: securityReviewArtifactRoot, engagementId });
+      const projection = projectSecurityReviewLedgers({ dbPath: BLACKBOARD_DB, artifactRoot: securityReviewArtifactRoot, engagementId });
+      if (projection.sealInvalidated) {
+        setImmediate(() => {
+          try { controller.revalidateSecurityReviewAfterAuthorityChange(engagementId); }
+          catch (error) { console.warn('[security-review] automatic reseal after authority change failed:', error.message); }
+        });
+      }
     }
     finishSubagentsForTurn(sessionId, agentId, turnId);
   }
@@ -1220,6 +1245,16 @@ const controller = new ControllerLite({
   sendMessageToAgentTracked: sendMessageToAgentTrackedRuntime,
   currentSessionForAgent,
   getInvestigationSessionId: () => activeInvestigationSession().id,
+  onSecurityReviewCompleted: ({ engagementId, sessionId }) => {
+    if (!sessionId) return;
+    transcriptEvent(
+      sessionId,
+      'glados',
+      'assistant-text',
+      'Security review complete. GLaDOS sealed the evidence and generated the deliverables automatically. Open Reports for the report and supporting files.',
+      { securityReviewComplete: true, engagementId }
+    );
+  },
 });
 try {
   const recovery = reconcileActiveSecurityReviewWorkers({
@@ -1798,6 +1833,22 @@ app.post('/api/chat/glados', async (req, res) => {
     return;
   }
 
+  if (!attachments.length && /^(?:continue|resume)$/i.test(message.trim())) {
+    const recovery = controller.resumeLatestRecoverableSecurityReviewForSession(session.id);
+    if (recovery.ok) {
+      const text = recovery.completed
+        ? `Recovered, sealed, and published security review \`${recovery.engagementId}\` from its durable artifacts.`
+        : `Reconnected security review job \`${recovery.jobId}\` to its durable checkpoint. The controller will continue and publish automatically.`;
+      const ev = transcriptEvent(session.id, 'glados', 'assistant-text', text, {
+        fastPath: 'security-review-controller-resume',
+        controllerJobId: recovery.jobId,
+        engagementId: recovery.engagementId,
+      });
+      return res.json({ ok: true, fastPath: true, recoveredSecurityReview: true, ...recovery,
+        result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
+    }
+  }
+
   if (!attachments.length && isFreshSessionQuestion(message)) {
     const counts = sessionBlackboardRowCounts(session.id, { excludeTranscriptEventId: admittedEvent.dashboardEventId });
     const rows = counts ? Object.values(counts).reduce((sum, n) => sum + Number(n || 0), 0) : null;
@@ -2285,7 +2336,7 @@ async function runSlash(raw, sessionId = activeInvestigationSession().id) {
         sessionId,
       });
       const queuedRun = JSON.parse(fs.readFileSync(path.join(path.dirname(path.dirname(controller.db.name)), 'investigations', job.engagement_id, 'security-review', 'run.json'), 'utf8'));
-      emit(`Queued ${campaignMode ? `${queuedRun.campaign.repositoryCount}-repository expedited security-review campaign` : `${review.reviewProfile} source-code security review`} for \`${job.target}\`.\nJob: ${job.id}\nContext mode: ${review.mode}.\nProfile: ${review.reviewProfile}${campaignMode ? ' portfolio breadth first, then risk-ranked depth' : ''}.\nTime ceiling: ${review.maxDurationMinutes ? `${review.maxDurationMinutes} minutes` : 'none; completion is saturation and gate driven'}.\nDiscovery policy: at least ${queuedRun.deepScan.minDiscoveryRuns} successful passes, stop only after ${queuedRun.deepScan.stopAfterNoNew} consecutive no-new passes, ${queuedRun.deepScan.maxDiscoveryRuns == null ? 'no fixed attempt ceiling' : `maximum ${queuedRun.deepScan.maxDiscoveryRuns}`}; up to ${queuedRun.deepScan.discoveryConcurrency} workers per batch.\nModel policy: ${review.singleModel ? `${review.singleModel} only (operator-approved diversity waiver)` : 'configured review models with diversity required'}.\nQuality gates: deterministic inventory, ${campaignMode ? 'one broad pass per campaign repository, ' : ''}risk-ranked specialist review, centralized deduplication, candidate closure, independent High/Critical validation, omission-focused validation, and sealed evidence artifacts${review.mode === 'blind' ? '; prior-report lookup and regression are prohibited for this run' : '; historical regression follows the selected context policy'}.`);
+      emit(`Queued ${campaignMode ? `${queuedRun.campaign.repositoryCount}-repository expedited security-review campaign` : `${review.reviewProfile} source-code security review`} for \`${job.target}\`.\nJob: ${job.id}\nRuntime contract: ${queuedRun.contractRevision} (orchestration revision ${queuedRun.orchestrationRevision}).\nContext mode: ${queuedRun.contextMode}${queuedRun.requestedContextMode === 'auto' ? ` (automatically resolved; prior ${queuedRun.priorContext?.status === 'AVAILABLE' ? 'matched' : 'not found'})` : ''}.\nProfile: ${review.reviewProfile}${campaignMode ? ' portfolio breadth first, then risk-ranked depth' : ''}.\nTime ceiling: ${review.maxDurationMinutes ? `${review.maxDurationMinutes} minutes` : 'none; completion is saturation and gate driven'}.\nDiscovery policy: at least ${queuedRun.deepScan.minDiscoveryRuns} successful passes, stop only after ${queuedRun.deepScan.stopAfterNoNew} consecutive no-new passes, ${queuedRun.deepScan.maxDiscoveryRuns == null ? 'no fixed attempt ceiling' : `maximum ${queuedRun.deepScan.maxDiscoveryRuns}`}; up to ${queuedRun.deepScan.discoveryConcurrency} workers per batch.\nModel policy: ${review.singleModel ? `${review.singleModel} only (operator-approved diversity waiver)` : 'configured review models with diversity required'}.\nQuality gates: deterministic inventory, ${campaignMode ? 'one broad pass per campaign repository, ' : ''}risk-ranked specialist review, centralized semantic deduplication, source-based reportability, independent High/Critical validation, omission-focused validation, sealed evidence artifacts, and mandatory deliverables${queuedRun.contextMode === 'blind' ? '; prior-report lookup and regression are prohibited for this run' : '; blind discovery is followed by matched historical regression'}.`);
     } else if (review.isUrlOrDomain) {
       const target = normalizeTarget(review.target);
       const goal = controller.createGoal({

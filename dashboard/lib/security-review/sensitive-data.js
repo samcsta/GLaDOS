@@ -91,4 +91,26 @@ function scanSensitiveData(repositoryPath, files, hmacKey) {
   return { secrets, pii };
 }
 
-module.exports = { fingerprint, piiCandidates, scanSensitiveData, secretCandidates };
+function sensitiveDataDispositionBootstrap(candidate) {
+  return {
+    inventory_key: candidate.inventory_key,
+    kind: candidate.kind,
+    data_class: candidate.data_class,
+    presence_status: candidate.presence_status,
+    validation_status: candidate.validation_status || 'UNVERIFIED',
+    fingerprint: candidate.fingerprint,
+    value_redacted: true,
+    exposure: candidate.exposure,
+    file: candidate.file,
+    line: candidate.line,
+    rule: candidate.rule,
+    rationale: 'Controller-projected redacted scanner candidate; authenticity remains unverified pending evidence-backed specialist disposition.',
+  };
+}
+
+function sensitiveDataDispositionRows(candidates) {
+  return [...new Map(candidates.map(candidate => [candidate.inventory_key, candidate])).values()]
+    .map(sensitiveDataDispositionBootstrap);
+}
+
+module.exports = { fingerprint, piiCandidates, scanSensitiveData, secretCandidates, sensitiveDataDispositionBootstrap, sensitiveDataDispositionRows };

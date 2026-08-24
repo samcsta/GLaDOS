@@ -7,7 +7,8 @@ const { AppImageUpdater, DebUpdater, MacUpdater } = require('electron-updater');
 const { UpdateCredentialStore } = require('./lib/private-update.cjs');
 const { SetupAssistant } = require('./lib/setup-assistant.cjs');
 const { systemNetworkEnvironment } = require('./lib/network-environment.cjs');
-const { loadCompletedSecurityReview, safeEngagementId } = require('./lib/security-review-report.cjs');
+const { loadCompletedSecurityReview, resolveCompletedSecurityReview, safeEngagementId } = require('./lib/security-review-report.cjs');
+const { writeDeliverablesManifest } = require('../dashboard/lib/security-review/deliverables');
 
 const runtimeDir = path.resolve(process.env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), '.glados'));
 
@@ -55,7 +56,7 @@ function dashboardLog(message) {
 async function renderSecurityReviewPdf(engagementId, outputPath = null) {
   const id = safeEngagementId(engagementId);
   const investigationsRoot = path.resolve(process.env.GLADOS_INVESTIGATIONS_DIR || path.join(runtimeDir, 'investigations'));
-  const reviewRoot = path.resolve(investigationsRoot, id, 'security-review');
+  const reviewRoot = path.resolve(resolveCompletedSecurityReview(investigationsRoot, id));
   if (!reviewRoot.startsWith(`${investigationsRoot}${path.sep}`)) throw new Error('security-review path escapes investigations root');
   const completed = loadCompletedSecurityReview(reviewRoot);
   const destination = outputPath || path.join(reviewRoot, 'deliverables', 'security-review-report.pdf');
@@ -71,7 +72,6 @@ async function renderSecurityReviewPdf(engagementId, outputPath = null) {
     const outputs = new Set([
       path.resolve(destination),
       path.join(reviewRoot, 'deliverables', 'security-review-report.pdf'),
-      path.join(reviewRoot, 'security-review-report.pdf'),
     ]);
     for (const output of outputs) {
       fs.mkdirSync(path.dirname(output), { recursive: true, mode: 0o700 });
@@ -79,6 +79,10 @@ async function renderSecurityReviewPdf(engagementId, outputPath = null) {
       fs.writeFileSync(temporary, pdf, { mode: 0o600 });
       fs.renameSync(temporary, output);
     }
+    writeDeliverablesManifest(path.join(reviewRoot, 'deliverables'), {
+      receipt: completed.receipt,
+      completedAt: completed.run?.deepScan?.completedAt || null,
+    });
     return { path: destination, bytes: pdf.length };
   } finally {
     if (!hidden.isDestroyed()) hidden.destroy();
@@ -196,7 +200,12 @@ function startDashboard() {
       }
       if (msg?.type === 'glados-dashboard-restart-request') restartDashboard(msg.reason).catch(() => {});
       if (msg?.type === 'glados-security-review-deliverables-ready' && msg.engagementId) {
-        renderSecurityReviewPdf(msg.engagementId).catch(error => process.stderr.write(`[security-review-pdf] ${error.message}\n`));
+        try {
+          const investigationsRoot = path.resolve(process.env.GLADOS_INVESTIGATIONS_DIR || path.join(runtimeDir, 'investigations'));
+          const reviewRoot = resolveCompletedSecurityReview(investigationsRoot, msg.engagementId);
+          const pdf = path.join(reviewRoot, 'deliverables', 'security-review-report.pdf');
+          if (!fs.existsSync(pdf)) renderSecurityReviewPdf(msg.engagementId).catch(error => process.stderr.write(`[security-review-pdf] ${error.message}\n`));
+        } catch (error) { process.stderr.write(`[security-review-pdf] ${error.message}\n`); }
       }
     });
     child.once('exit', (code, signal) => {
@@ -417,10 +426,8 @@ ipcMain.handle('desktop:security-review:export-pdf', async (event, input = {}) =
     : await dialog.showSaveDialog({ title: 'Export Security Review PDF', defaultPath: path.join(reportsRoot, `${engagementId}-security-review.pdf`), filters: [{ name: 'PDF', extensions: ['pdf'] }] });
   if (selected.canceled || !selected.filePath) return { canceled: true };
   const exported = await renderSecurityReviewPdf(engagementId, selected.filePath);
-  const artifactPdf = path.join(
-    path.resolve(process.env.GLADOS_INVESTIGATIONS_DIR || path.join(runtimeDir, 'investigations')),
-    engagementId, 'security-review', 'deliverables', 'security-review-report.pdf'
-  );
+  const investigationsRoot = path.resolve(process.env.GLADOS_INVESTIGATIONS_DIR || path.join(runtimeDir, 'investigations'));
+  const artifactPdf = path.join(resolveCompletedSecurityReview(investigationsRoot, engagementId), 'deliverables', 'security-review-report.pdf');
   if (path.resolve(exported.path) !== path.resolve(artifactPdf)) {
     fs.copyFileSync(exported.path, artifactPdf);
     fs.chmodSync(artifactPdf, 0o600);

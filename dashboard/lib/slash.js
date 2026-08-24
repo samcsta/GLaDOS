@@ -36,7 +36,7 @@ function helpText() {
     for (const cmd of cmds) lines.push(`  ${cmd.padEnd(30)} ${byCmd.get(cmd) || ''}`);
   }
   lines.push('');
-  lines.push('/security-review opens the repository chooser and defaults to the expedited completion-driven workflow.');
+  lines.push('/security-review opens the repository chooser and defaults to the expedited completion-driven workflow. It discovers blind, then automatically reconciles an exact-match sealed prior review when one exists.');
   lines.push('/security-review --full opens the same chooser for the comprehensive workflow.');
   lines.push('Dashboard /security-review is separate from Claude Code CLI skills.');
   return lines.join('\n');
@@ -66,7 +66,7 @@ function parseSecurityReviewArg(value, fs = require('node:fs')) {
   const raw = String(value || '').trim();
   const modeMatches = [...raw.matchAll(/(?:^|\s)--(blind|regression|informed)(?=\s|$)/gi)];
   if (modeMatches.length > 1) return { ok: false, error: 'choose only one security-review mode: --blind, --regression, or --informed' };
-  const mode = modeMatches[0]?.[1]?.toLowerCase() || 'blind';
+  const mode = modeMatches[0]?.[1]?.toLowerCase() || 'auto';
   const timeMatches = [...raw.matchAll(/(?:^|\s)--time-limit(?:=|\s+)(\d+)(m|h)(?=\s|$)/gi)];
   if (timeMatches.length > 1) return { ok: false, error: 'choose only one security-review time limit' };
   const duration = timeMatches[0] ? Number(timeMatches[0][1]) * (timeMatches[0][2].toLowerCase() === 'h' ? 60 : 1) : null;

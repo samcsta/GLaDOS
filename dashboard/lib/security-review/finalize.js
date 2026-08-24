@@ -4,7 +4,7 @@ const path = require('node:path');
 const Database = require('better-sqlite3');
 const { REQUIRED_MODEL_ROLES, discoverySaturationCheckpoint, markDeepScanSaturated, projectSecurityReviewLedgers } = require('./deep-scan');
 const { sourceReviewGateStatus } = require('./workflow');
-const { generateSecurityReviewDeliverables } = require('./deliverables');
+const { generateSecurityReviewDeliverables, pdfCapabilityAvailable } = require('./deliverables');
 const { normalizeSecurityReviewArtifacts } = require('./normalize-artifacts');
 
 const ROLE_AGENTS = Object.freeze({
@@ -25,6 +25,8 @@ const SEALED_ARTIFACTS = Object.freeze([
   'discovery/deep/workers.jsonl',
   'discovery/deep/dedupe.json',
   'discovery/candidates.jsonl',
+  'discovery/findings.jsonl',
+  'validation/new-candidates.jsonl',
   'validation/candidate-closure.jsonl',
   'validation/attack-paths.jsonl',
   'validation/runtime-model-observations.jsonl',
@@ -39,6 +41,12 @@ const SEALED_ARTIFACTS = Object.freeze([
   'inventory/pii-history.json',
   'validation/semantic-coverage.json',
   'validation/challenge-matrix.json',
+  'tracks/authorization-access-control/findings.jsonl',
+  'tracks/data-flow-injection/findings.jsonl',
+  'tracks/secrets-history/findings.jsonl',
+  'tracks/resilience-error-handling/findings.jsonl',
+  'tracks/iac-config-manifests/findings.jsonl',
+  'tracks/cryptography-suppressions/findings.jsonl',
   'tracks/secrets-history/history-receipt.json',
   'tracks/secrets-history/sensitive-data-dispositions.jsonl',
   'validation/sensitive-data-verifications.jsonl',
@@ -81,7 +89,7 @@ function authoritativeRows(db, engagementId) {
       SELECT * FROM security_review_worker_runs WHERE engagement_id=? ORDER BY sequence
     `).all(engagementId),
     observations: db.prepare(`
-      SELECT observation_id, engagement_id, controller_job_id, agent_id, review_role, worker_id,
+      SELECT observation_id, engagement_id, controller_job_id, agent_id, review_role, worker_id, worker_tool_call_id,
              requested_model, actual_model, billed_model_name, source, request_id, gateway_model_id,
              cost_usd, observed_at, logical_model_alias, provider_model, attestation_level, gateway_call_id
       FROM security_review_model_observations WHERE engagement_id=? ORDER BY observed_at, observation_id
@@ -108,12 +116,20 @@ function securityReviewQuiescenceStatus(db, engagementId) {
   return { passed: blockers.length === 0, blockers };
 }
 
-function generateModelReceipts(observations) {
+function generateModelReceipts(observations, workers = []) {
+  const successfulDispatches = new Set(workers
+    .filter(worker => worker.status === 'SUCCEEDED' && worker.tool_call_id)
+    .map(worker => `${worker.worker_id}\0${worker.tool_call_id}`));
   return REQUIRED_MODEL_ROLES.map(role => {
     const expectedAgent = ROLE_AGENTS[role];
-    const matches = observations.filter(row => row.review_role === role
+    let matches = observations.filter(row => row.review_role === role
       && row.agent_id === expectedAgent
       && (role !== 'source-code-primary' || row.worker_id));
+    if (role === 'source-code-primary' && successfulDispatches.size) {
+      const bound = matches.filter(row => row.worker_tool_call_id
+        && successfulDispatches.has(`${row.worker_id}\0${row.worker_tool_call_id}`));
+      if (bound.length) matches = bound;
+    }
     if (!matches.length) throw new Error(`required model role ${role} has no authoritative observation`);
     const selected = matches[0];
     return {
@@ -139,6 +155,20 @@ function normalizeFinding(row) {
   delete out.finding_id;
   if (out.cvss_score == null && out.cvss?.score != null) out.cvss_score = out.cvss.score;
   if (!out.cvss_vector && out.cvss?.vector) out.cvss_vector = out.cvss.vector;
+  if (!out.cvss_vector && typeof out.cvss_v3_1 === 'string') {
+    out.cvss_vector = out.cvss_v3_1.match(/CVSS:3\.1(?:\/[A-Z]+:[A-Z])+/)?.[0];
+  }
+  if (out.cvss_score == null && typeof out.cvss_v3_1 === 'string') {
+    const score = Number(out.cvss_v3_1.match(/\(([0-9]+(?:\.[0-9]+)?)\)/)?.[1]);
+    if (Number.isFinite(score)) out.cvss_score = score;
+  }
+  if (!out.cvss_vector && typeof out.cvss_preconditions === 'string') {
+    out.cvss_vector = out.cvss_preconditions.match(/CVSS:3\.1(?:\/[A-Z]+:[A-Z])+/)?.[0];
+  }
+  if (out.cvss_score == null && typeof out.cvss_preconditions === 'string') {
+    const score = Number(out.cvss_preconditions.match(/\(([0-9]+(?:\.[0-9]+)?)\)/)?.[1]);
+    if (Number.isFinite(score)) out.cvss_score = score;
+  }
   if ((!Array.isArray(out.cwe_ids) || !out.cwe_ids.length) && Array.isArray(out.candidate_cwe_ids)) out.cwe_ids = out.candidate_cwe_ids;
   if ((!Array.isArray(out.locations) || !out.locations.length) && Array.isArray(out.exact_candidate_evidence?.locations)) out.locations = out.exact_candidate_evidence.locations;
   if (!out.counterevidence && out.exact_candidate_evidence?.counterevidence) out.counterevidence = out.exact_candidate_evidence.counterevidence;
@@ -178,16 +208,34 @@ function candidateObservationIds(artifactRoot) {
     .flatMap(row => Array.isArray(row.observation_ids) ? row.observation_ids : []))].sort();
 }
 
+function assertUniqueActiveIssueKeys(closureRows) {
+  const owners = new Map();
+  for (const row of closureRows) {
+    if (!['REPORTABLE', 'OBSERVATION'].includes(String(row.disposition || '').toUpperCase())) continue;
+    if (typeof row.issue_key !== 'string' || !row.issue_key.trim()) continue;
+    if (owners.has(row.issue_key)) {
+      throw new Error(`duplicate active issue_key ${row.issue_key}: ${owners.get(row.issue_key)} and ${row.candidate_id}`);
+    }
+    owners.set(row.issue_key, row.candidate_id);
+  }
+}
+
 function generateCanonicalFindings(artifactRoot, run) {
+  const closureRows = readJsonLines(path.join(artifactRoot, 'validation', 'candidate-closure.jsonl'));
+  assertUniqueActiveIssueKeys(closureRows);
   const expected = candidateFindingIds(artifactRoot);
   const candidateRows = readJsonLines(path.join(artifactRoot, 'discovery', 'candidates.jsonl'));
   const validatorFile = path.join(artifactRoot, 'validation', 'new-candidates.jsonl');
   if (fs.existsSync(validatorFile)) candidateRows.push(...readJsonLines(validatorFile));
   const candidates = new Map(candidateRows.map(row => [row.candidate_id, row]));
   const findingCandidates = new Map();
-  for (const row of readJsonLines(path.join(artifactRoot, 'validation', 'candidate-closure.jsonl'))) {
+  const findingClosures = new Map();
+  for (const row of closureRows) {
     if (String(row.disposition || '').toUpperCase() !== 'REPORTABLE') continue;
-    for (const findingId of row.finding_ids || []) if (!findingCandidates.has(findingId)) findingCandidates.set(findingId, row.candidate_id);
+    for (const findingId of row.finding_ids || []) if (!findingCandidates.has(findingId)) {
+      findingCandidates.set(findingId, row.candidate_id);
+      findingClosures.set(findingId, row);
+    }
   }
   const sources = [];
   for (const track of ['authorization-access-control', 'data-flow-injection', 'secrets-history', 'resilience-error-handling', 'iac-config-manifests', 'cryptography-suppressions']) {
@@ -217,6 +265,9 @@ function generateCanonicalFindings(artifactRoot, run) {
   }
   const missing = expected.filter(id => !byId.has(id));
   if (missing.length) throw new Error(`reportable findings are missing source rows: ${missing.join(', ')}`);
+  const unclosed = [...byId.keys()].filter(id => !expected.includes(id)
+    && !closureRows.some(row => row.candidate_id === id));
+  if (unclosed.length) throw new Error(`source findings are missing candidate closure: ${unclosed.join(', ')}`);
   return {
     schema_version: 1,
     producer: 'glados-security-review/v1',
@@ -224,6 +275,12 @@ function generateCanonicalFindings(artifactRoot, run) {
     repository_head: run.head,
     findings: expected.map(id => {
       const finding = normalizeFinding(byId.get(id));
+      const closure = findingClosures.get(id);
+      if (closure?.issue_key) finding.issue_key = closure.issue_key;
+      if (closure?.candidate_id) finding.candidate_id = closure.candidate_id;
+      if (closure?.minimum_attacker_access) finding.minimum_attacker_access = closure.minimum_attacker_access;
+      if (Array.isArray(closure?.preconditions)) finding.preconditions = closure.preconditions;
+      if (closure?.deployment_evidence_status) finding.deployment_evidence_status = closure.deployment_evidence_status;
       const candidate = candidates.get(findingCandidates.get(id)) || candidates.get(id);
       if (!candidate) return finding;
       if (!finding.description) finding.description = candidate.summary;
@@ -239,12 +296,41 @@ function generateCanonicalFindings(artifactRoot, run) {
 }
 
 function generateCanonicalObservations(artifactRoot, run) {
+  const closureRows = readJsonLines(path.join(artifactRoot, 'validation', 'candidate-closure.jsonl'));
+  assertUniqueActiveIssueKeys(closureRows);
   const candidateRows = readJsonLines(path.join(artifactRoot, 'discovery', 'candidates.jsonl'));
   const validatorFile = path.join(artifactRoot, 'validation', 'new-candidates.jsonl');
   if (fs.existsSync(validatorFile)) candidateRows.push(...readJsonLines(validatorFile));
   const candidates = new Map(candidateRows.map(row => [row.candidate_id, row]));
+  for (const relative of [
+    'discovery/findings.jsonl',
+    'tracks/authorization-access-control/findings.jsonl',
+    'tracks/data-flow-injection/findings.jsonl',
+    'tracks/secrets-history/findings.jsonl',
+    'tracks/resilience-error-handling/findings.jsonl',
+    'tracks/iac-config-manifests/findings.jsonl',
+    'tracks/cryptography-suppressions/findings.jsonl',
+  ]) {
+    const file = path.join(artifactRoot, relative);
+    if (!fs.existsSync(file)) continue;
+    for (const row of readJsonLines(file)) {
+      const id = row.finding_id || row.id;
+      if (!id || candidates.has(id)) continue;
+      candidates.set(id, {
+        candidate_id: id,
+        summary: row.title || row.summary,
+        cwe_ids: row.cwe_ids || [],
+        locations: row.locations || [],
+        evidence: row.source_to_sink_evidence || row.source_to_sink || row.validated_evidence || row.description,
+        reachability: row.reachability,
+        counterevidence: row.counterevidence || row.cvss_preconditions,
+        proof_gaps: row.proof_gaps || [],
+        confidence: row.confidence,
+      });
+    }
+  }
   const expected = [];
-  for (const disposition of readJsonLines(path.join(artifactRoot, 'validation', 'candidate-closure.jsonl'))) {
+  for (const disposition of closureRows) {
     if (String(disposition.disposition || '').toUpperCase() !== 'OBSERVATION') continue;
     for (const id of disposition.observation_ids || []) expected.push({ id, disposition });
   }
@@ -258,6 +344,7 @@ function generateCanonicalObservations(artifactRoot, run) {
       if (!candidate) throw new Error(`observation ${id} is missing retained candidate ${disposition.candidate_id}`);
       return {
         id,
+        ...(disposition.issue_key ? { issue_key: disposition.issue_key } : {}),
         candidate_id: disposition.candidate_id,
         title: candidate.summary,
         category: disposition.observation_category || 'conditional-security-observation',
@@ -265,11 +352,17 @@ function generateCanonicalObservations(artifactRoot, run) {
         recommendation: disposition.recommendation || `Resolve the proof gaps and harden the cited ${candidate.cwe_ids?.[0] || 'security'} control.`,
         cwe_ids: candidate.cwe_ids,
         locations: candidate.locations,
-        evidence: candidate.evidence,
-        reachability: candidate.reachability,
-        counterevidence: candidate.counterevidence,
-        proof_gaps: candidate.proof_gaps,
-        confidence: candidate.confidence,
+        // observations.json is a controller-owned projection. Validation may
+        // strengthen these fields in candidate closure without rewriting the
+        // receipt-bound discovery candidate, so retain the canonical candidate
+        // value when present and otherwise project the validator's disposition.
+        evidence: candidate.evidence || disposition.evidence,
+        reachability: candidate.reachability || disposition.reachability,
+        counterevidence: candidate.counterevidence || disposition.counterevidence,
+        proof_gaps: Array.isArray(candidate.proof_gaps) && candidate.proof_gaps.length
+          ? candidate.proof_gaps
+          : disposition.proof_gaps,
+        confidence: candidate.confidence || disposition.confidence,
       };
     }),
   };
@@ -306,9 +399,12 @@ function generateCanonicalCoverage(artifactRoot, run) {
 
 function sealSecurityReview(artifactRoot, run, engagementId) {
   if (run?.deepScan?.terminalState !== 'SATURATED') throw new Error('refusing to seal security review before run reaches SATURATED');
-  const missing = SEALED_ARTIFACTS.filter(relative => !fs.existsSync(path.join(artifactRoot, relative)));
+  const sealedArtifacts = fs.existsSync(path.join(artifactRoot, 'regression', 'prior-context.json'))
+    ? [...SEALED_ARTIFACTS, 'regression/prior-context.json']
+    : [...SEALED_ARTIFACTS];
+  const missing = sealedArtifacts.filter(relative => !fs.existsSync(path.join(artifactRoot, relative)));
   if (missing.length) throw new Error(`refusing to seal security review with missing artifacts: ${missing.join(', ')}`);
-  const artifactSha256 = Object.fromEntries(SEALED_ARTIFACTS.map(relative => [relative, sha256(path.join(artifactRoot, relative))]));
+  const artifactSha256 = Object.fromEntries(sealedArtifacts.map(relative => [relative, sha256(path.join(artifactRoot, relative))]));
   const manifest = {
     schema_version: 1,
     producer: 'glados-security-review/v1',
@@ -332,10 +428,37 @@ function invalidateSecurityReviewSeal(artifactRoot) {
   }
 }
 
+function finalizationFailure(retryMode, blockers, extra = {}) {
+  return {
+    passed: false,
+    recoverable: retryMode !== 'none',
+    retryMode,
+    blockers,
+    ...extra,
+  };
+}
+
+function writePreflight(artifactRoot, phase, blockers) {
+  const relative = path.join('controller', 'preflight.json');
+  writeJson(path.join(artifactRoot, relative), {
+    schema_version: 1,
+    producer: 'glados-security-review/v1',
+    phase,
+    blocker_count: blockers.length,
+    blockers,
+    generated_at: new Date().toISOString(),
+  });
+  return relative;
+}
+
 function finalizeSecurityReview({ db, artifactRoot, engagementId, campaignExpected = false }) {
   const quiescence = securityReviewQuiescenceStatus(db, engagementId);
-  if (!quiescence.passed) return { passed: false, recoverable: true, blockers: quiescence.blockers };
+  if (!quiescence.passed) {
+    return finalizationFailure('controller', quiescence.blockers, { phase: 'runtime-settlement' });
+  }
+  let phase = 'controller-projection';
   try {
+    invalidateSecurityReviewSeal(artifactRoot);
     projectSecurityReviewLedgers({ db, artifactRoot, engagementId });
     const authority = authoritativeRows(db, engagementId);
     const runFile = path.join(artifactRoot, 'run.json');
@@ -343,24 +466,28 @@ function finalizeSecurityReview({ db, artifactRoot, engagementId, campaignExpect
     run.engagementId = engagementId;
     if (run?.deepScan?.terminalState !== 'SATURATED') {
       if (run?.deepScan?.terminalState !== 'RUNNING') {
-        return { passed: false, recoverable: false, blockers: [`run.json.deepScan.terminalState is ${run?.deepScan?.terminalState || '(missing)'}, expected RUNNING or SATURATED`] };
+        return finalizationFailure('none', [`run.json.deepScan.terminalState is ${run?.deepScan?.terminalState || '(missing)'}, expected RUNNING or SATURATED`], { phase: 'lifecycle' });
       }
       const saturation = discoverySaturationCheckpoint(artifactRoot);
       if (!saturation.passed) {
-        return { passed: false, recoverable: false, blockers: saturation.invalid.length
+        const blockers = saturation.invalid.length
           ? saturation.invalid
-          : [`run.json.deepScan.terminalState is ${run?.deepScan?.terminalState || '(missing)'}, expected SATURATED`] };
+          : [`run.json.deepScan.terminalState is ${run?.deepScan?.terminalState || '(missing)'}, expected SATURATED`];
+        const preflight = writePreflight(artifactRoot, 'discovery', blockers);
+        return finalizationFailure('model', blockers, { phase: 'discovery', preflight });
       }
       markDeepScanSaturated(artifactRoot);
       run = readJson(runFile);
       run.engagementId = engagementId;
     }
+    phase = 'model-artifact-normalization';
     normalizeSecurityReviewArtifacts(artifactRoot);
-    writeJsonLines(path.join(artifactRoot, 'validation', 'model-receipts.jsonl'), generateModelReceipts(authority.observations));
-    writeJson(path.join(artifactRoot, 'findings.json'), generateCanonicalFindings(artifactRoot, run));
-    writeJson(path.join(artifactRoot, 'observations.json'), generateCanonicalObservations(artifactRoot, run));
-    writeJson(path.join(artifactRoot, 'coverage.json'), generateCanonicalCoverage(artifactRoot, run));
-    invalidateSecurityReviewSeal(artifactRoot);
+    writeJsonLines(path.join(artifactRoot, 'validation', 'model-receipts.jsonl'), generateModelReceipts(authority.observations, authority.workers));
+    // Validate every model-owned source artifact before generating controller
+    // projections. Canonical finding generation deliberately rejects semantic
+    // conflicts (for example duplicate active issue keys); doing it first
+    // would mask the rest of the pre-seal blocker set and force needless
+    // one-error-at-a-time continuation turns.
     const preSealGate = sourceReviewGateStatus(artifactRoot, {
       authoritativeWorkerRuns: authority.workers,
       authoritativeModelObservations: authority.observations,
@@ -369,8 +496,14 @@ function finalizeSecurityReview({ db, artifactRoot, engagementId, campaignExpect
     });
     if (preSealGate.missing.length || preSealGate.invalid.length) {
       const gate = { ...preSealGate, passed: false };
-      return { passed: false, recoverable: false, blockers: [...gate.missing, ...gate.invalid], gate };
+      const blockers = [...gate.missing, ...gate.invalid];
+      const preflight = writePreflight(artifactRoot, 'pre-seal-gates', blockers);
+      return finalizationFailure('model', blockers, { phase: 'pre-seal-gates', gate, preflight });
     }
+    writeJson(path.join(artifactRoot, 'findings.json'), generateCanonicalFindings(artifactRoot, run));
+    writeJson(path.join(artifactRoot, 'observations.json'), generateCanonicalObservations(artifactRoot, run));
+    writeJson(path.join(artifactRoot, 'coverage.json'), generateCanonicalCoverage(artifactRoot, run));
+    phase = 'sealing';
     sealSecurityReview(artifactRoot, run, engagementId);
     const gate = sourceReviewGateStatus(artifactRoot, {
       authoritativeWorkerRuns: authority.workers,
@@ -379,40 +512,77 @@ function finalizeSecurityReview({ db, artifactRoot, engagementId, campaignExpect
     });
     if (!gate.passed) {
       invalidateSecurityReviewSeal(artifactRoot);
-      return { passed: false, recoverable: false, blockers: [...gate.missing, ...gate.invalid], gate };
+      return finalizationFailure('model', [...gate.missing, ...gate.invalid], { phase: 'post-seal-verification', gate });
     }
+    phase = 'deliverables';
     try {
-      generateSecurityReviewDeliverables(artifactRoot);
+      const requirePdf = pdfCapabilityAvailable();
+      const delivery = generateSecurityReviewDeliverables(artifactRoot, { includePdf: requirePdf });
+      const required = [
+        'README.md',
+        'EXECUTIVE-SUMMARY.md',
+        'SECURITY-REVIEW.md',
+        'OBSERVATIONS.md',
+        'HISTORICAL-REGRESSION.md',
+        'COVERAGE-AND-LIMITATIONS.md',
+        'REMEDIATION-PLAN.md',
+        'security-review-report.html',
+        'completion-receipt.json',
+        'scan-manifest.json',
+        'DELIVERABLES-MANIFEST.json',
+        ...(requirePdf ? ['security-review-report.pdf'] : []),
+      ];
+      const missing = required.filter(relative => !fs.existsSync(path.join(delivery.deliveryRoot, relative)));
+      if (missing.length) throw new Error(`deliverable generation omitted required files: ${missing.join(', ')}`);
+      for (const [relative, digest] of Object.entries(delivery.manifest.files || {})) {
+        const file = path.join(delivery.deliveryRoot, relative);
+        if (!fs.existsSync(file) || sha256(file) !== digest) throw new Error(`deliverable manifest digest mismatch for ${relative}`);
+      }
     } catch (error) {
-      invalidateSecurityReviewSeal(artifactRoot);
-      throw error;
+      const blockers = [`deliverables: ${error.message}`];
+      const preflight = writePreflight(artifactRoot, 'deliverables', blockers);
+      return finalizationFailure('controller', blockers, { phase: 'deliverables', gate, preflight });
     }
-    return { passed: gate.passed, recoverable: false, blockers: [...gate.missing, ...gate.invalid], gate };
+    fs.rmSync(path.join(artifactRoot, 'controller', 'preflight.json'), { force: true });
+    return {
+      passed: true,
+      recoverable: false,
+      retryMode: 'none',
+      blockers: [],
+      gate,
+    };
   } catch (error) {
-    return { passed: false, recoverable: false, blockers: [error.message] };
+    const retryMode = phase === 'model-artifact-normalization' ? 'model' : phase === 'deliverables' ? 'controller' : 'none';
+    return finalizationFailure(retryMode, [error.message], { phase });
   }
 }
 
 function revalidateFailedSecurityReview({ dbPath, artifactRoot, engagementId }) {
   const db = new Database(dbPath);
   try {
-    const job = db.prepare(`
-      SELECT * FROM controller_jobs WHERE engagement_id=? AND job_type='security_review_workflow_v3' ORDER BY created_at DESC LIMIT 1
-    `).get(engagementId);
-    if (!job) throw new Error(`security-review job not found for ${engagementId}`);
-    const goal = job.goal_id ? db.prepare('SELECT * FROM controller_goals WHERE id=?').get(job.goal_id) : null;
-    const result = finalizeSecurityReview({ db, artifactRoot, engagementId, campaignExpected: false });
-    if (!result.passed) return result;
-    const stamp = new Date().toISOString();
-    db.transaction(() => {
-      db.prepare("UPDATE controller_jobs SET status='succeeded', error=NULL, finished_at=?, updated_at=? WHERE id=?").run(stamp, stamp, job.id);
-      if (goal) db.prepare("UPDATE controller_goals SET status='complete', completed_at=?, updated_at=? WHERE id=?").run(stamp, stamp, goal.id);
-      db.prepare("UPDATE engagements SET status='complete', completed_at=? WHERE id=?").run(stamp, engagementId);
-      db.prepare(`INSERT INTO controller_events (goal_id,job_id,event_type,message,data_json) VALUES (?,?,'security_review_revalidated',?,?)`)
-        .run(job.goal_id || null, job.id, `Revalidated and resealed ${engagementId} without model execution.`, JSON.stringify({ engagement_id: engagementId }));
-    })();
-    return result;
+    return revalidateSecurityReview({ db, artifactRoot, engagementId });
   } finally { db.close(); }
+}
+
+function revalidateSecurityReview({ db, artifactRoot, engagementId, campaignExpected = false }) {
+  const job = db.prepare(`
+    SELECT * FROM controller_jobs WHERE engagement_id=? AND job_type='security_review_workflow_v3' ORDER BY created_at DESC LIMIT 1
+  `).get(engagementId);
+  if (!job) throw new Error(`security-review job not found for ${engagementId}`);
+  const goal = job.goal_id ? db.prepare('SELECT * FROM controller_goals WHERE id=?').get(job.goal_id) : null;
+  const result = finalizeSecurityReview({ db, artifactRoot, engagementId, campaignExpected });
+  if (!result.passed) return result;
+  const stamp = new Date().toISOString();
+  db.transaction(() => {
+    db.prepare("UPDATE controller_jobs SET status='succeeded', error=NULL, finished_at=?, updated_at=? WHERE id=?").run(stamp, stamp, job.id);
+    if (goal) db.prepare("UPDATE controller_goals SET status='complete', completed_at=?, updated_at=? WHERE id=?").run(stamp, stamp, goal.id);
+    db.prepare("UPDATE engagements SET status='complete', completed_at=? WHERE id=?").run(stamp, engagementId);
+    db.prepare(`UPDATE tasks SET status='cancelled', result=COALESCE(result, 'controller reconciled redundant nonterminal task after successful sealed review'), updated_at=?
+      WHERE engagement_id=? AND status NOT IN ('completed','failed','cancelled')`).run(stamp, engagementId);
+    db.prepare(`INSERT INTO controller_events (goal_id,job_id,event_type,message,data_json) VALUES (?,?,'security_review_revalidated',?,?)`)
+      .run(job.goal_id || null, job.id, `Revalidated and resealed ${engagementId} without model execution.`, JSON.stringify({ engagement_id: engagementId }));
+  })();
+  return result;
 }
 
 module.exports = {
@@ -424,6 +594,7 @@ module.exports = {
   generateModelReceipts,
   invalidateSecurityReviewSeal,
   revalidateFailedSecurityReview,
+  revalidateSecurityReview,
   sealSecurityReview,
   securityReviewQuiescenceStatus,
 };

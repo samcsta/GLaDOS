@@ -11,6 +11,6 @@ if (!ids.length) {
 }
 for (const engagementId of ids) {
   const artifactRoot = path.join(GLADOS_INVESTIGATIONS_DIR, engagementId, 'security-review');
-  const result = generateSecurityReviewDeliverables(artifactRoot);
+  const result = generateSecurityReviewDeliverables(artifactRoot, { includePdf: true });
   process.stdout.write(`${JSON.stringify({ engagementId, deliveryRoot: result.deliveryRoot })}\n`);
 }

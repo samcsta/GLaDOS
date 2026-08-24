@@ -2,6 +2,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   REQUIRED_DEEP_ARTIFACTS,
+  SECURITY_REVIEW_CONTRACT_REVISION,
+  SECURITY_REVIEW_ORCHESTRATION_REVISION,
   normalizeDeepScanConfig,
   validateDeepScanArtifacts,
 } = require('./deep-scan');
@@ -45,6 +47,22 @@ const SEMANTIC_REVIEW_CHECKS = [
     requirement: 'Verify ownership and authorization predicates are applied before Create, Save, Update, and Delete execute; fluent calls after a terminal mutation do not constrain it.',
   },
   {
+    id: 'privileged-ci-event-boundaries',
+    requirement: 'Trace untrusted pull-request, fork, comment, and manual-dispatch events to every privileged plan/apply identity, secret, approval, and repository-write boundary.',
+  },
+  {
+    id: 'immutable-executable-dependencies',
+    requirement: 'Inventory executable CI actions, Terraform modules, task bundles, images, and resolvers; prove each production dependency is content-addressed or pinned to an immutable full digest or commit.',
+  },
+  {
+    id: 'least-privilege-role-intent',
+    requirement: 'Compare human-facing role names and descriptions with every granted permission, including destructive, identity-provider, credential, and administrative operations.',
+  },
+  {
+    id: 'deployment-trigger-dependency-closure',
+    requirement: 'Prove change filters and deployment triggers include every local module, task, manifest, policy, and generated input that can alter the deployed result.',
+  },
+  {
     id: 'deployment-reachability-claims',
     requirement: 'Separate static configuration presence from observed deployment state and exploitation; every active-production claim needs runtime evidence or must be phrased conditionally.',
   },
@@ -59,7 +77,23 @@ const TERMINAL_SEMANTIC_STATUSES = new Set(['FINDING', 'TESTED_NEGATIVE', 'NOT_A
 const TERMINAL_REFERRAL_STATUSES = new Set([...TERMINAL_SEMANTIC_STATUSES, 'OBSERVATION']);
 
 function securityReviewArtifactRoot(runtimeDir, engagementId) {
-  return path.join(runtimeDir, 'investigations', engagementId, 'security-review');
+  const investigationsRoot = path.join(runtimeDir, 'investigations');
+  const exact = path.join(investigationsRoot, engagementId, 'security-review');
+  if (fs.existsSync(path.join(exact, 'run.json'))) return exact;
+  let entries = [];
+  try { entries = fs.readdirSync(investigationsRoot, { withFileTypes: true }); } catch { return exact; }
+  const matches = entries.filter(entry => entry.isDirectory() && !entry.name.startsWith('.')).map(entry => {
+    const reviewRoot = path.join(investigationsRoot, entry.name, 'security-review');
+    for (const relative of ['completion-receipt.json', 'scan-manifest.json', 'findings.json', 'observations.json']) {
+      try {
+        const document = JSON.parse(fs.readFileSync(path.join(reviewRoot, relative), 'utf8'));
+        if (document.engagement_id === engagementId) return reviewRoot;
+      } catch {}
+    }
+    return null;
+  }).filter(Boolean);
+  if (matches.length > 1) throw new Error(`security-review engagement id ${engagementId} is ambiguous across renamed folders`);
+  return matches[0] || exact;
 }
 
 function securityReviewCoordinatorPrompt({
@@ -103,6 +137,7 @@ function securityReviewCoordinatorPrompt({
       : [
           'CONTEXT MODE: INFORMED',
           '- Run blind discovery first without exposing prior finding details to the blind task, then perform mandatory historical regression with matched prior context.',
+          `- The controller matched and sanitized prior context at ${path.join(artifactRoot, 'regression', 'prior-context.json')}. Only the coordinator and dedicated historical-regression task may read it, and only after blind discovery has saturated.`,
         ];
   return [
     'SOURCE SECURITY REVIEW WORKFLOW v4 — DEEP COORDINATOR CONTRACT',
@@ -110,6 +145,8 @@ function securityReviewCoordinatorPrompt({
     `engagement_id: ${engagementId}`,
     `controller_goal_id: ${goalId}`,
     `artifact_root: ${artifactRoot}`,
+    `contract_revision: ${SECURITY_REVIEW_CONTRACT_REVISION}`,
+    `orchestration_revision: ${SECURITY_REVIEW_ORCHESTRATION_REVISION}`,
     `context_mode: ${mode}`,
     `review_profile: ${profile}`,
     `campaign_manifest: ${campaign ? 'portfolio/repositories.json' : 'none'}`,
@@ -122,7 +159,7 @@ function securityReviewCoordinatorPrompt({
     'Do not deliver conclusions after one broad pass. Run the ordered workflow below and preserve each artifact.',
     '',
     'Stage 1 — Intake and context controls:',
-    '- The controller already created the engagement, run.json, intake/scope.json, and deterministic inventory. Never call blackboard_engagement_create and never replace controller-owned intake state. Verify and consume it.',
+    '- The controller already created the engagement, run.json, intake/scope.json, deterministic inventory, and an exact-set discovery/coverage-ledger.jsonl bootstrap. Never call blackboard_engagement_create and never replace controller-owned intake state. Verify and consume it.',
     '- For a Git work tree, retain repository root, branch, HEAD commit, dirty state, explicit scope, and exclusions. For a directory snapshot, retain sourceType=directory-snapshot, the canonical snapshot revision, gitHistoryAvailable=false, and the exact history blocker; do not run Git.',
     mode === 'blind'
       ? '- Record that historical lookup is prohibited by operator request; do not enumerate prior reports.'
@@ -131,32 +168,35 @@ function securityReviewCoordinatorPrompt({
     'Stage 2 — Deterministic inventory:',
     '- Require a complete sorted file manifest, route inventory, linter suppression inventory, crypto-operation inventory, HTTP-client inventory, security-sensitive semantic candidate inventory, HEAD secrets-scan receipt, and git-history secrets-scan receipt.',
     '- Every manifest, deployment overlay, Terraform module, CI task, configuration, and script must be enumerated. Sampling is prohibited.',
+    '- The controller-owned coverage bootstrap contains one DEFERRED row per manifest path so bulk projection never depends on model tooling. Replace each DEFERRED disposition and bootstrap review_method only with evidence-backed file review; DEFERRED rows cannot pass completion.',
     '- A directory snapshot without .git metadata is valid. Use its deterministic snapshot hash as the immutable revision and record Git-history scanning as unavailable with the exact blocker; do not reject the review.',
     '- Snapshot verification is harness-owned and uses the canonical inventory algorithm. Never recompute the revision with find|shasum, textual per-file digests, or a custom aggregate. Derive every source path from inventory/files.jsonl and do not guess conventional directories.',
-    '- Sensitive-data closure: inventory/sensitive-data-head.json and inventory/pii-head.json contain redacted candidates. The secrets-history specialist must write tracks/secrets-history/sensitive-data-dispositions.jsonl with exactly one row per inventory_key. Classify pattern/reference/container/schema/literal presence separately from validity. Never claim VALID_SECRET or CONFIRMED_PII unless validation/sensitive-data-verifications.jsonl already contains a matching controller-owned, redacted verification_id. Never write a value, fragment, prefix, suffix, request body, or response body.',
+    '- Sensitive-data closure: inventory/sensitive-data-head.json and inventory/pii-head.json contain redacted candidates, and the controller projects their exact keys into tracks/secrets-history/sensitive-data-dispositions.jsonl as UNVERIFIED. The secrets-history specialist must evidence any status changes without replacing that canonical set. Classify pattern/reference/container/schema/literal presence separately from validity. Never claim VALID_SECRET or CONFIRMED_PII unless validation/sensitive-data-verifications.jsonl already contains a matching controller-owned, redacted verification_id. Never write a value, fragment, prefix, suffix, request body, or response body.',
     '',
     'Stage 3 — Threat model and repeated blind discovery:',
-    '- First write context/threat-model.json with summary, trust_boundaries, entry_points, assets, attacker_goals, and priority_hypotheses. Derive it only from this repository and the operator-declared scope.',
+    '- First write context/threat-model.json with summary, trust_boundaries, entry_points, assets, attacker_goals, priority_hypotheses, and attacker_profiles. Each attacker profile requires id, minimum_access, entry_points, and goals. Include realistic low-privilege authenticated users, authorized or compromised contributors, workforce/insider actors, and dependency publishers or registries whenever the source exposes those boundaries; do not limit the review to unauthenticated Internet attackers. Derive it only from this repository and the operator-declared scope.',
     `- Run at least ${scan.minDiscoveryRuns} successful source-code discovery attempts, stopping only after ${scan.stopAfterNoNew} consecutive successful attempts add no canonical candidates.${scan.maxDiscoveryRuns == null ? ' This completion-driven profile has no fixed discovery-attempt ceiling.' : ` Never start more than ${scan.maxDiscoveryRuns} attempts.`} Never continue after an operator-set deadline in run.json.`,
     campaign
       ? `- Campaign saturation cannot be evaluated until all ${campaign.repository_count} required breadth workers have succeeded and are present in centralized deduplication. A no-new streak reached before the breadth wave ends is not saturation.`
       : '- Saturation is evaluated across the single assessed source tree after the minimum successful run count.',
     `- Coordinator dispatch boundary: GLaDOS owns orchestration and aggregation. Dispatch discovery in ordered batches of up to ${scan.discoveryConcurrency} synchronous Agent SDK source-code tasks in one assistant response so the SDK runs that batch concurrently. Never ask one source-code task to run the complete workflow, multiple discovery workers, validation, or multiple specialist tracks. Each worker writes only its own directory. After the full batch returns, the harness materializes terminal rows; run centralized deduplication strictly by worker ordinal and immediately dispatch the next permitted batch. Never pause for operator approval between batches. Continue autonomously until saturation or a real terminal blocker. Never let completion order alter canonical ordering or saturation. Never invent, predict, alias, or use a placeholder observation ID.`,
     '- Every blind-discovery Agent SDK task prompt must begin with these three standalone machine-readable lines exactly: security_review_role: blind-discovery; worker_id: worker-NNN; artifact_root: <the absolute artifact_root above>. Put each field on its own line with no bullets, backticks, trailing punctuation, aliases such as "Artifact root", or surrounding prose. The runtime denies dispatch when any header is missing or noncanonical.',
-    '- Every attempt is a durable harness-owned worker. A worker writes only discovery/deep/<worker_id>/candidates.jsonl and discovery/deep/<worker_id>/receipt.json. The legacy discovery/workers path is prohibited. Neither workers nor the coordinator may create or edit discovery/deep/workers.jsonl or validation/runtime-model-observations.jsonl; the harness projects both from controller-owned runtime state.',
+    '- If a discovery worker fails or is canceled, do not reuse its worker_id. The next dispatch must use the next sequential worker-NNN and add a fourth standalone line `retry_of: worker-NNN` naming the unresolved failed worker. Retry unresolved workers before starting ordinary new coverage attempts.',
+    '- Every attempt is a durable harness-owned worker. A worker writes only discovery/deep/<worker_id>/candidates.jsonl. The harness computes the exact-byte SHA-256 and atomically creates discovery/deep/<worker_id>/receipt.json after the dispatch ends. Workers and the coordinator must never create or edit that receipt. The legacy discovery/workers path is prohibited. Neither workers nor the coordinator may create or edit discovery/deep/workers.jsonl or validation/runtime-model-observations.jsonl; the harness projects both from controller-owned runtime state.',
     '- A failed or canceled worker must be retried successfully or listed in discovery/deep/manifest.json omitted_workers with a concrete reason. A missing worker result is a failure, not zero findings.',
-    '- Each successful worker writes its own candidates.jsonl plus receipt.json. The receipt schema is exactly {"worker_id":"worker-NNN","status":"SUCCEEDED","candidate_count":N,"candidates_sha256":"<64 lowercase hex>"}. Empty candidate files are valid successful results. COMPLETED, CLEAN, and prose-only receipts are invalid.',
+    '- Each successful worker writes candidates.jsonl, including an empty file for a successful no-new result. The harness-owned receipt schema is exactly {"worker_id":"worker-NNN","status":"SUCCEEDED","candidate_count":N,"candidates_sha256":"<64 lowercase hex>"}. A missing candidate file is a failed worker; workers must not guess, calculate, or write receipt digests.',
     '- Dispatch source-code without prior-finding titles, CWEs, paths, conclusions, or any existing report content. Vary each discovery prompt by threat-model hypothesis, vulnerability class, trust boundary, and previously under-reviewed surface; do not merely repeat identical broad prompts.',
-    '- Require findings with file:line, source-to-sink trace, reachability, attack assumptions, confidence, and CVSS preconditions.',
+    '- Require findings with file:line, source-to-sink trace, reachability, attack assumptions, confidence, and CVSS preconditions. Separate the source-confirmed weakness from minimum attacker access, additional environmental/deployment preconditions, and observed exploitability. Never state that an attacker has a JWT, network position, registry access, or deployment reachability unless retained evidence establishes it.',
     '- Require tested-negative claims at exact file:line ranges. Package-level or directory-level CLEAN claims are invalid.',
     '- Every raw and canonical candidate uses this exact shape: {"candidate_id":"worker-NNN-CNNN","cwe_ids":["CWE-N"],"locations":[{"path":"repo/relative/file","start_line":1,"end_line":1,"role":"source|control|sink|evidence"}],"summary":"...","evidence":"...","control":"...","sink":"...","reachability":"...","counterevidence":"...","proof_gaps":[],"confidence":"high|medium|low"}. Raw candidate IDs must match their worker exactly (for example worker-001-C0001). Do not add a category token to the ID or substitute file/line/symbol keys, absolute paths, or prose line ranges.',
-    '- After every successful attempt, run centralized deduplication. Write discovery/deep/dedupe.json using exactly {"input_worker_ids":["worker-001"],"mappings":[{"worker_id":"worker-001","source_candidate_id":"worker-001-C0001","canonical_candidate_id":"worker-001-C0001","rationale":"..."}],"new_candidate_counts":{"worker-001":1},"no_new_streak":0}. input_worker_ids must contain all successful workers in sequence order; every raw candidate must appear in exactly one mapping; new_candidate_counts is the count of canonical candidates first introduced by each worker; no_new_streak is the computed trailing zero count. Do not use successful_input_worker_ids, raw_candidate_id, first_introduction_new_candidate_counts, or trailing_no_new_streak.',
-    '- Preserve the harness-created discovery/deep/manifest.json fields schema_version, status, config, started_at, deadline_at, and omitted_workers. Do not replace that file with a different schema. Add completed_at and set status to SATURATED only after the no-new threshold and every hard gate pass; set status to CAPPED only when the deadline or run ceiling is reached.',
-    '- Write the canonical union to discovery/candidates.jsonl. Location-only or title-only similarity cannot silently merge distinct vulnerability instances. Preserve contrary evidence and proof gaps during merges.',
+    '- After every successful attempt, run centralized deduplication. Treat aggregation as an ordered commit: first write the complete canonical union to discovery/candidates.jsonl, wait for that write to return, then write discovery/deep/dedupe.json last as the commit marker, wait for it to return, and only then dispatch another worker batch in a later assistant response. Never dispatch a worker in the same response as either aggregate write.',
+    '- Write discovery/deep/dedupe.json using exactly {"input_worker_ids":["worker-001"],"mappings":[{"worker_id":"worker-001","source_candidate_id":"worker-001-C0001","canonical_candidate_id":"worker-001-C0001","rationale":"..."}],"new_candidate_counts":{"worker-001":1},"no_new_streak":0}. input_worker_ids must contain all successful workers in sequence order; every raw candidate must appear in exactly one mapping; new_candidate_counts is the count of canonical candidates first introduced by each worker; no_new_streak is the computed trailing zero count. Do not use successful_input_worker_ids, raw_candidate_id, first_introduction_new_candidate_counts, or trailing_no_new_streak.',
+    '- Preserve the harness-created discovery/deep/manifest.json fields schema_version, status, config, started_at, deadline_at, and omitted_workers. Do not replace that file or change its lifecycle status. After the no-new threshold is proven, leave run.json and the manifest RUNNING; the harness atomically transitions both to SATURATED when post-discovery dispatch begins. Only the harness may set CAPPED when the deadline or run ceiling is reached.',
+    '- The canonical union in discovery/candidates.jsonl must already be complete before committing discovery/deep/dedupe.json. Location-only or title-only similarity cannot silently merge distinct vulnerability instances. Preserve contrary evidence and proof gaps during merges.',
     '',
     `Stage 4 — Independent specialist tracks: ${SPECIALIST_TRACKS.join(', ')}.`,
     `- After discovery saturation, dispatch specialist tracks in batches of up to ${scan.specialistConcurrency} separate synchronous source-code Agent SDK tasks in one assistant response. The SDK runs each batch concurrently. A returned primary worker cannot satisfy a specialist track, even if its broad pass discussed that class.`,
-    '- Put `security_review_role: <exact-track-name>` in every specialist task prompt. Put `security_review_role: blind-discovery` and the exact worker_id in each discovery prompt, and `security_review_role: source-review-validator` in the validator prompt. Runtime model attribution depends on these durable role labels.',
+    '- Put `security_review_role: <exact-track-name>` in every specialist task prompt. Put `security_review_role: blind-discovery` and the exact worker_id in each discovery prompt, `security_review_role: historical-regression` in the regression task, and `security_review_role: source-review-validator` in the validator prompt. Runtime model attribution depends on these durable role labels.',
     '- Authorization must produce a route/method/authn/scope/ownership/repository-filter matrix and trace handler -> service -> repository/ORM operation.',
     '- Secrets must inspect HEAD and git history while redacting values.',
     '- IaC must disposition every base and production overlay file.',
@@ -175,13 +215,14 @@ function securityReviewCoordinatorPrompt({
     'Stage 5 — Historical regression (mode-controlled):',
     mode === 'blind'
       ? '- SKIP. Write regression/delta.json with status NOT_REQUESTED_BLIND_MODE and no prior-finding content.'
-      : '- Provide permitted prior context to a dedicated source-code task. Every historical finding must be CONFIRMED, CONFIRMED_FIXED, CONFIRMED_PARTIAL_FIX, NOT_IN_CURRENT_TREE, or BLOCKED with exact evidence.',
+      : '- After blind discovery saturates, provide regression/prior-context.json only to a dedicated source-code task whose prompt contains the standalone line `security_review_role: historical-regression`. Write regression/delta.json as {"status":"COMPLETE","dispositions":[{"prior_finding_id":"F-1","disposition":"CONFIRMED|CONFIRMED_FIXED|CONFIRMED_PARTIAL_FIX|NOT_IN_CURRENT_TREE|BLOCKED","evidence":"exact current-source evidence"}]}, with exact prior-finding set equality.',
     '',
     'Stage 6 — Omission-focused independent validation:',
-    '- Dispatch source-review-validator. It must inventory independently, inspect source rather than trust the primary coverage ledger, challenge every semantic check and candidate disposition, search for omitted vulnerability classes, and produce validation/challenge-matrix.json plus the final validation/semantic-coverage.json. Any newly discovered validator candidate must be written to validation/new-candidates.jsonl with the canonical candidate schema and must enter candidate closure and attack-path analysis; it may not appear only as an unproven NEW-* closure row.',
+    '- Dispatch source-review-validator. It must inventory independently, inspect source rather than trust the primary coverage ledger, challenge every semantic check, candidate disposition, and discovery/specialist finding, search for omitted vulnerability classes, and produce validation/challenge-matrix.json plus the final validation/semantic-coverage.json. Every source finding must receive exactly one terminal validator outcome and candidate/attack-path closure using its finding_id when no canonical candidate link exists. Any newly discovered validator candidate must be written to validation/new-candidates.jsonl with the canonical candidate schema and must have exactly one NEW challenge outcome carrying the same candidate_id before entering candidate closure and attack-path analysis.',
     '- High/Critical findings require independent reproduction from source. Record primary and validator model aliases. If models match, record a model-diversity blocker for operator review.',
-    '- Centralize every canonical candidate in validation/candidate-closure.jsonl with exactly one terminal disposition: REPORTABLE, OBSERVATION, SUPPRESSED, NOT_APPLICABLE, or DEFERRED. REPORTABLE requires a distinct evidence-backed attack path and finding_ids. OBSERVATION requires observation_ids, observation_category, and reportability_rationale naming the unproven attacker capability, deployment reachability, inherited control, or impact. Preserve validation method, evidence, counterevidence, and proof gaps.',
-    '- Analyze every canonical candidate in validation/attack-paths.jsonl with exactly one REPORTABLE, OBSERVATION, IGNORE, NOT_APPLICABLE, or DEFERRED decision, plus concrete reachability and rationale. Merge duplicate candidates that do not establish distinct attack paths; do not inflate the vulnerability count with repeated supply-chain variants or impact multipliers.',
+    '- Reportability rule: a source-confirmed security-control weakness with a plausible attacker profile and security impact is REPORTABLE even when current deployment, exploitation, or possession of the required authorized access is unobserved. Treat those facts as explicit preconditions and confidence/severity inputs. Do not demote a source-confirmed weakness solely because the minimum attacker is authenticated, an authorized contributor, a workforce member, an insider, or a dependency publisher. Unknown external controls reduce confidence and remain proof gaps; they do not prove the source weakness harmless. CVSS >=9 still requires a proven reachable unauthenticated path or equivalent extraordinary impact.',
+    '- Centralize every canonical candidate in validation/candidate-closure.jsonl with exactly one terminal disposition: REPORTABLE, OBSERVATION, SUPPRESSED, NOT_APPLICABLE, or DEFERRED. Every active REPORTABLE/OBSERVATION row requires one stable issue_key. REPORTABLE requires finding_ids containing exactly one ID, source_weakness_status=SOURCE_CONFIRMED, minimum_attacker_access, preconditions, and deployment_evidence_status=SOURCE_CONFIGURED|DEPLOYMENT_UNVERIFIED|RUNTIME_CONFIRMED. OBSERVATION requires observation_ids containing exactly one ID, source_weakness_status=NOT_ESTABLISHED|HARDENING_ONLY|OPERATIONAL_ONLY, missing_reportability_element=SECURITY_CONTROL_FAILURE|PLAUSIBLE_ATTACKER|SECURITY_IMPACT, observation_category, and reportability_rationale. Preserve validation method, evidence, counterevidence, and proof gaps.',
+    '- Analyze every canonical candidate in validation/attack-paths.jsonl with exactly one REPORTABLE, OBSERVATION, IGNORE, NOT_APPLICABLE, or DEFERRED decision, plus concrete reachability and rationale matching the closure disposition. Merge duplicate candidates that share one root cause and attack path under one issue_key, even when different tracks or workers found them. Suppress aliases with duplicate_of_issue_key; do not inflate the vulnerability count with repeated modules, manifests, supply-chain variants, or impact multipliers.',
     '- The harness correlates SDK request IDs with authoritative LiteLLM evidence and owns validation/runtime-model-observations.jsonl. Do not edit or synthesize that ledger. The controller generates validation/model-receipts.jsonl from exact role-bound observations; SDK aliases and static roster labels are not proof of deployment.',
     '',
     'Stage 7 — Safe dynamic validation:',
@@ -191,9 +232,9 @@ function securityReviewCoordinatorPrompt({
     'Stage 8 — Automatic finalization and reporting:',
     '- Automatically retry incomplete static-analysis/validation tasks and resolve recoverable registry/tooling errors without asking the operator. Do not pause merely to continue analysis.',
     '- When all analysis gates pass, deliver the validated findings, prior dispositions when applicable, delta table, challenge matrix, and residual blockers directly to the operator. Do not require approval to complete or present a security review.',
-    '- Prepare discovery/findings.jsonl, discovery/coverage-ledger.jsonl, validation closure, attack paths, semantic coverage, challenge matrix, specialist artifacts, and dynamic-validation blockers. Do not write validation/model-receipts.jsonl, findings.json, coverage.json, scan-manifest.json, or completion-receipt.json. The controller normalizes those final artifacts and seals digests after runtime observations quiesce.',
+    '- Prepare discovery/findings.jsonl, discovery/coverage-ledger.jsonl, validation closure, attack paths, semantic coverage, challenge matrix, specialist artifacts, and dynamic-validation blockers. Every specialist track must write tracks/<track>/findings.jsonl, including an empty file when it has no findings; reportable rows require finding_id, title, CWE IDs, severity, confidence, exact locations, reachability, source-to-sink evidence, impact, and recommendation. Do not substitute a summary or evidence matrix for findings.jsonl. Do not write validation/model-receipts.jsonl, findings.json, observations.json, coverage.json, scan-manifest.json, or completion-receipt.json. The controller normalizes those final artifacts and seals digests after runtime observations quiesce.',
     '- SATURATED is the only successful terminal state. If an operator-set deadline or maximum-run ceiling arrives first, write CAPPED with exact residual work and stop; never convert CAPPED into CLEAN, COMPLETE, or SATURATED.',
-    '- After all gates pass, the controller automatically generates and indexes the sealed security-review Markdown, HTML, per-finding, and desktop PDF deliverables. Do not wait for wrap approval and do not dispatch report agents for this built-in package. Explicit operator approval remains required for live/target-facing actions and external publication.',
+    '- After all gates pass, the controller automatically generates and indexes the sealed security-review Markdown, HTML, per-finding, per-observation, coverage/limitations, remediation-plan, integrity-manifest, and desktop PDF deliverables. Do not wait for wrap approval and do not dispatch report agents for this built-in package. Explicit operator approval remains required for live/target-facing actions and external publication.',
     '',
     'Hard completion gates:',
     ...(campaign ? [
@@ -211,8 +252,9 @@ function securityReviewCoordinatorPrompt({
     '10. Every High/Critical finding has validator confirmation.',
     '11. HEAD and history secret-scan receipts exist for the recorded HEAD.',
     '12. Every discovery worker is terminal; failures are successfully retried or explicitly omitted with reason.',
-    `13. Every raw candidate is deduplicated exactly once, every canonical candidate reaches centralized validation and attack-path analysis, and saturation is proven by ${scan.stopAfterNoNew} consecutive no-new successful runs.`,
+    `13. Every raw candidate is deduplicated exactly once, every canonical candidate reaches centralized validation and attack-path analysis, every active issue_key is unique, probable same-root-cause aliases are suppressed, and saturation is proven by ${scan.stopAfterNoNew} consecutive no-new successful runs.`,
     '14. Every required review role has an observed model receipt that satisfies run.json modelPolicy.',
+    '14a. Every discovery or specialist finding is represented exactly once in validation closure and attack-path analysis, receives exactly one terminal validator outcome, and survives into canonical findings or observations unless explicitly rejected, downgraded, suppressed, or found not applicable.',
     '15. Canonical findings and coverage have exact closure with candidate dispositions and deterministic inventory, and all sealed artifact digests verify.',
     '16. No unexplained file, route, prior-finding, suppression, worker, raw candidate, canonical candidate, track, referral, model, or validation gap remains.',
     '',
@@ -392,7 +434,11 @@ function sourceReviewGateStatus(artifactRoot, options = {}) {
     if (!Array.isArray(semantic.referrals)) invalid.push('validation/semantic-coverage.json: referrals must be an array');
 
     const checks = keyedRows(Array.isArray(semantic.checks) ? semantic.checks : [], ['id'], 'semantic checks', invalid);
-    const applicableChecks = Number(runPreview?.workflowVersion || 0) >= 4 ? SEMANTIC_REVIEW_CHECKS : SEMANTIC_REVIEW_CHECKS.slice(0, 9);
+    const applicableChecks = Number(runPreview?.orchestrationRevision || 0) >= 3
+      ? SEMANTIC_REVIEW_CHECKS
+      : Number(runPreview?.workflowVersion || 0) >= 4
+        ? SEMANTIC_REVIEW_CHECKS.slice(0, 11)
+        : SEMANTIC_REVIEW_CHECKS.slice(0, 9);
     const requiredChecks = new Map(applicableChecks.map(check => [check.id, check]));
     requireExactKeys(requiredChecks, checks, 'required semantic checks', invalid);
     for (const [id, check] of checks) {
@@ -641,7 +687,7 @@ function sourceReviewGateStatus(artifactRoot, options = {}) {
           invalid.push(`high/critical finding row ${index + 1}: missing id or finding_id`);
           continue;
         }
-        const validation = outcomes.find(row => row?.id === findingId || row?.primary_id === findingId);
+        const validation = outcomes.find(row => row?.id === findingId || row?.finding_id === findingId || row?.candidate_id === findingId || row?.primary_id === findingId);
         if (!validation || !/^(?:CONFIRMED(?:_|$)|DOWNGRADED$|REJECTED$)/i.test(String(validation.outcome || ''))) {
           invalid.push(`high/critical finding ${findingId}: missing validator confirmation`);
         }
@@ -649,9 +695,31 @@ function sourceReviewGateStatus(artifactRoot, options = {}) {
     }
   }
 
-  for (const relative of [
-    'regression/delta.json',
-  ]) json(relative);
+  const regressionDelta = json('regression/delta.json');
+  if (Number(runPreview?.orchestrationRevision || 0) >= 3) {
+    const contextMode = run?.contextMode || 'blind';
+    if (contextMode === 'blind') {
+      if (regressionDelta?.status !== 'NOT_REQUESTED_BLIND_MODE') invalid.push('regression/delta.json.status: blind mode requires NOT_REQUESTED_BLIND_MODE');
+    } else {
+      const priorRelative = run?.priorContext?.artifact || 'regression/prior-context.json';
+      if (!fs.existsSync(path.join(artifactRoot, priorRelative))) missing.push(priorRelative);
+      else {
+        const prior = readJsonArtifact(artifactRoot, priorRelative, invalid);
+        const priorFindings = keyedRows(Array.isArray(prior?.findings) ? prior.findings : [], ['id'], `${priorRelative}.findings`, invalid);
+        const dispositions = keyedRows(Array.isArray(regressionDelta?.dispositions) ? regressionDelta.dispositions : [], ['prior_finding_id'], 'regression/delta.json.dispositions', invalid);
+        requireExactKeys(priorFindings, dispositions, 'prior findings vs regression dispositions', invalid);
+        if (regressionDelta?.status !== 'COMPLETE') invalid.push('regression/delta.json.status: informed/regression mode requires COMPLETE');
+        const statuses = new Set(['CONFIRMED', 'CONFIRMED_FIXED', 'CONFIRMED_PARTIAL_FIX', 'NOT_IN_CURRENT_TREE', 'BLOCKED']);
+        for (const [priorFindingId, disposition] of dispositions) {
+          if (!statuses.has(disposition.disposition)) invalid.push(`regression disposition ${priorFindingId}.disposition: invalid terminal status`);
+          const evidence = disposition.evidence;
+          if (!((typeof evidence === 'string' && evidence.trim()) || (evidence && typeof evidence === 'object' && !Array.isArray(evidence) && Object.keys(evidence).length))) {
+            invalid.push(`regression disposition ${priorFindingId}.evidence: required exact current-source evidence`);
+          }
+        }
+      }
+    }
+  }
   for (const relative of [
     'tracks/data-flow-injection/source-sink-matrix.jsonl',
     'tracks/iac-config-manifests/disposition-matrix.jsonl',

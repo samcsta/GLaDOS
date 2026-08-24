@@ -79,8 +79,8 @@ async function fetchLiteLlmAttestation(requestId, options = {}) {
   return last;
 }
 
-function observationId({ engagementId, requestId, role, workerId, gatewayModelId }) {
-  const identity = [engagementId, requestId, role || '', workerId || '', gatewayModelId].join('\0');
+function observationId({ engagementId, requestId, role, workerId, workerToolCallId, gatewayModelId }) {
+  const identity = [engagementId, requestId, role || '', workerId || '', workerToolCallId || '', gatewayModelId].join('\0');
   return `model-observation-${crypto.createHash('sha256').update(identity).digest('hex').slice(0, 20)}`;
 }
 

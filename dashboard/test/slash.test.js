@@ -35,10 +35,10 @@ test('local path detection works for security-review routing', () => {
   assert.equal(slash.isUrlOrDomain('example.com'), true);
 });
 
-test('security-review context modes default to blind and are mutually exclusive', () => {
+test('security-review context modes default to automatic prior matching and are mutually exclusive', () => {
   const fsStub = { existsSync: value => value === '/tmp/repo' || value === '/tmp/repo with spaces' };
   assert.deepEqual(slash.parseSecurityReviewArg('/tmp/repo', fsStub), {
-    ok: true, mode: 'blind', maxDurationMinutes: null, singleModel: null, reviewProfile: 'expedited', campaign: false,
+    ok: true, mode: 'auto', maxDurationMinutes: null, singleModel: null, reviewProfile: 'expedited', campaign: false,
     target: '/tmp/repo', isLocalPath: true, isUrlOrDomain: false,
   });
   assert.equal(slash.parseSecurityReviewArg('--informed /tmp/repo', fsStub).mode, 'informed');

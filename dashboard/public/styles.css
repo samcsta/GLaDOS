@@ -259,7 +259,8 @@ button.secondary:hover:not(:disabled) { color: var(--fg); border-color: var(--wa
 .sidebar-session-menu > summary { width: 23px; height: 28px; display: grid; place-items: center; list-style: none; color: var(--fg-dim); cursor: pointer; font-size: 10px; letter-spacing: -1px; }
 .sidebar-session-menu > summary::-webkit-details-marker { display: none; }
 .sidebar-session-menu[open] > summary { color: var(--fg); }
-.sidebar-session-menu > div { position: fixed; z-index: 100; width: 196px; margin: -2px 0 0 -168px; padding: 6px; display: grid; gap: 5px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface-raised); box-shadow: 0 12px 32px rgba(0,0,0,.45); }
+.sidebar-session-menu > div { position: fixed; z-index: 100; top: 0; left: 0; width: 196px; max-height: calc(100vh - 16px); margin: 0; padding: 6px; display: grid; gap: 5px; overflow-y: auto; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface-raised); box-shadow: 0 12px 32px rgba(0,0,0,.45); }
+.sidebar-session-menu[open] > div:not([data-positioned="true"]) { visibility: hidden; }
 .sidebar-session-menu button, .sidebar-session-menu label { width: 100%; min-height: 29px; padding: 6px 8px; text-align: left; }
 .sidebar-session-menu label { display: grid; gap: 5px; color: var(--fg-dim); font-size: 8px; text-transform: uppercase; letter-spacing: .05em; }
 .sidebar-session-menu select { width: 100%; min-width: 0; }

@@ -12,7 +12,7 @@ const { agentStatus, listHaltedAgents } = require('glados-watchdog/lib/halt');
 const { evaluateToolUse, extractTargets, forbiddenSecretAccess } = require('glados-watchdog/lib/safety-gate');
 const {
   discoveryDispatchCheckpoint,
-  discoverySaturationCheckpoint,
+  ensureDiscoverySaturated,
   discoveryWorkerIdFromPrompt,
   claimDiscoveryWorker,
   markDeepScanCapped,
@@ -329,18 +329,26 @@ function decideToolUse({ agentId, toolName, input = {}, policy = loadPolicy(), w
     if (/blackboard_engagement_create$/i.test(String(toolName || ''))) {
       return { allowed: false, reason: 'the security-review controller already provisioned this engagement; use the supplied engagement_id' };
     }
-    const inputText = JSON.stringify(input || {});
-    const agentMemoryRoot = path.join(agentWorkspaceRoot(env), agentId);
-    if (/^(?:Read|Glob|Grep)$/i.test(String(toolName || ''))
-        && (inputText.includes(path.join(agentMemoryRoot, 'memory')) || inputText.includes(path.join(agentMemoryRoot, 'MEMORY.md')))) {
-      return { allowed: false, reason: 'blind security-review workers may not read persistent agent memory or prior-assessment context' };
+    if (/(?:^|__)(?:Read|Glob|Grep)$/i.test(String(toolName || ''))) {
+      const requested = String(input.file_path || input.path || '');
+      const roots = [
+        env.GLADOS_SECURITY_REVIEW_REPOSITORY,
+        env.GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT,
+      ].filter(Boolean).map(value => path.resolve(value));
+      if (!requested || !path.isAbsolute(requested)
+          || !roots.some(root => pathWithin(root, requested))) {
+        return {
+          allowed: false,
+          reason: 'source-review reads and searches must use an absolute path inside the selected repository or current artifact_root',
+        };
+      }
     }
     if (env.GLADOS_SECURITY_REVIEW_GIT_HISTORY !== '1' && /(?:^|__)Bash$/i.test(String(toolName || ''))
         && /(?:^|[;&|()\s])git(?:\s|$)/i.test(String(input.command || ''))) {
       return { allowed: false, reason: 'this security-review target is a directory snapshot without Git metadata; use run.json and inventory artifacts' };
     }
     if (/^(?:Write|Edit|MultiEdit)$/i.test(String(toolName || ''))
-        && /(?:discovery[\\/]deep[\\/]workers\.jsonl|validation[\\/](?:runtime-model-observations|model-receipts)\.jsonl|(?:^|[\\/])(?:findings|coverage|scan-manifest|completion-receipt)\.json)$/.test(String(input.file_path || input.path || ''))) {
+        && /(?:controller[\\/]workflow-contract\.txt|discovery[\\/]deep[\\/](?:workers\.jsonl|worker-\d{3}[\\/]receipt\.json)|validation[\\/](?:runtime-model-observations|model-receipts)\.jsonl|(?:^|[\\/])(?:findings|observations|coverage|scan-manifest|completion-receipt)\.json)$/.test(String(input.file_path || input.path || ''))) {
       return { allowed: false, reason: 'security-review final ledgers and sealed outputs are controller-owned and cannot be edited by agents' };
     }
     if (/^(?:Write|Edit|MultiEdit)$/i.test(String(toolName || ''))) {
@@ -354,7 +362,7 @@ function decideToolUse({ agentId, toolName, input = {}, policy = loadPolicy(), w
       }
     }
     if (/(?:^|__)Bash$/i.test(String(toolName || ''))
-        && /(?:workers\.jsonl|runtime-model-observations\.jsonl|model-receipts\.jsonl|findings\.json|coverage\.json|scan-manifest\.json|completion-receipt\.json)/.test(String(input.command || ''))
+        && /(?:workflow-contract\.txt|workers\.jsonl|discovery[\\/]deep[\\/]worker-\d{3}[\\/]receipt\.json|runtime-model-observations\.jsonl|model-receipts\.jsonl|findings\.json|observations\.json|coverage\.json|scan-manifest\.json|completion-receipt\.json)/.test(String(input.command || ''))
         && /(?:>|tee\b|cp\b|mv\b|rm\b|python\b|perl\b|ruby\b)/.test(String(input.command || ''))) {
       return { allowed: false, reason: 'security-review runtime ledgers are controller-owned projections and cannot be modified from Bash' };
     }
@@ -474,7 +482,7 @@ function investigationDispatchContractViolation(targetAgent, input = {}, env = p
       const investigationsRoot = path.resolve(env.GLADOS_INVESTIGATIONS_DIR || path.join(env.GLADOS_RUNTIME_DIR || GLADOS_RUNTIME_DIR, 'investigations'));
       const resolvedArtifactRoot = path.resolve(artifactRoot);
       if (!resolvedArtifactRoot.startsWith(`${investigationsRoot}${path.sep}`)) return 'security-review specialist artifact_root must be inside the configured GLaDOS investigations directory';
-      const saturation = discoverySaturationCheckpoint(resolvedArtifactRoot);
+      const saturation = ensureDiscoverySaturated(resolvedArtifactRoot);
       if (!saturation.passed) return `security-review specialist dispatch requires discovery saturation: ${saturation.invalid.slice(0, 4).join('; ')}`;
   }
   return null;
@@ -489,13 +497,96 @@ function toolCallerAgentId(rootAgentId, input = {}, agentTypesById = new Map()) 
   return agentTypesById.get(input.agent_id) || null;
 }
 
-function normalizeToolInput(toolName, input = {}, { agentId = null } = {}) {
+function canonicalSecurityReviewPath(value, env = process.env) {
+  if (typeof value !== 'string') return value;
+  const candidate = value === '~'
+    ? os.homedir()
+    : value.startsWith('~/')
+      ? path.join(os.homedir(), value.slice(2))
+      : value;
+  if (env.GLADOS_SECURITY_REVIEW !== '1') return candidate;
+  const artifactRoot = env.GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT;
+  if (!artifactRoot || !path.isAbsolute(artifactRoot)) return candidate;
+  if (!path.isAbsolute(candidate)) return candidate;
+  const resolved = path.resolve(candidate);
+  const repositoryRoot = env.GLADOS_SECURITY_REVIEW_REPOSITORY;
+  if (pathWithin(artifactRoot, resolved)
+      || repositoryRoot && path.isAbsolute(repositoryRoot) && pathWithin(repositoryRoot, resolved)) {
+    return resolved;
+  }
+  const runtimeRoot = path.resolve(env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), '.glados'));
+  const investigationsRoot = path.resolve(env.GLADOS_INVESTIGATIONS_DIR || path.join(runtimeRoot, 'investigations'));
+  if (resolved === runtimeRoot || resolved === investigationsRoot) return path.resolve(artifactRoot);
+
+  // A model occasionally copies the long engagement directory with one
+  // character or digit wrong. There is exactly one writable artifact root in
+  // a source-review turn, so repair only paths that unmistakably target a
+  // GLaDOS investigation's security-review subtree. This keeps the permission
+  // boundary strict while removing identifier transcription from the model's
+  // responsibilities.
+  const marker = `${path.sep}security-review`;
+  const markerIndex = resolved.lastIndexOf(marker);
+  const investigationMarker = `${path.sep}.glados${path.sep}investigations${path.sep}`;
+  if (markerIndex >= 0 && resolved.includes(investigationMarker)) {
+    const suffix = resolved.slice(markerIndex + marker.length);
+    const repaired = path.resolve(artifactRoot, `.${suffix}`);
+    if (pathWithin(artifactRoot, repaired)) return repaired;
+  }
+  return resolved;
+}
+
+function canonicalizeSecurityReviewDispatchPrompt(prompt, env = process.env) {
+  const text = String(prompt || '');
+  const artifactRoot = env.GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT;
+  if (env.GLADOS_SECURITY_REVIEW !== '1' || !artifactRoot || !path.isAbsolute(artifactRoot)) return text;
+  const roleLines = [...text.matchAll(/^security_review_role:\s*([a-z0-9-]+)\s*$/gim)];
+  if (roleLines.length !== 1) return text;
+  const role = roleLines[0][1].toLowerCase();
+  const workerLines = [...text.matchAll(/^worker_id:\s*(worker-\d{3})\s*$/gim)];
+  const retryLines = [...text.matchAll(/^retry_of:\s*(worker-\d{3})\s*$/gim)];
+  if (role === 'blind-discovery' && workerLines.length !== 1) return text;
+
+  const body = text.split(/\r?\n/).filter(line => !(
+    /^security_review_role\s*:/i.test(line)
+    || /^artifact_root\s*:/i.test(line)
+    || /^engagement_id\s*:/i.test(line)
+    || /^repository_path\s*:/i.test(line)
+    || role === 'blind-discovery' && /^(?:worker_id|retry_of)\s*:/i.test(line)
+  ));
+  const header = [`security_review_role: ${role}`];
+  if (role === 'blind-discovery') header.push(`worker_id: ${workerLines[0][1].toLowerCase()}`);
+  header.push(`artifact_root: ${path.resolve(artifactRoot)}`);
+  if (role === 'blind-discovery' && retryLines.length === 1) header.push(`retry_of: ${retryLines[0][1].toLowerCase()}`);
+  if (env.GLADOS_SECURITY_REVIEW_ENGAGEMENT_ID) header.push(`engagement_id: ${env.GLADOS_SECURITY_REVIEW_ENGAGEMENT_ID}`);
+  if (env.GLADOS_SECURITY_REVIEW_REPOSITORY) header.push(`repository_path: ${path.resolve(env.GLADOS_SECURITY_REVIEW_REPOSITORY)}`);
+  return [...header, ...body].join('\n').trim();
+}
+
+function normalizeToolInput(toolName, input = {}, { agentId = null, env = process.env } = {}) {
   const name = String(toolName || '');
   const reportingAgent = agentId === 'report-writer' || agentId === 'report-validator';
   let normalized = input;
+  if (/(?:^|__)(?:Read|Glob|Grep)$/i.test(name)) {
+    for (const field of ['file_path', 'path']) {
+      const value = normalized[field];
+      if (typeof value !== 'string') continue;
+      const canonical = canonicalSecurityReviewPath(value, env);
+      if (canonical === value) continue;
+      normalized = {
+        ...normalized,
+        [field]: canonical,
+      };
+    }
+  }
+  if (/(?:^|__)(?:Write|Edit)$/i.test(name) && typeof normalized.file_path === 'string') {
+    const canonical = canonicalSecurityReviewPath(normalized.file_path, env);
+    if (canonical !== normalized.file_path) normalized = { ...normalized, file_path: canonical };
+  }
   if ((/^Read$/i.test(name) || /__Read$/i.test(name)) && (!input.pages || typeof input.pages === 'string' && !input.pages.trim())) {
-    normalized = { ...normalized };
-    delete normalized.pages;
+    // The bundled Agent SDK may re-expand an omitted optional pages field to
+    // an invalid empty string before execution. An explicit first-page value
+    // works for ordinary text reads and is the safe default for PDFs.
+    normalized = { ...normalized, pages: '1' };
   }
   if (isTaskDispatchTool(name) && (
     Object.prototype.hasOwnProperty.call(normalized, 'isolation')
@@ -512,6 +603,20 @@ function normalizeToolInput(toolName, input = {}, { agentId = null } = {}) {
     delete normalized.isolation;
     delete normalized.model;
   }
+  if (agentId === 'glados' && isTaskDispatchTool(name)) {
+    const field = Object.prototype.hasOwnProperty.call(normalized, 'prompt') ? 'prompt' : 'description';
+    if (typeof normalized[field] === 'string') {
+      const prompt = canonicalizeSecurityReviewDispatchPrompt(normalized[field], env);
+      if (prompt !== normalized[field]) normalized = { ...normalized, [field]: prompt };
+    }
+  }
+  if (env.GLADOS_SECURITY_REVIEW === '1'
+      && /(?:^|__)blackboard_/i.test(name)
+      && Object.prototype.hasOwnProperty.call(normalized, 'engagement_id')
+      && env.GLADOS_SECURITY_REVIEW_ENGAGEMENT_ID
+      && normalized.engagement_id !== env.GLADOS_SECURITY_REVIEW_ENGAGEMENT_ID) {
+    normalized = { ...normalized, engagement_id: env.GLADOS_SECURITY_REVIEW_ENGAGEMENT_ID };
+  }
   if (/__browser_fill_form$/i.test(name) && Array.isArray(input.fields)) {
     normalized = {
       ...normalized,
@@ -524,6 +629,24 @@ function normalizeToolInput(toolName, input = {}, { agentId = null } = {}) {
   }
   if ((/^Read$/i.test(name) || /__Read$/i.test(name)) && (!Number.isFinite(Number(input.limit)) || Number(input.limit) > 300)) {
     normalized = { ...normalized, limit: 300 };
+  }
+  if ((/^Grep$/i.test(name) || /__Grep$/i.test(name))
+      && env.GLADOS_SECURITY_REVIEW === '1'
+      && (!Number.isFinite(Number(input.head_limit)) || Number(input.head_limit) > 20)) {
+    // Long JSONL matches make the SDK spill results into its private
+    // ~/.claude cache, which is deliberately outside source-review scope and
+    // creates a guaranteed follow-on permission error. Keep results inline;
+    // workers can use Grep offset pagination when they need another page.
+    normalized = { ...normalized, head_limit: 20 };
+  }
+  if ((/^Read$/i.test(name) || /__Read$/i.test(name)) && typeof normalized.file_path === 'string') {
+    try {
+      const bytes = fs.statSync(normalized.file_path).size;
+      const sizeAwareLimit = bytes > 1024 * 1024 ? 10 : bytes > 256 * 1024 ? 40 : bytes > 64 * 1024 ? 80 : null;
+      if (sizeAwareLimit && Number(normalized.limit) > sizeAwareLimit) {
+        normalized = { ...normalized, limit: sizeAwareLimit };
+      }
+    } catch {}
   }
   if (reportingAgent && /(?:^|__)blackboard_baseline_get$/i.test(name) && input.mode !== 'summary') {
     normalized = { ...normalized, mode: 'summary' };
@@ -603,7 +726,10 @@ function rememberToolTargets(agentId, toolName, input, decision, options = {}) {
 function buildPreToolUseHook(agentId, policy = loadPolicy(), options = {}) {
   return async input => {
     const callerAgentId = toolCallerAgentId(agentId, input, options.agentTypesById);
-    const normalizedInput = normalizeToolInput(input.tool_name, input.tool_input, { agentId: callerAgentId });
+    const normalizedInput = normalizeToolInput(input.tool_name, input.tool_input, {
+      agentId: callerAgentId,
+      env: options.env || process.env,
+    });
     const decision = decideToolUse({
       agentId: callerAgentId,
       toolName: input.tool_name,
@@ -616,6 +742,7 @@ function buildPreToolUseHook(agentId, policy = loadPolicy(), options = {}) {
     if (decision.allowed && callerAgentId === 'glados' && isTaskDispatchTool(input.tool_name)) {
       const prompt = String(normalizedInput.prompt || normalizedInput.description || '');
       const workerId = discoveryWorkerIdFromPrompt(prompt);
+      const retryOf = prompt.match(/^retry_of:\s*(worker-\d{3})\s*$/im)?.[1] || null;
       const artifactRoot = prompt.match(/^artifact_root:\s*(.+)\s*$/im)?.[1]?.trim();
       if (workerId && artifactRoot) {
         const engagementId = path.basename(path.dirname(path.resolve(artifactRoot)));
@@ -624,6 +751,7 @@ function buildPreToolUseHook(agentId, policy = loadPolicy(), options = {}) {
           artifactRoot, engagementId,
           workerId,
           toolCallId: input.tool_use_id,
+          retryOf,
           requestedModel: registryById({ env: options.env || process.env }).get('source-code')?.model || null,
         });
         if (!claim.claimed) {
@@ -657,11 +785,11 @@ function buildPreToolUseHook(agentId, policy = loadPolicy(), options = {}) {
       }
     }
     rememberToolTargets(callerAgentId, input.tool_name, normalizedInput, decision, options);
-    const hookSpecificOutput = {
-      hookEventName: 'PreToolUse',
-      permissionDecision: decision.allowed ? 'allow' : 'deny',
-      permissionDecisionReason: decision.reason,
-    };
+    const hookSpecificOutput = { hookEventName: 'PreToolUse' };
+    if (!decision.allowed) {
+      hookSpecificOutput.permissionDecision = 'deny';
+      hookSpecificOutput.permissionDecisionReason = decision.reason;
+    }
     if (decision.allowed && normalizedInput !== input.tool_input) {
       hookSpecificOutput.updatedInput = normalizedInput;
     }
@@ -699,7 +827,10 @@ function buildCanUseTool(agentId, policy = loadPolicy(), hookOptions = {}) {
     const callerAgentId = requestOptions.agentID
       ? hookOptions.agentTypesById?.get(requestOptions.agentID)
       : agentId;
-    const normalizedInput = normalizeToolInput(toolName, input, { agentId: callerAgentId });
+    const normalizedInput = normalizeToolInput(toolName, input, {
+      agentId: callerAgentId,
+      env: hookOptions.env || process.env,
+    });
     const decision = callerAgentId
       ? decideToolUse({
         agentId: callerAgentId,
@@ -921,8 +1052,8 @@ function resolveAgentRoot(agentId, { workspaceRoot = agentWorkspaceRoot(), templ
 
 const SECURITY_REVIEW_PROMPT_AGENTS = new Set(['glados', 'source-code', 'source-review-validator']);
 
-function securityReviewTemplateOverlay(agentId, templateRoot = TEMPLATE_AGENT_ROOT) {
-  if (!SECURITY_REVIEW_PROMPT_AGENTS.has(agentId)) return '';
+function securityReviewTemplateOverlay(agentId, templateRoot = TEMPLATE_AGENT_ROOT, env = process.env) {
+  if (env.GLADOS_SECURITY_REVIEW !== '1' || !SECURITY_REVIEW_PROMPT_AGENTS.has(agentId)) return '';
   const names = agentId === 'glados' ? ['RUNBOOK.md'] : ['IDENTITY.md', 'RUNBOOK.md', 'TOOLS.md'];
   return names.map(name => {
     const file = path.join(templateRoot, agentId, name);
@@ -933,20 +1064,27 @@ function securityReviewTemplateOverlay(agentId, templateRoot = TEMPLATE_AGENT_RO
 
 function assembleAgentPrompt(agentId, options = {}) {
   const resolved = resolveAgentRoot(agentId, options);
+  const securityReviewContract = options.env?.GLADOS_SECURITY_REVIEW === '1'
+    && SECURITY_REVIEW_PROMPT_AGENTS.has(agentId);
   const parts = [];
   const files = [];
-  for (const name of PROMPT_FILE_ORDER) {
+  // Automated source reviews use a versioned, repository-owned contract. Do
+  // not mix the persistent agent's startup checklist, user memory, or stale
+  // workspace runbook into these isolated workers: those instructions both
+  // inflate every dispatch and can trigger forbidden workspace reads before
+  // the worker reaches its actual assignment.
+  for (const name of securityReviewContract ? [] : PROMPT_FILE_ORDER) {
     const file = path.join(resolved.root, name);
     try {
       parts.push(fs.readFileSync(file, 'utf8'));
       files.push(name);
     } catch {}
   }
-  const skills = listAgentSkills(resolved.root);
+  const skills = securityReviewContract ? [] : listAgentSkills(resolved.root);
   if (skills.length) {
     parts.push(['# Skills', ...skills.map(skillSummary)].join('\n'));
   }
-  const securityReviewOverlay = securityReviewTemplateOverlay(agentId, options.templateRoot);
+  const securityReviewOverlay = securityReviewTemplateOverlay(agentId, options.templateRoot, options.env);
   if (securityReviewOverlay) parts.push(securityReviewOverlay);
   return {
     agentId,
@@ -965,24 +1103,31 @@ function readAgentPrompt(agentId, options = {}) {
 function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, workspaceRoot = agentWorkspaceRoot(), env = process.env } = {}) {
   const persistentWorkspace = path.join(workspaceRoot, agentId);
   const investigationsDir = path.join(GLADOS_RUNTIME_DIR, 'investigations');
+  const securityReview = env.GLADOS_SECURITY_REVIEW === '1';
   const lines = [
     '# Runtime Context (authoritative)',
     `- Current agent id: ${agentId}`,
     `- Active model for this turn: ${model || DEFAULT_BARE_MODEL}`,
     `- Persistent writable workspace: ${persistentWorkspace}`,
-    `- Read and update USER.md, MEMORY.md, memory/, skills/, and other agent-owned files in ${persistentWorkspace}. Never write operator state into repository templates or the packaged GLaDOS.app Resources directory.`,
+    securityReview
+      ? `- Security-review isolation: do not read or write agent-owned files in ${persistentWorkspace}; use only the selected repository, current artifact root, and blackboard tools.`
+      : `- Read and update USER.md, MEMORY.md, memory/, skills/, and other agent-owned files in ${persistentWorkspace}. Never write operator state into repository templates or the packaged GLaDOS.app Resources directory.`,
     '- If the operator asks what model you are running, answer from the active model above.',
     '- Do not infer current model names from static roster tables, examples, MEMORY.md, or historical workspace files.',
     `- GLaDOS proxy URL for target HTTP(S): ${proxyUrl || proxyUrlFromEnv()}. For shell HTTP, use /usr/bin/curl -x this URL -k and add X-GLaDOS-Agent: ${agentId}. Do not use legacy :8080 proxy examples unless the operator explicitly overrides it.`,
   ];
-  if (env.GLADOS_SECURITY_REVIEW === '1') {
+  if (securityReview) {
     const repositoryPath = env.GLADOS_SECURITY_REVIEW_REPOSITORY || '(read repository_path from the task)';
     const artifactRoot = env.GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT || '(read artifact_root from the task)';
+    const reviewEngagementId = env.GLADOS_SECURITY_REVIEW_ENGAGEMENT_ID
+      || (path.isAbsolute(artifactRoot) ? path.basename(path.dirname(artifactRoot)) : '(read engagement_id from the task)');
     const gitHistoryAvailable = env.GLADOS_SECURITY_REVIEW_GIT_HISTORY === '1';
+    lines.push(`- Security-review engagement id: ${reviewEngagementId}. Use this exact value for every blackboard call that requires engagement_id; never send an empty engagement_id.`);
     lines.push(`- Security-review repository root: ${repositoryPath}. Use absolute paths; the SDK working directory is not the assessed repository.`);
     lines.push(`- Security-review artifact root: ${artifactRoot}. The source tree is read-only; write review output only below this artifact root or through blackboard tools.`);
     lines.push(`- Security-review source type: ${env.GLADOS_SECURITY_REVIEW_SOURCE_TYPE || 'unknown'}. Git history available: ${gitHistoryAvailable ? 'yes' : 'no'}. ${gitHistoryAvailable ? 'Use Git only when the assigned review step requires history.' : 'Do not run Git commands; consume run.json and inventory/secrets-history.json as authoritative.'}`);
     lines.push('- Prompt files and role contracts are already loaded. Do not reread SOUL.md, USER.md, IDENTITY.md, RUNBOOK.md, TOOLS.md, MEMORY.md, or memory/ as startup work. Blind review must not consult agent memory or prior-assessment context.');
+    lines.push('- Every Read tool call must explicitly include pages: "1" unless reading a specific PDF page range. The bundled SDK rejects its empty pages default before permission-time repair on some subagent calls.');
     lines.push('- Derive available files and directories from inventory/files.jsonl. Do not guess conventional paths such as src/test or gradle/libs.versions.toml when absent.');
     lines.push('- Snapshot verification is harness-owned. Do not invent a find/shasum or per-file digest aggregate; use the canonical run.json revision and harness verification receipt.');
     lines.push('- Static analysis, worker continuation, specialist review, validation, and writes below artifact_root require no operator approval. Continue automatically until saturated and sealed or a real terminal blocker occurs.');
@@ -1025,7 +1170,9 @@ function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, work
     }
   } else {
     lines.push(`- You are the named GLaDOS subagent "${agentId}". This invocation already selected your role; do not wonder whether you are the subagent or spawn another agent to do your own task.`);
-    lines.push('- Use your mounted tools directly, including Bash for shell work and MCP tools for browser/watchdog/blackboard/ops work when the task calls for them. If a tool permission is denied, report the exact denial.');
+    lines.push(securityReview
+      ? '- Use the mounted Read, Glob, Grep, Write, Edit, and blackboard tools directly. Bash is intentionally unavailable in source-review isolation; do not search for or request it.'
+      : '- Use your mounted tools directly, including Bash for shell work and MCP tools for browser/watchdog/blackboard/ops work when the task calls for them. If a tool permission is denied, report the exact denial.');
     lines.push('- Return your final result to parent GLaDOS in this task result. Do not ask the operator to continue an internal agent id and do not reveal output_file paths or SendMessage instructions.');
     lines.push('- If the assignment names a blackboard task ID, call blackboard_task_update for that exact ID with completed, failed, or cancelled before returning your final result.');
     lines.push(`- Browser evidence output root: ${investigationsDir}. When browser_take_screenshot has a filename, use an absolute path inside this root (for example, ${path.join(investigationsDir, '136.116.95.87_56453', 'evidence', '01_landing.png')}). A relative filename resolves from the SDK working directory and is not an evidence path.`);
@@ -1080,16 +1227,25 @@ function buildAgentDefinitions(policy = loadPolicy(), options = {}) {
     const tools = mountedToolsForAgent(row.id, policy, { env: options.env || process.env });
     out[row.id] = {
       description: row.description || row.name || row.id,
-      prompt: appendRuntimeContext(assembled.prompt, row.id, { model, registryRows, proxyUrl, workspaceRoot }),
+      prompt: appendRuntimeContext(assembled.prompt, row.id, {
+        model,
+        registryRows,
+        proxyUrl,
+        workspaceRoot,
+        env: options.env || process.env,
+      }),
       model,
       tools,
       disallowedTools: beltAndSuspendersDisallowed(tools, policy),
       mcpServers: Object.keys(mcpServers).filter(name => toolsMountMcpServer(tools, name)),
-      permissionMode: 'dontAsk',
+      permissionMode: 'default',
       background: false,
       maxTurns: policy.harness?.specialistMaxTurns ?? 100,
       criticalSystemReminder_EXPERIMENTAL: [
         `You are the GLaDOS subagent named ${row.id}.`,
+        ...(options.env?.GLADOS_SECURITY_REVIEW === '1'
+          ? ['This is an isolated security review. Prompt files are already loaded; do not read the persistent agent workspace, USER.md, MEMORY.md, memory/, IDENTITY.md, RUNBOOK.md, TOOLS.md, or AGENTS.md.']
+          : []),
         'Use the tools mounted in your AgentDefinition directly; do not claim Bash/browser/MCP are unavailable unless the tool call is actually denied or missing.',
         'Return the final answer to parent GLaDOS and do not expose internal SDK task metadata.',
       ].join(' '),
@@ -1159,7 +1315,11 @@ function buildAgentSdkOptions(agentId, options = {}) {
   const registryRows = loadRegistry({ workspaceRoot, env: options.env });
   const registry = new Map(registryRows.map(row => [row.id, row]));
   const row = registry.get(agentId) || {};
-  const assembled = assembleAgentPrompt(agentId, { workspaceRoot, templateRoot: options.templateRoot });
+  const assembled = assembleAgentPrompt(agentId, {
+    workspaceRoot,
+    templateRoot: options.templateRoot,
+    env: options.env || process.env,
+  });
   const model = bareModelAlias(options.model || row.model || policy.harness?.defaultModel, {
     fallback: policy.harness?.defaultModel || DEFAULT_BARE_MODEL,
   });
@@ -1210,17 +1370,22 @@ function buildAgentSdkOptions(agentId, options = {}) {
       'They must use their configured AgentDefinition prompt, model, tools, and MCP servers.',
       'They must return the final task result to parent GLaDOS, not ask the operator to message an internal task id.',
     ].join(' '),
-    permissionMode: fullAccess ? 'bypassPermissions' : 'dontAsk',
+    // In default mode the SDK routes non-allowlisted calls to canUseTool.
+    // GLaDOS answers that callback programmatically, so there is no operator
+    // prompt, while updatedInput remains effective. dontAsk would auto-deny
+    // before the callback; a PreToolUse allow would bypass input repair.
+    permissionMode: fullAccess ? 'bypassPermissions' : 'default',
     allowDangerouslySkipPermissions: fullAccess,
     // Options.tools controls built-ins only. MCP tools are deferred and loaded
     // through ToolSearch, then caller-scoped by AgentDefinition.tools and the
     // authoritative PreToolUse hook.
     tools: tools.filter(tool => !tool.startsWith('mcp__')),
     gladosMountedTools: tools,
-    // The SDK process hosts GLaDOS and its AgentDefinition workers. Approve
-    // every mounted process tool here; PreToolUse/canUseTool still enforce the
-    // caller-specific existence allowlist and policy for each invocation.
-    allowedTools: autoApprovedToolsForAgent(tools),
+    // Keep ordinary calls off the SDK's static allowlist so canUseTool applies
+    // caller-aware input repair after PreToolUse policy enforcement. Full
+    // Access uses the SDK's bypass mode and retains its historical auto-allow
+    // list.
+    allowedTools: fullAccess ? autoApprovedToolsForAgent(tools) : [],
     disallowedTools: beltAndSuspendersDisallowed(tools, policy),
     canUseTool: buildCanUseTool(agentId, policy, {
       workspaceRoot,
@@ -1275,6 +1440,28 @@ function sanitizeSubagentToolResult(text) {
   out = out.replace(/^.*Use SendMessage with to:.*$/gmi, '');
   out = out.replace(/\n{3,}/g, '\n\n').trim();
   return out;
+}
+
+function compactSecurityReviewDispatchTranscriptInput(toolName, input = {}, env = process.env) {
+  if (env.GLADOS_SECURITY_REVIEW !== '1' || !isTaskDispatchTool(toolName)) return input;
+  const prompt = String(input.prompt || input.description || '');
+  const compact = [
+    prompt.match(/^security_review_role:\s*[^\r\n]+/im)?.[0],
+    prompt.match(/^worker_id:\s*worker-\d{3}/im)?.[0],
+    prompt.match(/^retry_of:\s*worker-\d{3}/im)?.[0],
+    '[managed security-review assignment; immutable scope is runtime-bound]',
+  ].filter(Boolean).join('\n');
+  const field = Object.prototype.hasOwnProperty.call(input, 'prompt') ? 'prompt' : 'description';
+  return { ...input, [field]: compact };
+}
+
+function compactSecurityReviewWorkerResult(text, { isError = false } = {}) {
+  const value = String(text || '').trim();
+  if (isError || /(?:^|\b)(?:error|failed|denied|blocked)(?:\b|:)/i.test(value)) {
+    const firstLine = value.split(/\r?\n/).find(Boolean) || 'unknown worker failure';
+    return `Internal security-review worker error: ${firstLine.slice(0, 500)}`;
+  }
+  return 'Internal security-review worker completed; durable artifacts and task state were retained.';
 }
 
 function redactCredentialText(text) {
@@ -1427,8 +1614,15 @@ function mapSdkMessageToEvents(agentId, message, context = {}) {
         if (targetAgentId && block.id) context.subagentByParentToolUseId.set(block.id, targetAgentId);
         if (block.id) context.toolNameByToolUseId.set(block.id, block.name);
         if (block.id) context.toolInputByToolUseId.set(block.id, block.input || {});
-        const effectiveInput = normalizeToolInput(block.name, block.input || {}, { agentId: renderAgentId });
-        const transcriptInput = redactCredentialInput(effectiveInput);
+        const effectiveInput = normalizeToolInput(block.name, block.input || {}, {
+          agentId: renderAgentId,
+          env: context.env || process.env,
+        });
+        const transcriptInput = redactCredentialInput(compactSecurityReviewDispatchTranscriptInput(
+          block.name,
+          effectiveInput,
+          context.env || process.env
+        ));
         return [{
           ...base,
           kind: 'tool-call',
@@ -1457,7 +1651,10 @@ function mapSdkMessageToEvents(agentId, message, context = {}) {
       const targetAgentId = context.subagentByParentToolUseId?.get(block.tool_use_id);
       const toolName = context.toolNameByToolUseId?.get(block.tool_use_id);
       const toolInput = context.toolInputByToolUseId?.get(block.tool_use_id) || {};
-      const rawText = isTaskDispatchTool(toolName) ? sanitizeSubagentToolResult(contentText(block)) : contentText(block);
+      let rawText = isTaskDispatchTool(toolName) ? sanitizeSubagentToolResult(contentText(block)) : contentText(block);
+      if (targetAgentId && (context.env || process.env).GLADOS_SECURITY_REVIEW === '1') {
+        rawText = compactSecurityReviewWorkerResult(rawText, { isError: !!block.is_error });
+      }
       const text = sanitizeToolResultForTranscript(rawText, toolName, toolInput);
       return [{
         ...base,
@@ -1530,13 +1727,18 @@ function mapSdkMessageToEvents(agentId, message, context = {}) {
       }
       const live = message.subtype !== 'task_notification';
       const state = message.subtype === 'task_notification' ? message.status : 'running';
+      const reviewWorker = (context.env || process.env).GLADOS_SECURITY_REVIEW === '1' && mappedAgent !== agentId;
       if (!live && message.task_id) context.subagentByTaskId.delete(message.task_id);
       return [{
         ...base,
         agentId: mappedAgent,
         parentAgentId: mappedAgent === agentId ? null : agentId,
         kind: 'liveness',
-        text: message.summary || message.description || state,
+        text: reviewWorker
+          ? live
+            ? message.description || 'Security-review worker running.'
+            : `Security-review worker ${state || 'finished'}.`
+          : message.summary || message.description || state,
         live,
         state,
         taskId: message.task_id,
@@ -1646,6 +1848,17 @@ function isFirstActivityTimeoutError(value) {
   return value?.code === 'GLADOS_FIRST_ACTIVITY_TIMEOUT';
 }
 
+function turnIdleTimeoutError(timeoutMs) {
+  const error = new Error(`Agent SDK produced no messages for ${timeoutMs}ms during an active turn`);
+  error.code = 'GLADOS_TURN_IDLE_TIMEOUT';
+  error.timeoutMs = timeoutMs;
+  return error;
+}
+
+function isTurnIdleTimeoutError(value) {
+  return value?.code === 'GLADOS_TURN_IDLE_TIMEOUT';
+}
+
 async function nextWithFirstActivityDeadline(iterator, timeoutMs, onTimeout, reportedTimeoutMs = timeoutMs) {
   if (!(timeoutMs > 0)) return iterator.next();
   let timer;
@@ -1657,6 +1870,24 @@ async function nextWithFirstActivityDeadline(iterator, timeoutMs, onTimeout, rep
     timer = setTimeout(() => {
       try { onTimeout?.(); } catch {}
       reject(firstActivityTimeoutError(reportedTimeoutMs));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([pending, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function nextWithTurnIdleDeadline(iterator, timeoutMs, onTimeout) {
+  if (!(timeoutMs > 0)) return iterator.next();
+  let timer;
+  const pending = Promise.resolve().then(() => iterator.next());
+  pending.catch(() => {});
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      try { onTimeout?.(); } catch {}
+      reject(turnIdleTimeoutError(timeoutMs));
     }, timeoutMs);
   });
   try {
@@ -1701,6 +1932,13 @@ function isMeaningfulTurnActivity(events) {
     'thinking', 'thinking-stream', 'assistant-text', 'text-stream',
     'tool-call', 'tool-result', 'permission-denied', 'prompt-error', 'result',
   ].includes(event?.kind));
+}
+
+function suppressSecurityReviewWorkerTranscriptEvent(event, { agentId, env = process.env } = {}) {
+  return env.GLADOS_SECURITY_REVIEW === '1'
+    && Boolean(event?.parentAgentId)
+    && event.parentAgentId === agentId
+    && (event.kind === 'assistant-text' || event.kind === 'text-stream');
 }
 
 async function waitForCoreMcpServers(iterable, sdkOptions, options = {}) {
@@ -1753,7 +1991,10 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
   const iterable = query({ prompt: sdkPromptWithAttachments(prompt, options.attachments), options: sdkOptions });
   const transcriptStore = store === false ? null : (store || new DashboardTranscriptStore(BLACKBOARD_DB));
   const events = [];
-  const context = { subagentByParentToolUseId: new Map() };
+  const context = {
+    subagentByParentToolUseId: new Map(),
+    env: options.env || process.env,
+  };
   let interrupted = false;
   async function interrupt(reason = 'interrupted') {
     if (interrupted) return;
@@ -1796,12 +2037,16 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
       : null;
     let firstActivitySeen = false;
     let sdkMessagesSeen = 0;
+    const turnIdleTimeoutMs = options.turnIdleTimeoutMs
+      ?? ((options.env || process.env).GLADOS_SECURITY_REVIEW === '1' ? 180_000 : 600_000);
     while (true) {
       const remainingMs = firstActivitySeen || !firstActivityDeadline
         ? 0
         : Math.max(1, firstActivityDeadline - Date.now());
       const next = firstActivitySeen || !firstActivityDeadline
-        ? await iterator.next()
+        ? await nextWithTurnIdleDeadline(iterator, turnIdleTimeoutMs, () => {
+          interrupt('active turn idle timeout').catch(() => {});
+        })
         : await nextWithFirstActivityDeadline(iterator, remainingMs, () => {
           interrupt('first model activity timeout').catch(() => {});
         }, firstActivityTimeoutMs);
@@ -1834,6 +2079,14 @@ async function streamAgentTurnOnce({ agentId, prompt, onEvent, store, queryImpl,
       if (typeof options.onSdkMessage === 'function') await options.onSdkMessage(message, context);
       if (!firstActivitySeen && isMeaningfulTurnActivity(mappedEvents)) firstActivitySeen = true;
       for (const ev of mappedEvents) {
+        // A source-review worker's prose is machine-to-machine control output.
+        // Tool/liveness events remain auditable, but forwarding its text (and
+        // especially raw transient API errors) as chat makes an automatically
+        // recovering review look terminal and duplicates the final report.
+        if (suppressSecurityReviewWorkerTranscriptEvent(ev, {
+          agentId,
+          env: options.env || process.env,
+        })) continue;
         // Streaming deltas are transient UI transport. Persisting every token
         // synchronously to SQLite delays the next SDK chunk and makes the
         // dashboard look stalled. The completed assistant event remains the
@@ -1876,7 +2129,8 @@ async function streamAgentTurn(args) {
     return await streamAgentTurnOnce(args);
   } catch (error) {
     const recoverableResumeFailure = isMissingSdkConversationError(error)
-      || isFirstActivityTimeoutError(error);
+      || isFirstActivityTimeoutError(error)
+      || isTurnIdleTimeoutError(error);
     if (!resumeSessionId || !recoverableResumeFailure) {
       throw await enhanceFirstActivityTimeoutError(error, options);
     }
@@ -1937,6 +2191,7 @@ module.exports = {
   waitForCoreMcpServers,
   isFirstActivityTimeoutError,
   enhanceFirstActivityTimeoutError,
+  suppressSecurityReviewWorkerTranscriptEvent,
   streamAgentTurn,
   bareModelAlias,
 };

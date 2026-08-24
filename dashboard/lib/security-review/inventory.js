@@ -2,7 +2,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { scanSensitiveData } = require('./sensitive-data');
+const { scanSensitiveData, sensitiveDataDispositionRows } = require('./sensitive-data');
 
 function git(repositoryPath, args, fallback = '') {
   try {
@@ -152,7 +152,11 @@ function routeCandidates(repositoryPath, files) {
     { id: 'java-route', regex: /@(?:Request|Get|Post|Put|Patch|Delete)Mapping\b/ },
     { id: 'graphql', regex: /\b(?:Query|Mutation|Resolver|FieldFunc)\b/ },
   ];
-  return lineMatches(repositoryPath, files, patterns, 'route-candidate');
+  const routeSourceFiles = files.filter(relative => (
+    classify(relative) === 'source'
+    || ['.graphql', '.gql'].includes(path.extname(relative).toLowerCase())
+  ));
+  return lineMatches(repositoryPath, routeSourceFiles, patterns, 'route-candidate');
 }
 
 function semanticReviewCandidates(repositoryPath, files) {
@@ -161,41 +165,72 @@ function semanticReviewCandidates(repositoryPath, files) {
       id: 'request-body-binding',
       checkId: 'request-binding-mass-assignment',
       regex: /\bBody\s+\*?(?:[A-Za-z_][\w]*\.)?[A-Z][\w]*\b|\b(?:req(?:uest)?\.body|request\.get_json|@RequestBody|BindJSON|ShouldBindJSON|json\.NewDecoder\([^)]*\)\.Decode)\b/i,
+      categories: ['source'],
     },
     {
       id: 'directory-query-builder',
       checkId: 'directory-query-filter-injection',
       regex: /\$(?:filter|search)\b|\b(?:odata|msgraph|graphserviceclient)\b|\b(?:Filter|Search)\s*:\s*(?:fmt\.Sprintf|[^,\n]*\+)|\b(?:displayName|userPrincipalName|mail)\s+(?:eq|ne|startswith)\b/i,
+      categories: ['source'],
     },
     {
       id: 'graphql-surface',
       checkId: 'graphql-abuse-controls',
       regex: /\bgraphql\b|ValidateDocument|introspection|MaxDepth|MaxComplexity|complexityLimit/i,
+      categories: ['source'],
     },
     {
       id: 'token-identifier-or-validation',
       checkId: 'bearer-token-replay',
       regex: /\b(?:jti|uti|nonce|token[_-]?id|replay)\b|\b(?:Verify|Validate|Parse)[A-Za-z]*(?:JWT|Token)\b/i,
+      categories: ['source'],
     },
     {
       id: 'oauth-scope-declaration-or-use',
       checkId: 'oauth-operation-scope-enforcement',
       regex: /\bOAuth2\b|\bsecurityScopes?\b|\brequiredScopes?\b|\bscope[_-]?claim\b|\bscp\b|(?:\b|\.)Security\s*(?::|=)/i,
+      categories: ['source'],
     },
     {
       id: 'authorization-policy-symbol',
       checkId: 'authorization-policy-constant-consistency',
       regex: /\b(?:Authorize|Authorization|Permission|Permissions|RequiredRole|RequiredPermission)[A-Za-z0-9_]*\b/,
+      categories: ['source'],
     },
     {
       id: 'orm-mutation',
       checkId: 'orm-mutation-ordering',
       regex: /\.(?:Create|Save|Update|Updates|Delete)\s*\(/,
+      categories: ['source'],
+    },
+    {
+      id: 'privileged-ci-event-or-identity',
+      checkId: 'privileged-ci-event-boundaries',
+      regex: /\bpull_request(?:_target)?\b|\bissue_comment\b|\bworkflow_dispatch\b|\b(?:terraform|tofu)[_-]?(?:apply|action)\b|\bservice[_ -]?account\b|\bid-token\s*:\s*write\b/i,
+      categories: ['cicd', 'configuration', 'iac', 'script'],
+    },
+    {
+      id: 'executable-dependency-reference',
+      checkId: 'immutable-executable-dependencies',
+      regex: /\buses\s*:\s*[^\s#]+@[^\s#]+|\bsource\s*=\s*["'][^"']+["']|\b(?:resolver|bundle|taskRef|pipelineRef)\s*:\s*|\bimage\s*:\s*[^\s#]+(?::[^\s@#]+)?\b/i,
+      categories: ['cicd', 'configuration', 'iac'],
+    },
+    {
+      id: 'role-intent-or-sensitive-permission',
+      checkId: 'least-privilege-role-intent',
+      regex: /\b(?:viewer|read[ -]?only|responder|operator|least[ -]?privilege)\b|\b(?:admin|delete|destroy|credential|client[_ -]?secret|identity[_ -]?provider|federat(?:e|ion)|jwks?|saml|oidc)\b/i,
+      categories: ['source', 'configuration', 'iac', 'cicd'],
+    },
+    {
+      id: 'deployment-change-filter-or-local-input',
+      checkId: 'deployment-trigger-dependency-closure',
+      regex: /\bpaths(?:-ignore)?\s*:|\bpathChanged\b|\bon-path-change\b|\bsource\s*=\s*["'](?:\.\.?\/|\/)[^"']+["']|\b(?:taskRef|pipelineRef|workspace|manifest|overlay)\b/i,
+      categories: ['cicd', 'configuration', 'iac'],
     },
   ];
   const grouped = new Map();
-  const sourceFiles = files.filter(relative => classify(relative) === 'source');
-  for (const relative of sourceFiles) {
+  for (const relative of files) {
+    const category = classify(relative);
     const file = path.join(repositoryPath, relative);
     let buffer;
     try { buffer = fs.readFileSync(file); } catch { continue; }
@@ -203,6 +238,7 @@ function semanticReviewCandidates(repositoryPath, files) {
     const lines = buffer.toString('utf8').split(/\r?\n/);
     lines.forEach((line, index) => {
       for (const pattern of patterns) {
+        if (pattern.categories && !pattern.categories.includes(category)) continue;
         if (!pattern.regex.test(line)) continue;
         const inventoryKey = `${relative}:${pattern.id}`;
         const existing = grouped.get(inventoryKey) || {
@@ -311,6 +347,13 @@ function generateSecurityReviewInventory({ repositoryPath, artifactRoot }) {
   writeJson(path.join(artifactRoot, 'run.json'), run);
   writeJson(path.join(artifactRoot, 'intake', 'scope.json'), { repository: run, scope: ['application', 'iac', 'cicd', 'history'], exclusions: [] });
   writeJsonLines(path.join(artifactRoot, 'inventory', 'files.jsonl'), fileRows);
+  writeJsonLines(path.join(artifactRoot, 'discovery', 'coverage-ledger.jsonl'), fileRows.map(row => ({
+    key: row.key,
+    path: row.path,
+    disposition: 'DEFERRED',
+    review_method: 'controller-inventory-bootstrap',
+    rationale: 'Awaiting evidence-backed file review disposition from the coordinator.',
+  })));
   writeJsonLines(path.join(artifactRoot, 'inventory', 'routes.jsonl'), routeCandidates(root, files));
   writeJsonLines(path.join(artifactRoot, 'inventory', 'suppressions.jsonl'), lineMatches(root, files, suppressionPatterns, 'suppression'));
   writeJsonLines(path.join(artifactRoot, 'inventory', 'http-clients.jsonl'), lineMatches(root, files, httpPatterns, 'http-client'));
@@ -330,6 +373,8 @@ function generateSecurityReviewInventory({ repositoryPath, artifactRoot }) {
   writeJson(path.join(artifactRoot, 'inventory', 'pii-history.json'), gitAvailable
     ? { schema_version: 1, engine: 'glados-sensitive-data/v1', mode: 'history', completed: false, unavailable: true, reason: 'PII history scanning is not yet supported safely', head: revision, candidates: [] }
     : { schema_version: 1, engine: 'glados-sensitive-data/v1', mode: 'history', completed: false, unavailable: true, reason: 'source snapshot has no Git metadata; history scanning requires a Git work tree', head: revision, candidates: [] });
+  writeJsonLines(path.join(artifactRoot, 'tracks', 'secrets-history', 'sensitive-data-dispositions.jsonl'),
+    sensitiveDataDispositionRows([...sensitive.secrets, ...sensitive.pii]));
   writeJsonLines(path.join(artifactRoot, 'validation', 'sensitive-data-verifications.jsonl'), []);
   return run;
 }

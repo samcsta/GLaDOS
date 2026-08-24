@@ -1197,6 +1197,50 @@ function renderInvestigationSessionManager(sessionHost) {
   }));
 }
 
+function positionSidebarSessionMenu(menu) {
+  if (!menu?.open) return;
+  const summary = menu.querySelector(':scope > summary');
+  const panel = menu.querySelector(':scope > div');
+  if (!summary || !panel) return;
+  const gutter = 8;
+  const gap = 4;
+  const anchor = summary.getBoundingClientRect();
+  const width = panel.offsetWidth || 196;
+  const height = panel.offsetHeight;
+  const left = Math.max(gutter, Math.min(window.innerWidth - width - gutter, anchor.right - width));
+  let top = anchor.bottom + gap;
+  if (top + height > window.innerHeight - gutter) top = anchor.top - height - gap;
+  top = Math.max(gutter, Math.min(window.innerHeight - height - gutter, top));
+  panel.style.left = `${Math.round(left)}px`;
+  panel.style.top = `${Math.round(top)}px`;
+  panel.dataset.positioned = 'true';
+}
+
+function wireSidebarSessionMenus(host) {
+  host.querySelectorAll('.sidebar-session-menu').forEach(menu => {
+    menu.addEventListener('toggle', () => {
+      const panel = menu.querySelector(':scope > div');
+      if (!menu.open) {
+        panel?.removeAttribute('data-positioned');
+        return;
+      }
+      document.querySelectorAll('.sidebar-session-menu[open]').forEach(other => {
+        if (other !== menu) other.open = false;
+      });
+      requestAnimationFrame(() => positionSidebarSessionMenu(menu));
+    });
+  });
+}
+
+let sidebarMenuPositionFrame = null;
+function queueSidebarSessionMenuPosition() {
+  if (sidebarMenuPositionFrame != null) return;
+  sidebarMenuPositionFrame = requestAnimationFrame(() => {
+    sidebarMenuPositionFrame = null;
+    document.querySelectorAll('.sidebar-session-menu[open]').forEach(positionSidebarSessionMenu);
+  });
+}
+
 function renderInvestigationNavigation() {
   const projectsHost = document.getElementById('projects-section');
   const sessionsHost = document.getElementById('sessions-section');
@@ -1298,6 +1342,7 @@ function renderInvestigationNavigation() {
     catch (error) { pushNotification('error', error.message, { toast: true, label: 'Sessions' }); }
   };
   const navigationHost = [projectsHost, sessionsHost];
+  navigationHost.forEach(wireSidebarSessionMenus);
   navigationHost.forEach(host => host.querySelectorAll('[data-session-select]').forEach(button => button.addEventListener('click', async () => {
     try { await activateInvestigationSession(button.dataset.sessionSelect); }
     catch (error) { pushNotification('error', error.message, { toast: true, label: 'Sessions' }); }
@@ -6154,14 +6199,16 @@ document.getElementById('notifications-clear')?.addEventListener('click', () => 
 });
 
 document.addEventListener('pointerdown', event => {
-  document.querySelectorAll('.overview-session-menu[open]').forEach(menu => {
+  document.querySelectorAll('.overview-session-menu[open], .sidebar-session-menu[open]').forEach(menu => {
     if (!menu.contains(event.target)) menu.open = false;
   });
 });
 document.addEventListener('keydown', event => {
   if (event.key !== 'Escape') return;
-  document.querySelectorAll('.overview-session-menu[open]').forEach(menu => { menu.open = false; });
+  document.querySelectorAll('.overview-session-menu[open], .sidebar-session-menu[open]').forEach(menu => { menu.open = false; });
 });
+window.addEventListener('resize', queueSidebarSessionMenuPosition);
+document.addEventListener('scroll', queueSidebarSessionMenuPosition, true);
 
 function applyPersistentLayout() {
   const root = document.documentElement;

@@ -45,7 +45,8 @@ test('Full Access changes the GLaDOS SDK mode and unlocks desktop tools only for
   const desktopTool = 'mcp__glados-ops__desktop_snapshot';
 
   const restricted = buildAgentSdkOptions('glados', { env, workspaceRoot });
-  assert.equal(restricted.permissionMode, 'dontAsk');
+  assert.equal(restricted.permissionMode, 'default');
+  assert.equal(typeof restricted.canUseTool, 'function');
   assert.equal(restricted.allowDangerouslySkipPermissions, false);
   assert.match(restricted.systemPrompt, /Full Access is disabled/);
   assert.match(decideToolUse({ agentId: 'glados', toolName: desktopTool, policy, workspaceRoot, env }).reason, /requires.*Full Access/i);

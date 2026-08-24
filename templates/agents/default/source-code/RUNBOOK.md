@@ -13,11 +13,13 @@ Reject a compound assignment that asks this one Agent SDK turn to coordinate the
 - The assessed repository is read-only. Do not edit, generate, format, or install dependencies into it.
 - Write only to the designated investigation `artifact_root` and blackboard.
 - Large-file rule: search first, then read only the necessary slice with explicit offset and a limit no greater than 300. Never request an entire large manifest, source map, generated report, transcript, or JSONL ledger in one Read call.
+- Every Read call includes `pages: "1"` unless a specific PDF page range is required. Bash is intentionally unavailable during source-review isolation; use Read, Glob, and Grep instead of searching for a shell tool.
 - Every blackboard task update must include both the exact `task_id` and `engagement_id`.
 
 ## Common Evidence Contract
 
-- Every finding requires file:line, reachable entry point, source-to-sink or authorization trace, exploitability assumptions, confidence, CWE, and CVSS preconditions.
+- Every finding requires file:line, reachable entry point, source-to-sink or authorization trace, exploitability assumptions, confidence, CWE, and CVSS preconditions. Separate the source-confirmed weakness, minimum attacker access, additional environmental/deployment preconditions, and any actually observed exploitability. A source-confirmed security-control failure with a plausible attacker profile and security impact remains a finding even when deployment or exploitation is unobserved. Authenticated users, authorized or compromised contributors, workforce/insider actors, and dependency publishers are valid attacker profiles when the source exposes those boundaries. Never present a valid JWT, network position, registry access, deployment reachability, or external-service behavior as observed unless retained evidence establishes it.
+- For CI/IaC/configuration assignments, explicitly trace privileged event boundaries, mutable executable dependencies, role-name/permission mismatches, and deployment-trigger dependency closure. Do not treat a tag, branch, registry module version, or image tag as immutable without a full content digest or commit.
 - Every tested-negative claim requires exact file and line range, the rule tested, observed evidence, and result. Never mark a package or directory CLEAN.
 - Do not print secret values. Record location/type and workflow-provided non-reversible fingerprints only.
 - Distinguish public identifiers from credentials and bearer secrets.
@@ -33,11 +35,11 @@ When `security_review_role: blind-discovery`:
 1. Use the deterministic inventory but do not read prior findings, CWEs, paths, or conclusions.
 2. Build route/controller/service/repository and trust-boundary maps before findings.
 3. Cover authz, injection, file handling, SSRF, deserialization, crypto, secrets, resilience, IaC, CI/CD, and production overlay differences.
-4. When assigned a `worker_id`, write only `discovery/deep/<worker_id>/candidates.jsonl` and `discovery/deep/<worker_id>/receipt.json`. Never use the legacy `discovery/workers/` path. Every candidate needs a stable local ID, CWE IDs, exact typed locations, summary, evidence, control, sink, reachability, counterevidence, proof gaps, and confidence. An empty candidate file plus a valid receipt is a successful no-new result.
+4. When assigned a `worker_id`, write only `discovery/deep/<worker_id>/candidates.jsonl`. Never write `receipt.json` and never use the legacy `discovery/workers/` path. The GLaDOS harness computes the exact-byte digest and atomically creates the receipt after your dispatch ends. Every candidate needs a stable local ID, CWE IDs, exact typed locations, summary, evidence, control, sink, reachability, counterevidence, proof gaps, and confidence. An empty candidate file is a successful no-new result.
    - Candidate rows must use exactly: `candidate_id`, `cwe_ids`, `locations`, `summary`, `evidence`, `control`, `sink`, `reachability`, `counterevidence`, `proof_gaps`, and `confidence`. Candidate IDs must be `<worker_id>-CNNNN` (for example `worker-001-C0001`); do not insert category labels such as `authz` into the ID.
    - The exact typed shape is `{"candidate_id":"worker-NNN-CNNN","cwe_ids":["CWE-N"],"locations":[{"path":"repo/relative/file","start_line":1,"end_line":1,"role":"source|control|sink|evidence"}],"summary":"...","evidence":"...","control":"...","sink":"...","reachability":"...","counterevidence":"...","proof_gaps":[],"confidence":"high|medium|low"}`. `proof_gaps` is always a JSON array, including when empty; never write it as a prose string.
    - Every location must use repository-relative `path`, positive `start_line`, `end_line`, and `role` (`source`, `control`, `sink`, or `evidence`). Never use `file`, `line`, `line_range`, or `symbol` in a discovery candidate location.
-   - The receipt must use exactly `worker_id`, `status: "SUCCEEDED"`, `candidate_count`, and the lowercase SHA-256 of the exact candidate JSONL bytes as `candidates_sha256`. `COMPLETED` and `CLEAN` are not valid receipt statuses.
+   - Do not calculate or guess a checksum. Receipt identity, candidate count, and SHA-256 are harness-owned mechanical evidence.
 5. Return a terminal worker result. A tool/model failure, missing artifact, or incomplete response is `FAILED` or `CANCELED`, never a successful zero-candidate result. Do not perform cross-worker deduplication yourself.
 6. Produce or update `discovery/findings.jsonl` and `discovery/coverage-ledger.jsonl` only when the coordinator explicitly assigns the primary aggregation role, deeply reviewing every file represented in the security-sensitive candidate inventory.
 7. When `context_mode: blind`, do not search for or open prior reports, Dradis projects, prior blackboard findings, old investigation artifacts, or earlier conclusions. Historical comparison belongs to a later operator-requested run.
@@ -45,6 +47,8 @@ When `security_review_role: blind-discovery`:
 ## Specialist Track Assignments
 
 When assigned a track, stay within its objective but disposition every supplied inventory row:
+
+- Always write `tracks/<track>/findings.jsonl`, including an empty JSONL file when the track has no findings. Each finding row must contain `finding_id`, `title`, `cwe_ids`, `severity`, `confidence`, exact typed `locations`, reachability, source-to-sink evidence, impact, and recommendation. A summary, evidence matrix, or task result does not replace this canonical track artifact.
 
 - `authorization-access-control`: every route/mutation, authn, OAuth scopes, caller/subject/object ownership, empty authorization filters, ORM operation ordering, and mass assignment. Trace route -> middleware -> handler -> service -> repository/ORM.
 - `data-flow-injection`: path/query/body/JWT sources to SQL, Graph/OData/LDAP, URL, command, log, and response sinks; include raw error reflection.

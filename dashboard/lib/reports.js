@@ -27,8 +27,31 @@ const IGNORED_DIRECTORY_NAMES = new Set([
   'repo', 'repos', 'repository', 'repositories',
 ]);
 const SECURITY_REVIEW_REPORT_NAMES = new Set([
-  'EXECUTIVE-SUMMARY.md', 'SECURITY-REVIEW.md', 'security-review-report.html', 'security-review-report.pdf',
+  'README.md', 'EXECUTIVE-SUMMARY.md', 'SECURITY-REVIEW.md', 'OBSERVATIONS.md',
+  'COVERAGE-AND-LIMITATIONS.md', 'REMEDIATION-PLAN.md', 'security-review-report.html',
+  'security-review-report.pdf', 'completion-receipt.json', 'scan-manifest.json',
+  'DELIVERABLES-MANIFEST.json',
 ]);
+
+function securityReviewDirectories() {
+  let entries = [];
+  try { entries = fs.readdirSync(INVESTIGATIONS_ROOT, { withFileTypes: true }); } catch { return []; }
+  return entries.filter(entry => entry.isDirectory() && !entry.name.startsWith('.')).map(entry => {
+    const reviewRoot = path.join(INVESTIGATIONS_ROOT, entry.name, 'security-review');
+    try {
+      const receipt = JSON.parse(fs.readFileSync(path.join(reviewRoot, 'completion-receipt.json'), 'utf8'));
+      return { directory: entry.name, reviewRoot, engagementId: receipt.engagement_id || null, receipt };
+    } catch { return null; }
+  }).filter(Boolean);
+}
+
+function resolveSecurityReviewDirectory(identity) {
+  const exact = path.join(INVESTIGATIONS_ROOT, identity, 'security-review');
+  if (fs.existsSync(path.join(exact, 'completion-receipt.json'))) return { directory: identity, reviewRoot: exact };
+  const matches = securityReviewDirectories().filter(row => row.engagementId === identity);
+  if (matches.length > 1) throw new Error(`security-review identity ${identity} is ambiguous across renamed folders`);
+  return matches[0] || { directory: identity, reviewRoot: exact };
+}
 
 // Extensions previewed inline as text (syntax-highlighting is client-side / off).
 const TEXT_EXTS = new Set([
@@ -120,22 +143,19 @@ function walk(dir, rel = '', state = { count: 0, truncated: false }, depth = 0) 
 }
 
 function completedSecurityReviews(state = { count: 0, truncated: false }) {
-  let engagements = [];
-  try { engagements = fs.readdirSync(INVESTIGATIONS_ROOT, { withFileTypes: true }); } catch { return []; }
   const nodes = [];
-  for (const engagement of engagements.sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!engagement.isDirectory() || engagement.name.startsWith('.') || state.count >= MAX_TREE_ENTRIES) continue;
-    const reviewRoot = path.join(INVESTIGATIONS_ROOT, engagement.name, 'security-review');
-    let receipt;
-    try { receipt = JSON.parse(fs.readFileSync(path.join(reviewRoot, 'completion-receipt.json'), 'utf8')); } catch { continue; }
+  for (const engagement of securityReviewDirectories().sort((a, b) => a.directory.localeCompare(b.directory))) {
+    if (state.count >= MAX_TREE_ENTRIES) continue;
+    const { reviewRoot, receipt } = engagement;
     if (receipt?.status !== 'SEALED' || receipt?.terminal_state !== 'SATURATED') continue;
+    const identity = receipt.engagement_id || engagement.directory;
     state.count += 1;
     const deliveryRoot = path.join(reviewRoot, 'deliverables');
-    let children = walk(deliveryRoot, engagement.name, state, 1);
+    let children = walk(deliveryRoot, identity, state, 1);
     children = children.filter(node => node.type === 'dir' || SECURITY_REVIEW_REPORT_NAMES.has(node.name));
-    const rawChildren = walk(reviewRoot, `${engagement.name}/raw`, state, 1).filter(node => node.name !== 'deliverables');
-    if (rawChildren.length) children.push({ type: 'dir', name: 'Artifacts & Source Data', path: `${engagement.name}/raw`, children: rawChildren });
-    if (children.length) nodes.push({ type: 'dir', name: engagement.name, path: engagement.name, children });
+    const rawChildren = walk(reviewRoot, `${identity}/raw`, state, 1).filter(node => node.name !== 'deliverables');
+    if (rawChildren.length) children.push({ type: 'dir', name: 'Artifacts & Source Data', path: `${identity}/raw`, children: rawChildren });
+    if (children.length) nodes.push({ type: 'dir', name: engagement.directory, path: identity, children });
   }
   if (state.count >= MAX_TREE_ENTRIES) state.truncated = true;
   return nodes;
@@ -179,11 +199,12 @@ function safeResolve(relPath) {
   let virtualSuffix = parts;
   if (rootInfo.virtual && parts.length) {
     const engagementId = parts.shift();
+    const resolvedReview = resolveSecurityReviewDirectory(engagementId);
     if (parts[0] === 'raw') {
       parts.shift();
-      virtualSuffix = [engagementId, 'security-review', ...parts];
+      virtualSuffix = [resolvedReview.directory, 'security-review', ...parts];
     } else {
-      virtualSuffix = [engagementId, 'security-review', 'deliverables', ...parts];
+      virtualSuffix = [resolvedReview.directory, 'security-review', 'deliverables', ...parts];
     }
   }
   const resolved = path.resolve(rootInfo.root, virtualSuffix.join('/'));
@@ -279,7 +300,7 @@ function deleteTarget(relPath) {
   if (key !== 'security-reviews') return safeResolve(relPath);
 
   const engagementId = parts.shift();
-  const reviewRoot = path.resolve(INVESTIGATIONS_ROOT, engagementId, 'security-review');
+  const reviewRoot = path.resolve(resolveSecurityReviewDirectory(engagementId).reviewRoot);
   if (!reviewRoot.startsWith(`${INVESTIGATIONS_ROOT}${path.sep}`)) throw new Error('path escapes security-reviews root');
   if (!parts.length) return reviewRoot;
   const suffix = parts[0] === 'raw' ? parts.slice(1) : ['deliverables', ...parts];

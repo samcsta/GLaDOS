@@ -477,6 +477,7 @@ CREATE TABLE IF NOT EXISTS security_review_model_observations (
   agent_id TEXT NOT NULL,
   review_role TEXT,
   worker_id TEXT,
+  worker_tool_call_id TEXT,
   requested_model TEXT,
   actual_model TEXT NOT NULL,
   billed_model_name TEXT,
@@ -497,6 +498,7 @@ CREATE TABLE IF NOT EXISTS security_review_llm_requests (
   agent_id TEXT NOT NULL,
   review_role TEXT,
   worker_id TEXT,
+  worker_tool_call_id TEXT,
   requested_model TEXT,
   status TEXT NOT NULL CHECK (status IN ('PENDING','SETTLED','UNRESOLVED','CONFLICT')) DEFAULT 'PENDING',
   lookup_attempts INTEGER NOT NULL DEFAULT 0,
@@ -698,6 +700,11 @@ CREATE INDEX IF NOT EXISTS idx_replan_state ON replan_proposals(state);
   if (!observationCols.has('provider_model')) runSql(paths.blackboardDb, 'ALTER TABLE security_review_model_observations ADD COLUMN provider_model TEXT;', { ignoreError: true });
   if (!observationCols.has('attestation_level')) runSql(paths.blackboardDb, "ALTER TABLE security_review_model_observations ADD COLUMN attestation_level TEXT NOT NULL DEFAULT 'deployment';", { ignoreError: true });
   if (!observationCols.has('gateway_call_id')) runSql(paths.blackboardDb, 'ALTER TABLE security_review_model_observations ADD COLUMN gateway_call_id TEXT;', { ignoreError: true });
+  if (!observationCols.has('worker_tool_call_id')) runSql(paths.blackboardDb, 'ALTER TABLE security_review_model_observations ADD COLUMN worker_tool_call_id TEXT;', { ignoreError: true });
+  const requestCols = sqliteTableColumns(paths.blackboardDb, 'security_review_llm_requests');
+  if (!requestCols.has('worker_tool_call_id')) runSql(paths.blackboardDb, 'ALTER TABLE security_review_llm_requests ADD COLUMN worker_tool_call_id TEXT;', { ignoreError: true });
+  runSql(paths.blackboardDb, 'CREATE INDEX IF NOT EXISTS idx_security_review_model_worker_dispatch ON security_review_model_observations(engagement_id, worker_tool_call_id);', { ignoreError: true });
+  runSql(paths.blackboardDb, 'CREATE INDEX IF NOT EXISTS idx_security_review_request_worker_dispatch ON security_review_llm_requests(engagement_id, worker_tool_call_id);', { ignoreError: true });
   const workerCols = sqliteTableColumns(paths.blackboardDb, 'security_review_worker_runs');
   if (!workerCols.has('requested_model')) runSql(paths.blackboardDb, 'ALTER TABLE security_review_worker_runs ADD COLUMN requested_model TEXT;', { ignoreError: true });
   if (!workerCols.has('attempt')) runSql(paths.blackboardDb, 'ALTER TABLE security_review_worker_runs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1;', { ignoreError: true });

@@ -117,6 +117,18 @@ test('project navigation is a collapsible folder tree and Sessions contains only
   assert.match(css, /\.sidebar-project-row\.session-drop-target/);
 });
 
+test('sidebar session actions stay anchored inside the visible viewport', () => {
+  const app = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
+  const css = fs.readFileSync(path.join(ROOT, 'dashboard/public/styles.css'), 'utf8');
+  assert.match(app, /function positionSidebarSessionMenu\(menu\)/);
+  assert.match(app, /anchor\.right - width/);
+  assert.match(app, /anchor\.top - height - gap/);
+  assert.match(app, /window\.innerHeight - height - gutter/);
+  assert.match(app, /document\.addEventListener\('scroll', queueSidebarSessionMenuPosition, true\)/);
+  assert.match(css, /\.sidebar-session-menu > div\s*\{[^}]*position:\s*fixed[^}]*max-height:\s*calc\(100vh - 16px\)[^}]*overflow-y:\s*auto/s);
+  assert.match(css, /\.sidebar-session-menu\[open\] > div:not\(\[data-positioned="true"\]\)\s*\{[^}]*visibility:\s*hidden/s);
+});
+
 test('session switching leaves background work running and refreshes every session indicator', () => {
   const app = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
   const server = fs.readFileSync(path.join(ROOT, 'dashboard/server.js'), 'utf8');

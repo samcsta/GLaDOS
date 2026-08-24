@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { app, BrowserWindow } = require('electron');
+const { writeDeliverablesManifest } = require('../../dashboard/lib/security-review/deliverables');
 
 async function main() {
   const htmlPath = path.resolve(process.argv[2] || '');
@@ -17,7 +18,12 @@ async function main() {
     fs.writeFileSync(outputPath, pdf, { mode: 0o600 });
     if (path.basename(path.dirname(htmlPath)) === 'deliverables') {
       const reviewRoot = path.dirname(path.dirname(htmlPath));
-      fs.writeFileSync(path.join(reviewRoot, 'security-review-report.pdf'), pdf, { mode: 0o600 });
+      const receipt = JSON.parse(fs.readFileSync(path.join(reviewRoot, 'completion-receipt.json'), 'utf8'));
+      const run = JSON.parse(fs.readFileSync(path.join(reviewRoot, 'run.json'), 'utf8'));
+      writeDeliverablesManifest(path.dirname(htmlPath), {
+        receipt,
+        completedAt: run.deepScan?.completedAt || null,
+      });
     }
     process.stdout.write(`${JSON.stringify({ outputPath, bytes: pdf.length })}\n`);
   } finally {

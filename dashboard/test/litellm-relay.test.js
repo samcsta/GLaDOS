@@ -4,6 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { ReadableStream } = require('node:stream/web');
 const { LiteLlmResponseRelay, finiteCost } = require('../lib/litellm-relay');
 
 function listen(server) {
@@ -84,4 +85,34 @@ test('stream relay rejects credentials other than the configured GLaDOS key', as
 test('streamed zero-cost headers remain unsettled instead of claiming a free request', () => {
   assert.equal(finiteCost('0.0'), null);
   assert.equal(finiteCost('0.125'), 0.125);
+});
+
+test('upstream stream failure closes only the relay response', async () => {
+  const fixtureCredential = ['fixture', 'relay', 'credential'].join('-');
+  const relay = new LiteLlmResponseRelay({
+    tokenLoader: () => fixtureCredential,
+    fetchImpl: async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(Buffer.from('event: content_block_delta\n'));
+        setImmediate(() => controller.error(new Error('fixture upstream socket closed')));
+      },
+    }), {
+      status: 200,
+      headers: {
+        'content-type': 'text/event-stream',
+        'x-litellm-call-id': 'call-stream-error',
+        'x-litellm-model-id': 'deployment-terra',
+      },
+    }),
+    dbPath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'glados-relay-test-')), 'receipts.db'),
+  });
+  try {
+    const url = await relay.ensureStarted();
+    await assert.rejects(fetch(`${url}/v1/messages`, {
+      method: 'POST',
+      headers: { 'x-api-key': fixtureCredential, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-terra', stream: true }),
+    }).then(response => response.text()), /terminated|fetch failed|socket/i);
+    assert.equal(relay.server.listening, true);
+  } finally { await relay.close(); }
 });

@@ -8,6 +8,7 @@ const cp = require('node:child_process');
 const {
   SPECIALIST_TRACKS,
   SEMANTIC_REVIEW_CHECKS,
+  securityReviewArtifactRoot,
   securityReviewCoordinatorPrompt,
   sourceReviewGateStatus,
 } = require('../lib/security-review/workflow');
@@ -20,11 +21,14 @@ const {
   claimDiscoveryWorker,
   discoveryDispatchCheckpoint,
   discoverySaturationCheckpoint,
+  ensureDiscoverySaturated,
   finalizeDiscoveryWorker,
+  materializeWorkerReceipt,
   normalizeDeepScanConfig,
   reconcileActiveSecurityReviewWorkers,
   reconcileCompletedDiscoveryWorker,
   reconcileInvalidSuccessfulDiscoveryWorkers,
+  validateSemanticIssueClosure,
 } = require('../lib/security-review/deep-scan');
 const { ensureBlackboardDb } = require('../../scripts/lib/glados-local');
 
@@ -43,6 +47,33 @@ function writeJsonLines(root, relative, rows) {
 function sha256(root, relative) {
   return crypto.createHash('sha256').update(fs.readFileSync(path.join(root, relative))).digest('hex');
 }
+
+function validDiscoveryCandidate(workerId = 'worker-001', overrides = {}) {
+  return {
+    candidate_id: `${workerId}-C0001`,
+    cwe_ids: ['CWE-20'],
+    locations: [{ path: 'main.go', start_line: 1, end_line: 1, role: 'evidence' }],
+    summary: 'Candidate requiring review.',
+    evidence: 'Exact source evidence is retained for independent review.',
+    control: 'The candidate crosses an input validation boundary.',
+    sink: 'The candidate reaches a security-sensitive operation.',
+    reachability: 'The source path may reach the sink under stated assumptions.',
+    counterevidence: 'No complete mitigating control was established.',
+    proof_gaps: [],
+    confidence: 'medium',
+    ...overrides,
+  };
+}
+
+test('security review artifact resolution preserves engagement identity after a folder rename', () => {
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-review-resolve-'));
+  const reviewRoot = path.join(runtime, 'investigations', 'renamed-review', 'security-review');
+  fs.mkdirSync(reviewRoot, { recursive: true });
+  writeJson(reviewRoot, 'completion-receipt.json', { engagement_id: 'eng-1' });
+
+  assert.equal(securityReviewArtifactRoot(runtime, 'eng-1'), reviewRoot);
+  assert.equal(securityReviewArtifactRoot(runtime, 'missing'), path.join(runtime, 'investigations', 'missing', 'security-review'));
+});
 
 test('runtime model ledger rejects SDK lifecycle placeholders', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-model-ledger-test-'));
@@ -120,9 +151,14 @@ test('controller projection overwrites model-authored ledgers from authoritative
       'gpt-5.6-terra','litellm:response-headers','local-1','deployment-1','2026-08-14T12:00:30Z','gpt-5.6-terra','deployment','gateway-1')`).run();
   db.close();
   writeJsonLines(root, 'discovery/deep/workers.jsonl', [{ worker_id: 'fabricated' }]);
+  writeJson(root, 'scan-manifest.json', { artifact_sha256: {} });
+  writeJson(root, 'completion-receipt.json', { status: 'SEALED', artifact_sha256: {} });
   const { projectSecurityReviewLedgers } = require('../lib/security-review/deep-scan');
-  projectSecurityReviewLedgers({ dbPath, artifactRoot: root, engagementId: 'eng-projection' });
+  const projection = projectSecurityReviewLedgers({ dbPath, artifactRoot: root, engagementId: 'eng-projection' });
   const worker = JSON.parse(fs.readFileSync(path.join(root, 'discovery/deep/workers.jsonl'), 'utf8').trim());
+  assert.equal(projection.sealInvalidated, true);
+  assert.equal(fs.existsSync(path.join(root, 'completion-receipt.json')), false);
+  assert.equal(fs.existsSync(path.join(root, 'scan-manifest.json')), false);
   assert.equal(worker.worker_id, 'worker-001');
   assert.equal(worker.actual_model, 'deployment-1');
   assert.deepEqual(worker.model_observation_ids, ['obs-1']);
@@ -156,6 +192,50 @@ test('durable receipt and observation reconcile a canceled worker after late com
   const check = new Database(dbPath, { readonly: true });
   assert.equal(check.prepare("SELECT status FROM security_review_worker_runs WHERE engagement_id='eng-late'").get().status, 'SUCCEEDED');
   check.close();
+});
+
+test('harness owns worker receipts and dispatch identity isolates retry model evidence', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-dispatch-bound-worker-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  writeJson(root, 'run.json', { orchestrationRevision: 2 });
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath);
+  db.prepare("INSERT OR IGNORE INTO engagements (id, session_id, target_name, scope) VALUES ('eng-bound','legacy','fixture','[]')").run();
+  db.prepare(`INSERT INTO security_review_worker_runs
+    (engagement_id,worker_id,sequence,tool_call_id,status,started_at,completed_at,error,requested_model)
+    VALUES ('eng-bound','worker-001',1,'tool-current','CANCELED','2026-08-14T12:02:00Z','2026-08-14T12:03:00Z','parent ended','gpt-5.6-terra')`).run();
+  db.prepare(`INSERT INTO security_review_worker_attempts
+    (engagement_id,worker_id,sequence,attempt,tool_call_id,status,started_at,completed_at,error)
+    VALUES ('eng-bound','worker-001',1,1,'tool-current','CANCELED','2026-08-14T12:02:00Z','2026-08-14T12:03:00Z','parent ended')`).run();
+  const insertObservation = db.prepare(`INSERT INTO security_review_model_observations
+    (observation_id,engagement_id,agent_id,review_role,worker_id,worker_tool_call_id,requested_model,
+     actual_model,billed_model_name,source,request_id,gateway_model_id,observed_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  insertObservation.run('obs-stale', 'eng-bound', 'source-code', 'source-code-primary', 'worker-001', 'tool-stale',
+    'claude-opus-4-7', 'deployment-claude', 'claude-opus-4-7', 'litellm:response-headers',
+    'request-stale', 'deployment-claude', '2026-08-14T12:01:00Z');
+  insertObservation.run('obs-current', 'eng-bound', 'source-code', 'source-code-primary', 'worker-001', 'tool-current',
+    'gpt-5.6-terra', 'deployment-terra', 'gpt-5.6-terra', 'litellm:response-headers',
+    'request-current', 'deployment-terra', '2026-08-14T12:02:30Z');
+  db.close();
+
+  writeJsonLines(root, 'discovery/deep/worker-001/candidates.jsonl', [validDiscoveryCandidate()]);
+  writeJson(root, 'discovery/deep/worker-001/receipt.json', {
+    worker_id: 'worker-001', status: 'SUCCEEDED', candidate_count: 999,
+    candidates_sha256: 'PENDING_EXACT_BYTE_SHA256_UNAVAILABLE',
+  });
+
+  assert.equal(reconcileCompletedDiscoveryWorker({
+    dbPath, artifactRoot: root, engagementId: 'eng-bound', toolCallId: 'tool-current',
+  }), true);
+  const receipt = JSON.parse(fs.readFileSync(path.join(root, 'discovery/deep/worker-001/receipt.json'), 'utf8'));
+  assert.equal(receipt.candidate_count, 1);
+  assert.equal(receipt.candidates_sha256, sha256(root, 'discovery/deep/worker-001/candidates.jsonl'));
+  const worker = JSON.parse(fs.readFileSync(path.join(root, 'discovery/deep/workers.jsonl'), 'utf8').trim());
+  assert.equal(worker.dispatch_id, 'tool-current');
+  assert.equal(worker.actual_model, 'deployment-terra');
+  assert.deepEqual(worker.model_observation_ids, ['obs-current']);
 });
 
 test('worker reconciliation accepts the legacy discovery/workers artifact location', () => {
@@ -248,11 +328,26 @@ test('controller can transition proven discovery saturation to terminal state', 
   delete manifest.completed_at;
   writeJson(root, 'run.json', run);
   writeJson(root, 'discovery/deep/manifest.json', manifest);
-  const saturation = require('../lib/security-review/deep-scan').discoverySaturationCheckpoint(root);
+  const saturation = discoverySaturationCheckpoint(root);
   assert.equal(saturation.passed, true, saturation.invalid.join('; '));
-  require('../lib/security-review/deep-scan').markDeepScanSaturated(root, '2026-08-18T04:00:00.000Z');
+  const dedupeFile = path.join(root, 'discovery/deep/dedupe.json');
+  const dedupe = JSON.parse(fs.readFileSync(dedupeFile, 'utf8'));
+  dedupe.input_worker_ids = [];
+  dedupe.new_candidate_counts = {};
+  dedupe.no_new_streak = 0;
+  writeJson(root, 'discovery/deep/dedupe.json', dedupe);
+  manifest.status = 'SATURATED';
+  manifest.completed_at = '2026-08-18T03:59:00.000Z';
+  writeJson(root, 'discovery/deep/manifest.json', manifest);
+  const transitioned = ensureDiscoverySaturated(root, '2026-08-18T04:00:00.000Z');
+  assert.equal(transitioned.passed, true, transitioned.invalid.join('; '));
   assert.equal(JSON.parse(fs.readFileSync(runFile, 'utf8')).deepScan.terminalState, 'SATURATED');
   assert.equal(JSON.parse(fs.readFileSync(manifestFile, 'utf8')).status, 'SATURATED');
+  const repairedDedupe = JSON.parse(fs.readFileSync(dedupeFile, 'utf8'));
+  const expectedWorkers = Array.from({ length: 7 }, (_, index) => `worker-${String(index + 1).padStart(3, '0')}`);
+  assert.deepEqual(repairedDedupe.input_worker_ids, expectedWorkers);
+  assert.deepEqual(repairedDedupe.new_candidate_counts, Object.fromEntries(expectedWorkers.map((workerId, index) => [workerId, index === 0 ? 1 : 0])));
+  assert.equal(repairedDedupe.no_new_streak, 6);
 });
 
 test('controller-owned worker claims allow three-wide discovery and reject overflow', () => {
@@ -287,6 +382,33 @@ test('controller-owned worker claims allow three-wide discovery and reject overf
   }), { claimed: true });
 });
 
+test('controller persists a new sequential worker as the retry of a failed worker', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-worker-retry-claim-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  const artifactRoot = path.join(root, 'investigations', 'eng-retry', 'security-review');
+  fs.mkdirSync(artifactRoot, { recursive: true });
+  writeJson(artifactRoot, 'run.json', { deepScan: { maxDiscoveryRuns: 60 } });
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath);
+  db.prepare("INSERT INTO engagements (id, target_name) VALUES ('eng-retry', 'fixture')").run();
+  db.prepare(`INSERT INTO security_review_worker_runs
+    (engagement_id,worker_id,sequence,tool_call_id,status,started_at,completed_at,error,requested_model)
+    VALUES ('eng-retry','worker-001',1,'tool-failed','FAILED','2026-08-14T12:00:00Z','2026-08-14T12:01:00Z','invalid candidate schema','gpt-5.6-terra')`).run();
+  db.prepare(`INSERT INTO security_review_worker_attempts
+    (engagement_id,worker_id,sequence,attempt,tool_call_id,status,started_at,completed_at,error)
+    VALUES ('eng-retry','worker-001',1,1,'tool-failed','FAILED','2026-08-14T12:00:00Z','2026-08-14T12:01:00Z','invalid candidate schema')`).run();
+  db.close();
+
+  assert.deepEqual(claimDiscoveryWorker({
+    dbPath, artifactRoot, engagementId: 'eng-retry', workerId: 'worker-002', toolCallId: 'tool-retry', retryOf: 'worker-001',
+  }), { claimed: true });
+  const check = new Database(dbPath, { readonly: true });
+  const retry = check.prepare("SELECT status, retry_of FROM security_review_worker_runs WHERE worker_id='worker-002'").get();
+  assert.deepEqual(retry, { status: 'STARTED', retry_of: 'worker-001' });
+  check.close();
+});
+
 test('successful tool results cannot finalize discovery without durable artifacts', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-worker-finalize-artifacts-'));
   const dbPath = path.join(root, 'blackboard.db');
@@ -304,10 +426,56 @@ test('successful tool results cannot finalize discovery without durable artifact
 
   assert.equal(finalizeDiscoveryWorker({
     dbPath, artifactRoot: root, engagementId: 'eng-finalize', toolCallId: 'tool-finalize', status: 'SUCCEEDED',
-  }), false);
+  }), true);
   const check = new Database(dbPath, { readonly: true });
-  assert.equal(check.prepare("SELECT status FROM security_review_worker_runs WHERE engagement_id='eng-finalize'").get().status, 'STARTED');
+  const rejected = check.prepare("SELECT status, error FROM security_review_worker_runs WHERE engagement_id='eng-finalize'").get();
+  assert.equal(rejected.status, 'FAILED');
+  assert.match(rejected.error, /rejected before terminal receipt acceptance/);
   check.close();
+});
+
+test('candidate schema is validated before a worker receipt can become terminal', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-worker-schema-before-receipt-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath);
+  db.prepare("INSERT INTO engagements (id, target_name) VALUES ('eng-schema', 'fixture')").run();
+  db.prepare(`INSERT INTO security_review_worker_runs
+    (engagement_id,worker_id,sequence,tool_call_id,status,started_at,requested_model)
+    VALUES ('eng-schema','worker-001',1,'tool-schema','STARTED','2026-08-14T12:00:00Z','gpt-5.6-terra')`).run();
+  db.prepare(`INSERT INTO security_review_worker_attempts
+    (engagement_id,worker_id,sequence,attempt,tool_call_id,status,started_at)
+    VALUES ('eng-schema','worker-001',1,1,'tool-schema','STARTED','2026-08-14T12:00:00Z')`).run();
+  db.close();
+  writeJsonLines(root, 'discovery/deep/worker-001/candidates.jsonl', [validDiscoveryCandidate('worker-001', {
+    locations: [{ path: 'main.go', start_line: -1, end_line: 1, role: 'evidence' }],
+  })]);
+
+  assert.equal(finalizeDiscoveryWorker({
+    dbPath, artifactRoot: root, engagementId: 'eng-schema', toolCallId: 'tool-schema', status: 'SUCCEEDED',
+  }), true);
+  assert.equal(fs.existsSync(path.join(root, 'discovery/deep/worker-001/receipt.json')), false);
+  const check = new Database(dbPath, { readonly: true });
+  const worker = check.prepare("SELECT status, error FROM security_review_worker_runs WHERE engagement_id='eng-schema'").get();
+  assert.equal(worker.status, 'FAILED');
+  assert.match(worker.error, /start_line: expected positive integer/);
+  check.close();
+});
+
+test('worker receipt canonicalizes a zero-based first source line before hashing', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-worker-zero-line-'));
+  writeJsonLines(root, 'discovery/deep/worker-001/candidates.jsonl', [validDiscoveryCandidate('worker-001', {
+    locations: [{ path: 'main.go', start_line: 0, end_line: 4, role: 'reachability' }],
+  })]);
+
+  const result = materializeWorkerReceipt(root, 'worker-001');
+  assert.equal(result.valid, true);
+  const candidate = JSON.parse(fs.readFileSync(path.join(root, 'discovery/deep/worker-001/candidates.jsonl'), 'utf8'));
+  const receipt = JSON.parse(fs.readFileSync(path.join(root, 'discovery/deep/worker-001/receipt.json'), 'utf8'));
+  assert.equal(candidate.locations[0].start_line, 1);
+  assert.equal(candidate.locations[0].role, 'evidence');
+  assert.equal(receipt.candidates_sha256, sha256(root, 'discovery/deep/worker-001/candidates.jsonl'));
 });
 
 test('recovery demotes legacy successful workers that have no durable artifacts', () => {
@@ -331,6 +499,38 @@ test('recovery demotes legacy successful workers that have no durable artifacts'
   const check = new Database(dbPath, { readonly: true });
   assert.equal(check.prepare("SELECT status FROM security_review_worker_runs WHERE engagement_id='eng-invalid'").get().status, 'FAILED');
   assert.equal(check.prepare("SELECT status FROM security_review_worker_attempts WHERE engagement_id='eng-invalid'").get().status, 'FAILED');
+  check.close();
+});
+
+test('recovery demotes a receipt-bound success whose candidate schema is invalid', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-worker-demote-schema-invalid-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath);
+  db.prepare("INSERT INTO engagements (id, target_name) VALUES ('eng-invalid-schema', 'fixture')").run();
+  db.prepare(`INSERT INTO security_review_worker_runs
+    (engagement_id,worker_id,sequence,tool_call_id,status,started_at,completed_at,requested_model)
+    VALUES ('eng-invalid-schema','worker-001',1,'tool-invalid-schema','SUCCEEDED','2026-08-14T12:00:00Z','2026-08-14T12:01:00Z','gpt-5.6-terra')`).run();
+  db.prepare(`INSERT INTO security_review_worker_attempts
+    (engagement_id,worker_id,sequence,attempt,tool_call_id,status,started_at,completed_at)
+    VALUES ('eng-invalid-schema','worker-001',1,1,'tool-invalid-schema','SUCCEEDED','2026-08-14T12:00:00Z','2026-08-14T12:01:00Z')`).run();
+  db.close();
+  const candidates = 'discovery/deep/worker-001/candidates.jsonl';
+  writeJsonLines(root, candidates, [validDiscoveryCandidate('worker-001', {
+    locations: [{ path: 'main.go', start_line: 0, end_line: 1, role: 'evidence' }],
+  })]);
+  writeJson(root, 'discovery/deep/worker-001/receipt.json', {
+    worker_id: 'worker-001', status: 'SUCCEEDED', candidate_count: 1, candidates_sha256: sha256(root, candidates),
+  });
+
+  assert.deepEqual(reconcileInvalidSuccessfulDiscoveryWorkers({
+    dbPath, artifactRoot: root, engagementId: 'eng-invalid-schema',
+  }), ['worker-001']);
+  const check = new Database(dbPath, { readonly: true });
+  const worker = check.prepare("SELECT status, error FROM security_review_worker_runs WHERE engagement_id='eng-invalid-schema'").get();
+  assert.equal(worker.status, 'FAILED');
+  assert.match(worker.error, /start_line: expected positive integer/);
   check.close();
 });
 
@@ -413,6 +613,7 @@ function completeDeepArtifacts(root) {
     no_new_streak: 6,
   });
   writeJsonLines(root, 'discovery/candidates.jsonl', [candidate]);
+  writeJsonLines(root, 'validation/new-candidates.jsonl', []);
   writeJsonLines(root, 'validation/candidate-closure.jsonl', [{
     candidate_id: 'worker-001-C0001', disposition: 'SUPPRESSED', validation_method: 'independent source inspection',
     evidence: 'The relevant path is constrained.', counterevidence: 'No contrary unsafe path was found.', proof_gaps: [],
@@ -456,14 +657,19 @@ function completeDeepArtifacts(root) {
   writeJson(root, 'coverage.json', { files: [{ path: 'main.go', disposition: 'REVIEWED', review_method: 'deep-file-review' }] });
   const sealed = [
     'run.json', 'context/threat-model.json', 'discovery/deep/workers.jsonl', 'discovery/deep/dedupe.json',
-    'discovery/candidates.jsonl', 'validation/candidate-closure.jsonl', 'validation/attack-paths.jsonl',
+    'discovery/candidates.jsonl', 'discovery/findings.jsonl', 'validation/new-candidates.jsonl',
+    'validation/candidate-closure.jsonl', 'validation/attack-paths.jsonl',
     'validation/runtime-model-observations.jsonl', 'validation/model-receipts.jsonl', 'findings.json', 'coverage.json',
+    ...SPECIALIST_TRACKS.map(track => `tracks/${track}/findings.jsonl`),
   ];
   const artifactSha256 = Object.fromEntries(sealed.map(relative => [relative, sha256(root, relative)]));
   writeJson(root, 'scan-manifest.json', {
     producer: 'glados-security-review/v1', terminal_state: 'SATURATED', repository_head: run.head, artifact_sha256: artifactSha256,
   });
-  writeJson(root, 'completion-receipt.json', { status: 'SEALED', terminal_state: 'SATURATED', artifact_sha256: artifactSha256 });
+  writeJson(root, 'completion-receipt.json', {
+    status: 'SEALED', terminal_state: 'SATURATED', artifact_sha256: artifactSha256,
+    scan_manifest_sha256: sha256(root, 'scan-manifest.json'),
+  });
 }
 
 function authoritativeDeepOptions(root) {
@@ -537,7 +743,7 @@ function completeReviewArtifacts(root, { classLevelCoverage = false, omitSemanti
     result: 'No unsafe behavior is present in the minimal test fixture.',
   };
   writeJson(root, 'validation/semantic-coverage.json', {
-    checks: SEMANTIC_REVIEW_CHECKS
+    checks: SEMANTIC_REVIEW_CHECKS.slice(0, 11)
       .filter(check => check.id !== omitSemanticCheck)
       .map(check => ({ id: check.id, status: 'TESTED_NEGATIVE', analysis: check.requirement, evidence: [evidence] })),
     candidate_dispositions: omitCandidateDisposition ? [] : [{
@@ -588,7 +794,13 @@ test('source review coordinator contract requires staged analysis and hard gates
   assert.match(prompt, /Never invent, predict, alias, or use a placeholder observation ID/);
   assert.match(prompt, /Never pause for operator approval between batches/);
   assert.match(prompt, /Neither workers nor the coordinator may create or edit discovery\/deep\/workers\.jsonl/);
+  assert.match(prompt, /contract_revision: v4\.3-source-reportability-semantic-dedupe/);
+  assert.match(prompt, /harness computes the exact-byte SHA-256 and atomically creates/);
+  assert.match(prompt, /workers must not guess, calculate, or write receipt digests/i);
   assert.match(prompt, /three standalone machine-readable lines exactly/);
+  assert.match(prompt, /next sequential worker-NNN.*retry_of: worker-NNN/s);
+  assert.match(prompt, /first write the complete canonical union.*dedupe\.json last as the commit marker/s);
+  assert.match(prompt, /Never dispatch a worker in the same response as either aggregate write/);
   assert.match(prompt, /Preserve the harness-created discovery\/deep\/manifest\.json fields/);
 });
 
@@ -598,7 +810,7 @@ test('security review automatically generates built-in reports after sealing', (
   });
   assert.match(prompt, /Automatically retry incomplete static-analysis\/validation tasks/);
   assert.match(prompt, /return the validated result/);
-  assert.match(prompt, /automatically generates and indexes the sealed security-review Markdown, HTML, per-finding, and desktop PDF deliverables/i);
+  assert.match(prompt, /automatically generates and indexes the sealed security-review Markdown, HTML, per-finding, per-observation, coverage\/limitations, remediation-plan, integrity-manifest, and desktop PDF deliverables/i);
   assert.match(prompt, /Do not wait for wrap approval/);
   assert.match(prompt, /approval remains required for live\/target-facing actions and external publication/i);
   assert.match(prompt, /Do not call engagement completion/);
@@ -786,6 +998,9 @@ test('validator-origin candidates join closure without fabricating worker dedupe
     reachability: 'Reachable', counterevidence: 'None', proof_gaps: [], confidence: 'high',
   };
   writeJsonLines(root, 'validation/new-candidates.jsonl', [candidate]);
+  writeJson(root, 'validation/challenge-matrix.json', {
+    outcomes: [{ candidate_id: 'NEW-001', outcome: 'NEW' }],
+  });
   const closure = fs.readFileSync(path.join(root, 'validation/candidate-closure.jsonl'), 'utf8').trim().split(/\r?\n/).map(JSON.parse);
   closure.push({ candidate_id: 'NEW-001', disposition: 'NOT_APPLICABLE', validation_method: 'validator review', evidence: 'Evidence', counterevidence: 'None', proof_gaps: [] });
   writeJsonLines(root, 'validation/candidate-closure.jsonl', closure);
@@ -794,6 +1009,29 @@ test('validator-origin candidates join closure without fabricating worker dedupe
   writeJsonLines(root, 'validation/attack-paths.jsonl', attacks);
   const result = sourceReviewGateStatus(root, authoritativeDeepOptions(root));
   assert.equal(result.invalid.some(item => /validator candidates vs validation closure|validator candidates vs attack-path/.test(item)), false);
+});
+
+test('source review gate rejects a specialist finding omitted from closure and validation', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-source-review-specialist-closure-'));
+  completeReviewArtifacts(root);
+  const finding = {
+    finding_id: 'AUTHZ-001', title: 'Missing object authorization', severity: 'high', confidence: 'high',
+    cwe_ids: ['CWE-862'], description: 'A privileged update lacks object authorization.', impact: 'Unauthorized mutation.',
+    recommendation: 'Enforce object authorization.', reachability: 'Authenticated route.',
+    source_to_sink_evidence: 'main.go:1-5 reaches the update.',
+    locations: [{ path: 'main.go', start_line: 1, end_line: 5, role: 'sink' }],
+  };
+  writeJsonLines(root, 'tracks/authorization-access-control/findings.jsonl', [finding]);
+  writeJsonLines(root, 'discovery/findings.jsonl', [finding]);
+  writeJson(root, 'validation/challenge-matrix.json', {
+    outcomes: [{ candidate_id: 'AUTHZ-001', outcome: 'CONFIRMED_WITH_CORRECTION' }],
+  });
+
+  const result = sourceReviewGateStatus(root, authoritativeDeepOptions(root));
+
+  assert.equal(result.passed, false);
+  assert.equal(result.invalid.some(item => /canonical and validator candidates vs validation closure/.test(item)), true);
+  assert.equal(result.invalid.some(item => /AUTHZ-001: requires exactly one validator challenge outcome/.test(item)), false);
 });
 
 test('source review gate accepts evidence-backed observations outside the vulnerability count', () => {
@@ -896,6 +1134,47 @@ test('discovery dispatch checkpoint blocks a new worker until the prior worker i
   assert.equal(unsaturated.passed, false);
   assert.equal(unsaturated.invalid.some(item => /consecutive zero-new successful workers/.test(item)), true);
 
+  const originalWorkers = fs.readFileSync(path.join(root, 'discovery/deep/workers.jsonl'), 'utf8');
+  const retryWorkers = [JSON.parse(originalWorkers.trim()), {
+    worker_id: 'worker-002', sequence: 2, attempt: 1, status: 'FAILED', requested_model: 'gpt-5.6-luna', actual_model: 'gpt-5.6-luna',
+    model_observation_ids: [], started_at: '2026-07-31T12:02:00.000Z', completed_at: '2026-07-31T12:03:00.000Z',
+    retry_of: null, error: 'candidate schema rejected before receipt acceptance',
+  }, {
+    worker_id: 'worker-003', sequence: 3, attempt: 1, status: 'SUCCEEDED', requested_model: 'gpt-5.6-luna', actual_model: 'gpt-5.6-luna',
+    model_observation_ids: ['obs-worker-003'], started_at: '2026-07-31T12:02:00.000Z', completed_at: '2026-07-31T12:03:00.000Z',
+    retry_of: null, candidates_artifact: 'discovery/deep/worker-003/candidates.jsonl', receipt_artifact: 'discovery/deep/worker-003/receipt.json',
+  }];
+  writeJsonLines(root, 'discovery/deep/worker-003/candidates.jsonl', []);
+  writeJson(root, 'discovery/deep/worker-003/receipt.json', {
+    worker_id: 'worker-003', status: 'SUCCEEDED', candidate_count: 0,
+    candidates_sha256: sha256(root, 'discovery/deep/worker-003/candidates.jsonl'),
+  });
+  writeJsonLines(root, 'discovery/deep/workers.jsonl', retryWorkers);
+  writeJsonLines(root, 'validation/runtime-model-observations.jsonl', [{
+    observation_id: 'obs-worker-001', agent_id: 'source-code', review_role: 'source-code-primary', worker_id: 'worker-001',
+    model: 'gpt-5.6-luna', source: 'agent-sdk:assistant.model', observed_at: '2026-07-31T12:01:00.000Z',
+  }, {
+    observation_id: 'obs-worker-003', agent_id: 'source-code', review_role: 'source-code-primary', worker_id: 'worker-003',
+    model: 'gpt-5.6-luna', source: 'agent-sdk:assistant.model', observed_at: '2026-07-31T12:03:00.000Z',
+  }]);
+  writeJson(root, 'discovery/deep/dedupe.json', {
+    input_worker_ids: ['worker-001', 'worker-003'],
+    mappings: [{ worker_id: 'worker-001', source_candidate_id: 'worker-001-C0001', canonical_candidate_id: 'worker-001-C0001', rationale: 'First introduction.' }],
+    new_candidate_counts: { 'worker-001': 1, 'worker-003': 0 }, no_new_streak: 1,
+  });
+  assert.match(discoveryDispatchCheckpoint(root, { nextWorkerId: 'worker-004' }).invalid.join('; '), /must declare retry_of.*worker-002/);
+  assert.deepEqual(discoveryDispatchCheckpoint(root, { nextWorkerId: 'worker-004', retryOf: 'worker-002' }), { passed: true, invalid: [] });
+  fs.writeFileSync(path.join(root, 'discovery/deep/workers.jsonl'), originalWorkers);
+  writeJsonLines(root, 'validation/runtime-model-observations.jsonl', [{
+    observation_id: 'obs-worker-001', agent_id: 'source-code', review_role: 'source-code-primary', worker_id: 'worker-001',
+    model: 'gpt-5.6-luna', source: 'agent-sdk:assistant.model', observed_at: '2026-07-31T12:01:00.000Z',
+  }]);
+  writeJson(root, 'discovery/deep/dedupe.json', {
+    input_worker_ids: ['worker-001'],
+    mappings: [{ worker_id: 'worker-001', source_candidate_id: 'worker-001-C0001', canonical_candidate_id: 'worker-001-C0001', rationale: 'First introduction.' }],
+    new_candidate_counts: { 'worker-001': 1 }, no_new_streak: 0,
+  });
+
   candidate.proof_gaps = 'No remaining proof gaps.';
   writeJsonLines(root, 'discovery/deep/worker-001/candidates.jsonl', [candidate]);
   writeJson(root, 'discovery/deep/worker-001/receipt.json', {
@@ -919,6 +1198,36 @@ test('discovery dispatch checkpoint blocks a new worker until the prior worker i
   const blocked = discoveryDispatchCheckpoint(root, { nextWorkerId: 'worker-002' });
   assert.equal(blocked.passed, false);
   assert.equal(blocked.invalid.some(item => /legacy ledger field names/.test(item)), true);
+});
+
+test('discovery dispatch checkpoint retries a transport-failed first worker without fabricated aggregates', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-discovery-first-retry-'));
+  const deadlineAt = new Date(Date.now() + 60_000).toISOString();
+  const config = {
+    minDiscoveryRuns: 3, stopAfterNoNew: 6, maxDiscoveryRuns: 60, maxDurationMinutes: 120,
+    discoveryConcurrency: 3, specialistConcurrency: 3,
+  };
+  writeJson(root, 'run.json', {
+    deepScan: { ...config, terminalState: 'RUNNING', deadlineAt },
+  });
+  writeJson(root, 'discovery/deep/manifest.json', {
+    schema_version: 1, status: 'RUNNING', config,
+    started_at: '2026-07-31T12:00:00.000Z', deadline_at: deadlineAt, omitted_workers: [],
+  });
+  writeJsonLines(root, 'discovery/deep/workers.jsonl', [{
+    worker_id: 'worker-001', sequence: 1, attempt: 1, status: 'FAILED',
+    requested_model: 'gpt-5.6-luna', actual_model: 'gpt-5.6-luna', model_observation_ids: [],
+    started_at: '2026-07-31T12:00:00.000Z', completed_at: '2026-07-31T12:02:00.000Z',
+    retry_of: null, error: 'connection closed mid-response',
+  }]);
+  writeJsonLines(root, 'validation/runtime-model-observations.jsonl', []);
+
+  assert.equal(fs.existsSync(path.join(root, 'discovery/deep/dedupe.json')), false);
+  assert.equal(fs.existsSync(path.join(root, 'discovery/candidates.jsonl')), false);
+  assert.deepEqual(
+    discoveryDispatchCheckpoint(root, { nextWorkerId: 'worker-002', retryOf: 'worker-001' }),
+    { passed: true, invalid: [] },
+  );
 });
 
 test('dedupe first introductions use worker sequence rather than mapping row order', () => {
@@ -962,6 +1271,8 @@ test('security review inventory deterministically enumerates files, suppressions
   const repo = path.join(root, 'repo');
   const artifacts = path.join(root, 'artifacts');
   fs.mkdirSync(path.join(repo, 'manifests', 'overlays', 'prod'), { recursive: true });
+  fs.mkdirSync(path.join(repo, '.github', 'workflows'), { recursive: true });
+  fs.writeFileSync(path.join(repo, '.github', 'copilot-instructions.md'), 'Example only: @GetMapping("/not-a-real-route")\n');
   fs.writeFileSync(path.join(repo, 'main.go'), [
     'package main',
     '//nolint:gosec',
@@ -979,6 +1290,17 @@ test('security review inventory deterministically enumerates files, suppressions
     '',
   ].join('\n'));
   fs.writeFileSync(path.join(repo, 'manifests', 'overlays', 'prod', 'app.yaml'), 'kind: Deployment\n');
+  fs.writeFileSync(path.join(repo, '.github', 'workflows', 'apply.yml'), [
+    'on: pull_request',
+    'permissions: { id-token: write }',
+    'jobs:',
+    '  apply:',
+    '    steps:',
+    '      - uses: vendor/action@v2',
+    '      - run: terraform apply',
+    '    paths: ["modules/**"]',
+    'role: read-only viewer with delete and identity-provider admin permissions',
+  ].join('\n'));
   cp.execFileSync('git', ['init', '-q', repo]);
   cp.execFileSync('git', ['-C', repo, 'add', '.']);
   cp.execFileSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
@@ -987,11 +1309,22 @@ test('security review inventory deterministically enumerates files, suppressions
   const routes = fs.readFileSync(path.join(artifacts, 'inventory', 'routes.jsonl'), 'utf8');
   const suppressions = fs.readFileSync(path.join(artifacts, 'inventory', 'suppressions.jsonl'), 'utf8');
   const securitySensitive = fs.readFileSync(path.join(artifacts, 'inventory', 'security-sensitive.jsonl'), 'utf8');
+  const coverage = fs.readFileSync(path.join(artifacts, 'discovery', 'coverage-ledger.jsonl'), 'utf8')
+    .trim().split(/\r?\n/).map(line => JSON.parse(line));
+  const sensitiveCandidates = JSON.parse(fs.readFileSync(path.join(artifacts, 'inventory', 'sensitive-data-head.json'), 'utf8')).candidates;
+  const sensitiveDispositions = fs.readFileSync(path.join(artifacts, 'tracks', 'secrets-history', 'sensitive-data-dispositions.jsonl'), 'utf8')
+    .split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
   const second = generateSecurityReviewInventory({ repositoryPath: repo, artifactRoot: artifacts });
   assert.equal(first.head, second.head);
   assert.match(fileManifest, /manifests\/overlays\/prod\/app\.yaml/);
   assert.match(routes, /main\.go/);
+  assert.doesNotMatch(routes, /copilot-instructions\.md/);
   assert.match(suppressions, /nolint-gosec/);
+  assert.equal(coverage.length, fileManifest.trim().split(/\r?\n/).length);
+  assert.ok(coverage.every(row => row.disposition === 'DEFERRED'));
+  assert.ok(coverage.every(row => row.review_method === 'controller-inventory-bootstrap'));
+  assert.deepEqual(sensitiveDispositions.map(row => row.inventory_key), [...new Set(sensitiveCandidates.map(row => row.inventory_key))]);
+  assert.ok(sensitiveDispositions.every(row => row.value_redacted && row.validation_status === 'UNVERIFIED'));
   for (const checkId of [
     'request-binding-mass-assignment',
     'directory-query-filter-injection',
@@ -1000,9 +1333,44 @@ test('security review inventory deterministically enumerates files, suppressions
     'oauth-operation-scope-enforcement',
     'authorization-policy-constant-consistency',
     'orm-mutation-ordering',
+    'privileged-ci-event-boundaries',
+    'immutable-executable-dependencies',
+    'least-privilege-role-intent',
+    'deployment-trigger-dependency-closure',
   ]) assert.match(securitySensitive, new RegExp(checkId));
   assert.equal(JSON.parse(fs.readFileSync(path.join(artifacts, 'inventory', 'secrets-head.json'), 'utf8')).completed, true);
   assert.equal(JSON.parse(fs.readFileSync(path.join(artifacts, 'inventory', 'secrets-history.json'), 'utf8')).completed, true);
+});
+
+test('semantic issue closure rejects duplicate roots and source-confirmed observations', () => {
+  const candidates = new Map([
+    ['worker-001-C0001', {
+      candidate_id: 'worker-001-C0001', cwe_ids: ['CWE-829'],
+      locations: [{ path: 'modules/main.tf', start_line: 10, end_line: 14 }],
+      summary: 'Terraform module source uses a mutable registry version', evidence: 'Module source is mutable.',
+    }],
+    ['worker-002-C0001', {
+      candidate_id: 'worker-002-C0001', cwe_ids: ['CWE-829'],
+      locations: [{ path: 'modules/main.tf', start_line: 12, end_line: 14 }],
+      summary: 'Mutable Terraform module source version permits dependency replacement', evidence: 'Module source is mutable.',
+    }],
+  ]);
+  const base = {
+    disposition: 'REPORTABLE', source_weakness_status: 'SOURCE_CONFIRMED', minimum_attacker_access: 'dependency publisher',
+    preconditions: ['resolver accepts the referenced version'], deployment_evidence_status: 'SOURCE_CONFIGURED',
+  };
+  const invalid = [];
+  validateSemanticIssueClosure([
+    { ...base, candidate_id: 'worker-001-C0001', issue_key: 'mutable-module-source-a', finding_ids: ['F-1'] },
+    { ...base, candidate_id: 'worker-002-C0001', issue_key: 'mutable-module-source-b', finding_ids: ['F-2'] },
+    {
+      candidate_id: 'worker-003-C0001', disposition: 'OBSERVATION', issue_key: 'bad-observation',
+      observation_ids: ['O-1'], source_weakness_status: 'SOURCE_CONFIRMED',
+      missing_reportability_element: 'SECURITY_IMPACT',
+    },
+  ], candidates, invalid);
+  assert.match(invalid.join('\n'), /probable semantic duplicate/);
+  assert.match(invalid.join('\n'), /observation must establish why no source vulnerability exists/);
 });
 
 test('security review inventory accepts extracted non-Git source snapshots', () => {

@@ -7,24 +7,37 @@ const {
   securityReviewCoordinatorPrompt,
 } = require('./security-review/workflow');
 const { generateSecurityReviewInventory, verifySecurityReviewInventory } = require('./security-review/inventory');
+const { findPriorSecurityReview, writePriorContext } = require('./security-review/prior-review');
 const {
   buildSecurityReviewCampaign,
   expeditedDeepScanConfig,
 } = require('./security-review/campaign');
 const {
+  discoverySaturationCheckpoint,
+  ensureDiscoverySaturated,
   initializeDeepScanRun,
   markDeepScanCapped,
+  markDeepScanSaturated,
+  projectSecurityReviewLedgers,
+  reconcileInvalidSuccessfulDiscoveryWorkers,
+  REQUIRED_MODEL_ROLES,
 } = require('./security-review/deep-scan');
-const { finalizeSecurityReview, invalidateSecurityReviewSeal } = require('./security-review/finalize');
+const { finalizeSecurityReview, invalidateSecurityReviewSeal, revalidateSecurityReview } = require('./security-review/finalize');
 
 const RUNNING_STATUSES = ['running', 'cancelling'];
 // Security-review coordinator turns are finite, but the durable workflow is
 // completion-driven. A max-turn interruption resumes the same artifacts and
 // must not become an implicit campaign cutoff.
 const SECURITY_REVIEW_MAX_CONTINUATIONS = null;
+const SECURITY_REVIEW_CONTRACT = 'controller/workflow-contract.txt';
 
 function isRecoverableCoordinatorInterruption(error) {
-  return /maximum number of turns|reached max(?:imum)? turns|dashboard restarted before worker-owned job finished|security review incomplete|Agent SDK ended without meaningful model or tool activity/i
+  return /maximum number of turns|reached max(?:imum)? turns|dashboard restarted before worker-owned job finished|security review incomplete|Agent SDK ended without meaningful model or tool activity|Agent SDK produced no messages .* active turn|connection closed mid-response|premature(?:ly)? closed response|(?:API Error:\s*)?(?:429|50[0-4])\b|could not reach LiteLLM|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|fetch failed|upstream (?:connect|request|timeout)/i
+    .test(String(error || ''));
+}
+
+function isTransientGatewayInterruption(error) {
+  return /connection closed mid-response|premature(?:ly)? closed response|(?:API Error:\s*)?(?:429|50[0-4])\b|could not reach LiteLLM|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|fetch failed|upstream (?:connect|request|timeout)/i
     .test(String(error || ''));
 }
 
@@ -40,8 +53,27 @@ function securityReviewCheckpoint(db, engagementId, artifactRoot) {
     'discovery/deep/manifest.json',
     'discovery/deep/workers.jsonl',
     'discovery/deep/dedupe.json',
+    'discovery/findings.jsonl',
+    'discovery/coverage-ledger.jsonl',
+    'tracks/authorization-access-control/findings.jsonl',
+    'tracks/data-flow-injection/findings.jsonl',
+    'tracks/secrets-history/findings.jsonl',
+    'tracks/resilience-error-handling/findings.jsonl',
+    'tracks/iac-config-manifests/findings.jsonl',
+    'tracks/cryptography-suppressions/findings.jsonl',
+    'tracks/authorization-access-control/route-authz-matrix.jsonl',
+    'tracks/data-flow-injection/source-sink-matrix.jsonl',
+    'tracks/secrets-history/sensitive-data-dispositions.jsonl',
+    'tracks/resilience-error-handling/http-client-matrix.jsonl',
+    'tracks/iac-config-manifests/disposition-matrix.jsonl',
+    'tracks/cryptography-suppressions/crypto-matrix.jsonl',
+    'tracks/cryptography-suppressions/suppression-dispositions.jsonl',
+    'validation/new-candidates.jsonl',
     'validation/candidate-closure.jsonl',
+    'validation/attack-paths.jsonl',
     'validation/challenge-matrix.json',
+    'validation/semantic-coverage.json',
+    'dynamic-validation/matrix.jsonl',
   ].map(relative => {
     try {
       const bytes = fs.readFileSync(path.join(artifactRoot, relative));
@@ -59,21 +91,111 @@ function securityReviewCheckpoint(db, engagementId, artifactRoot) {
   return crypto.createHash('sha256').update(JSON.stringify({ files, workers, roles })).digest('hex');
 }
 
-function securityReviewContinuationPrompt(prompt, { artifactRoot, reason }) {
+function readJsonLines(file) {
+  try { return fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse); }
+  catch { return []; }
+}
+
+function exactSetStatus(artifactRoot, inventoryRelative, matrixRelative) {
+  const inventory = readJsonLines(path.join(artifactRoot, inventoryRelative));
+  const matrix = readJsonLines(path.join(artifactRoot, matrixRelative));
+  return {
+    inventory_rows: inventory.length,
+    matrix_rows: matrix.length,
+    exact_key_and_order_equality: inventory.length === matrix.length
+      && inventory.every((row, index) => row.key === matrix[index]?.inventory_key),
+  };
+}
+
+function findingClosureStatus(artifactRoot) {
+  const ids = new Set();
+  for (const relative of [
+    'discovery/findings.jsonl',
+    'tracks/authorization-access-control/findings.jsonl',
+    'tracks/data-flow-injection/findings.jsonl',
+    'tracks/secrets-history/findings.jsonl',
+    'tracks/resilience-error-handling/findings.jsonl',
+    'tracks/iac-config-manifests/findings.jsonl',
+    'tracks/cryptography-suppressions/findings.jsonl',
+  ]) for (const row of readJsonLines(path.join(artifactRoot, relative))) {
+    const id = row.finding_id || row.id;
+    if (id) ids.add(id);
+  }
+  const closed = new Set();
+  for (const row of readJsonLines(path.join(artifactRoot, 'validation/candidate-closure.jsonl'))) {
+    if (row.candidate_id) closed.add(row.candidate_id);
+    if (String(row.disposition || '').toUpperCase() === 'REPORTABLE') for (const id of row.finding_ids || []) closed.add(id);
+  }
+  return [...ids].filter(id => !closed.has(id)).sort();
+}
+
+function missingModelRoles(db, engagementId) {
+  const observed = new Set(db.prepare(`
+    SELECT DISTINCT review_role FROM security_review_model_observations
+    WHERE engagement_id=? AND review_role IS NOT NULL
+  `).all(engagementId).map(row => row.review_role));
+  return REQUIRED_MODEL_ROLES.filter(role => !observed.has(role));
+}
+
+function persistSecurityReviewContract(artifactRoot, prompt) {
+  const file = path.join(artifactRoot, SECURITY_REVIEW_CONTRACT);
+  if (fs.existsSync(file)) return file;
   const text = String(prompt || '');
   const contractAt = text.indexOf('SOURCE SECURITY REVIEW WORKFLOW v4');
   const contract = contractAt >= 0 ? text.slice(contractAt) : text;
+  if (!contract.trim()) throw new Error('security-review workflow contract is unavailable');
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  try {
+    fs.writeFileSync(file, contract.endsWith('\n') ? contract : `${contract}\n`, { mode: 0o600, flag: 'wx' });
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+  }
+  return file;
+}
+
+function securityReviewContinuationPrompt(prompt, { artifactRoot, reason, lifecycleState = 'RUNNING', missingRoles = [] }) {
+  const contractFile = persistSecurityReviewContract(artifactRoot, prompt);
+  const instructions = lifecycleState === 'SATURATED'
+      ? [
+        'Discovery is already SATURATED. Do not dispatch another discovery worker and do not change the saturation proof.',
+        'Correct only the incomplete or invalid model-owned terminal artifacts named in continuation_reason, then return for controller finalization.',
+        'findings.json, observations.json, coverage.json, validation/model-receipts.jsonl, scan-manifest.json, and completion-receipt.json are controller-owned projections. Never edit them; repair the cited discovery, specialist, candidate-closure, attack-path, or semantic-coverage source row instead.',
+      ]
+    : [
+        'Validate the existing terminal worker chain, compute the next sequential worker ID, and continue from that exact checkpoint. Never reuse a terminal worker ID or count this coordinator continuation as a discovery worker failure.',
+        'If a worker is FAILED or CANCELED and lacks a successful retry, dispatch a new next-sequential worker with a standalone retry_of: worker-NNN line naming that failed worker. Retry unresolved workers before ordinary discovery; do not edit their receipt-bound artifacts.',
+        'For each completed batch, write the complete canonical discovery/candidates.jsonl first and wait for success, then write discovery/deep/dedupe.json last and wait for success. Dispatch the next batch only in a later assistant response; never race dispatch against aggregation writes.',
+        'Leave run.json.deepScan.terminalState and discovery/deep/manifest.json.status RUNNING after proving the no-new streak. The harness atomically transitions both to SATURATED when the first post-discovery role is dispatched.',
+        'Keep the original blind-context prohibition and original wall-clock deadline. Existing candidates from this engagement may be used only for centralized deduplication and closure; never disclose them to later blind-discovery workers.',
+      ];
+  const routes = exactSetStatus(artifactRoot, 'inventory/routes.jsonl', 'tracks/authorization-access-control/route-authz-matrix.jsonl');
+  const cryptoMatrix = exactSetStatus(artifactRoot, 'inventory/crypto-operations.jsonl', 'tracks/cryptography-suppressions/crypto-matrix.jsonl');
+  const missingFindingClosure = findingClosureStatus(artifactRoot);
   return [
     'SECURITY REVIEW WORKFLOW v4 — DURABLE COORDINATOR CONTINUATION',
     `artifact_root: ${artifactRoot}`,
-    `continuation_reason: ${reason}`,
+    `workflow_contract: ${contractFile}`,
+    `continuation_reason: ${String(reason || '').slice(0, 6000)}`,
     '',
     'Resume this same engagement from its durable artifacts. Do not initialize a new run, engagement, inventory, manifest, or deadline.',
+    'The full immutable workflow contract is in workflow_contract. Read it if the resumed SDK context is unavailable; do not copy it into another prompt or response.',
     'Read run.json, discovery/deep/manifest.json, discovery/deep/workers.jsonl, discovery/deep/dedupe.json, validation/runtime-model-observations.jsonl, and the existing blackboard tasks before acting.',
-    'Validate the existing terminal worker chain, compute the next sequential worker ID, and continue from that exact checkpoint. Never rerun a terminal worker or count this coordinator continuation as a discovery worker failure.',
-    'Keep the original blind-context prohibition and original wall-clock deadline. Existing candidates from this engagement may be used only for centralized deduplication and closure; never disclose them to later blind-discovery workers.',
-    '',
-    contract,
+    fs.existsSync(path.join(artifactRoot, 'controller', 'preflight.json'))
+      ? 'Read controller/preflight.json first. It is the controller-owned complete blocker set for this checkpoint; repair all listed model-owned artifacts in one pass.'
+      : 'No controller preflight file exists for this checkpoint.',
+    ...instructions,
+    `Controller-verified route matrix status: ${JSON.stringify(routes)}.`,
+    `Controller-verified crypto matrix status: ${JSON.stringify(cryptoMatrix)}.`,
+    routes.exact_key_and_order_equality && cryptoMatrix.exact_key_and_order_equality
+      ? 'The route and crypto exact-set gates are already satisfied. Do not rewrite those matrices, infer counts from displayed line indexes, or report them as blockers.'
+      : 'Only repair an exact-set matrix that the controller status above marks false; preserve inventory identity and ordinal order.',
+    missingRoles.length
+      ? `Missing authoritative model-role observations: ${missingRoles.join(', ')}. Dispatch each listed role exactly once using its canonical security_review_role solely to create authoritative runtime evidence. Preserve already complete artifacts; the role must verify them and return without rewriting exact-set matrices unless it finds concrete evidence they are invalid.`
+      : 'All required review roles already have authoritative runtime observations; do not dispatch a specialist solely for model receipt evidence.',
+    missingFindingClosure.length
+      ? `Current mandatory source-finding closure gap: ${missingFindingClosure.join(', ')}. Dispatch source-review-validator to give every listed ID one terminal challenge outcome, one candidate-closure row, and one attack-path row. Preserve evidence and choose REPORTABLE, OBSERVATION, SUPPRESSED, or NOT_APPLICABLE from source evidence; do not default all rows to one disposition.`
+      : 'The controller found no source-finding closure gap at continuation dispatch time.',
+    'Every validation/new-candidates.jsonl row must have exactly one NEW challenge outcome with the same candidate_id. Repair identity mismatches without inventing another alias.',
   ].join('\n');
 }
 
@@ -116,20 +238,54 @@ class ControllerLite {
     sendMessageToAgentTracked = null,
     currentSessionForAgent = null,
     getInvestigationSessionId = () => 'legacy',
+    onSecurityReviewCompleted = null,
     workerId = `dashboard-${process.pid}-${Date.now().toString(36)}`,
     maxConcurrent = Number(process.env.GLADOS_CONTROLLER_MAX_CONCURRENT || 3),
     leaseMs = Number(process.env.GLADOS_CONTROLLER_LEASE_MS || 20 * 60 * 1000),
+    finalizationRetryMs = Number(process.env.GLADOS_SECURITY_REVIEW_FINALIZATION_RETRY_MS || 250),
+    finalizationTimeoutMs = Number(process.env.GLADOS_SECURITY_REVIEW_FINALIZATION_TIMEOUT_MS || 2 * 60 * 1000),
+    transientRetryBaseMs = Number(process.env.GLADOS_SECURITY_REVIEW_TRANSIENT_RETRY_BASE_MS || 2_000),
+    transientRetryMaxMs = Number(process.env.GLADOS_SECURITY_REVIEW_TRANSIENT_RETRY_MAX_MS || 30_000),
+    transientRetryLimit = Number(process.env.GLADOS_SECURITY_REVIEW_TRANSIENT_RETRY_LIMIT || 8),
   }) {
     this.db = openControllerDb(dbPath);
     this.sendMessageToAgentTracked = sendMessageToAgentTracked;
     this.currentSessionForAgent = currentSessionForAgent;
     this.getInvestigationSessionId = getInvestigationSessionId;
+    this.onSecurityReviewCompleted = onSecurityReviewCompleted;
     this.workerId = workerId;
     this.maxConcurrent = Math.max(1, maxConcurrent);
     this.leaseMs = Math.max(60_000, leaseMs);
+    this.finalizationRetryMs = Math.max(10, finalizationRetryMs);
+    this.finalizationTimeoutMs = Math.max(this.finalizationRetryMs, finalizationTimeoutMs);
+    this.transientRetryBaseMs = Math.max(10, transientRetryBaseMs);
+    this.transientRetryMaxMs = Math.max(this.transientRetryBaseMs, transientRetryMaxMs);
+    this.transientRetryLimit = Math.max(1, transientRetryLimit);
     this.running = new Map(); // jobId -> { child, heartbeat }
+    this.finalizationState = new Map(); // jobId -> { startedAt, attempts }
+    this.transientRetryTimers = new Map(); // jobId -> timer
+    this.securityReviewCompletionNotified = new Set();
     this.timer = null;
     this._prepare();
+  }
+
+  _notifySecurityReviewCompleted(jobOrEngagementId) {
+    const engagementId = typeof jobOrEngagementId === 'string'
+      ? jobOrEngagementId : jobOrEngagementId?.engagement_id;
+    if (!engagementId || this.securityReviewCompletionNotified.has(engagementId)) return;
+    this.securityReviewCompletionNotified.add(engagementId);
+    if (typeof process.send === 'function') {
+      try { process.send({ type: 'glados-security-review-deliverables-ready', engagementId }); } catch {}
+    }
+    if (typeof this.onSecurityReviewCompleted === 'function') {
+      try {
+        this.onSecurityReviewCompleted({
+          engagementId,
+          jobId: typeof jobOrEngagementId === 'object' ? jobOrEngagementId?.id || null : null,
+          sessionId: this.engagementSession.get(engagementId)?.session_id || null,
+        });
+      } catch {}
+    }
   }
 
   _prepare() {
@@ -195,6 +351,11 @@ class ControllerLite {
       LIMIT ?
     `);
     this.jobById = this.db.prepare('SELECT * FROM controller_jobs WHERE id = ?');
+    this.securityReviewJobByEngagement = this.db.prepare(`
+      SELECT * FROM controller_jobs
+      WHERE engagement_id=? AND job_type='security_review_workflow_v3'
+      ORDER BY created_at DESC LIMIT 1
+    `);
     this.jobByIdAndSession = this.db.prepare(`
       SELECT j.* FROM controller_jobs j JOIN engagements e ON e.id=j.engagement_id WHERE j.id=? AND e.session_id=?
     `);
@@ -203,8 +364,9 @@ class ControllerLite {
       SELECT * FROM security_review_worker_runs WHERE engagement_id=? ORDER BY sequence
     `);
     this.authoritativeModelObservations = this.db.prepare(`
-      SELECT observation_id, engagement_id, controller_job_id, agent_id, review_role, worker_id,
-             requested_model, actual_model, billed_model_name, source, request_id, gateway_model_id, cost_usd, observed_at
+      SELECT observation_id, engagement_id, controller_job_id, agent_id, review_role, worker_id, worker_tool_call_id,
+             requested_model, actual_model, billed_model_name, source, request_id, gateway_model_id, cost_usd,
+             logical_model_alias, provider_model, attestation_level, gateway_call_id, observed_at
       FROM security_review_model_observations WHERE engagement_id=? ORDER BY observed_at, observation_id
     `);
     this.updateGoalStatusStmt = this.db.prepare(`
@@ -277,10 +439,27 @@ class ControllerLite {
       SET status='queued', updated_at=?, completed_at=NULL
       WHERE id=? AND status != 'cancelled'
     `);
+    this.markSecurityReviewFinalizing = this.db.prepare(`
+      UPDATE controller_jobs
+      SET status='running', error=NULL, finished_at=NULL, lease_owner=?, lease_expires_at=?,
+          heartbeat_at=?, updated_at=?
+      WHERE id=? AND status IN ('running','failed') AND cancel_requested=0
+    `);
     this.recoverableSecurityReviewJobs = this.db.prepare(`
       SELECT * FROM controller_jobs
       WHERE status='failed' AND job_type='security_review_workflow_v3' AND cancel_requested=0
       ORDER BY updated_at ASC
+    `);
+    this.latestFailedSecurityReviewBySession = this.db.prepare(`
+      SELECT j.* FROM controller_jobs AS j
+      JOIN engagements AS e ON e.id=j.engagement_id
+      WHERE e.session_id=? AND j.status='failed'
+        AND j.job_type='security_review_workflow_v3' AND j.cancel_requested=0
+      ORDER BY j.updated_at DESC LIMIT 1
+    `);
+    this.transientRetryCount = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM controller_events
+      WHERE job_id=? AND event_type='security_review_transient_retry_scheduled'
     `);
     this.reconcileStaleWorkerRuns = this.db.prepare(`
       UPDATE security_review_worker_runs
@@ -328,12 +507,13 @@ class ControllerLite {
     return result.changes;
   }
 
-  _resumeInterruptedSecurityReview(job, error) {
+  _resumeInterruptedSecurityReview(job, error, { force = false } = {}) {
     if (job?.job_type !== 'security_review_workflow_v3') return false;
     if (!isRecoverableCoordinatorInterruption(error)) return false;
     if (SECURITY_REVIEW_MAX_CONTINUATIONS != null
         && Number(job.attempts || 0) >= SECURITY_REVIEW_MAX_CONTINUATIONS) return false;
 
+    const transientGatewayFailure = isTransientGatewayInterruption(error);
     const runtimeDir = path.dirname(path.dirname(this.db.name));
     const artifactRoot = securityReviewArtifactRoot(runtimeDir, job.engagement_id);
     let run;
@@ -344,39 +524,208 @@ class ControllerLite {
     } catch {
       return false;
     }
-    if (run?.deepScan?.terminalState !== 'RUNNING' || manifest?.status !== 'RUNNING') return false;
+    if (['RUNNING', 'SATURATED'].includes(run?.deepScan?.terminalState)
+        && ['RUNNING', 'SATURATED'].includes(manifest?.status)
+        && run.deepScan.terminalState !== manifest.status) {
+      const transition = ensureDiscoverySaturated(artifactRoot);
+      if (transition.passed) {
+        try {
+          run = JSON.parse(fs.readFileSync(path.join(artifactRoot, 'run.json'), 'utf8'));
+          manifest = JSON.parse(fs.readFileSync(path.join(artifactRoot, 'discovery', 'deep', 'manifest.json'), 'utf8'));
+        } catch { return false; }
+      }
+    }
     const deadlineValue = run?.deepScan?.deadlineAt || manifest?.deadline_at || null;
     const deadlineMs = deadlineValue ? Date.parse(deadlineValue) : null;
     if (deadlineValue && (!Number.isFinite(deadlineMs) || deadlineMs <= Date.now())) {
       try { markDeepScanCapped(artifactRoot, 'security-review wall-clock limit reached before coordinator continuation'); } catch {}
       return false;
     }
+    if (force && run?.deepScan?.terminalState === 'FAILED' && manifest?.status === 'FAILED') {
+      try {
+        reopenFailedDeepScan(artifactRoot, run, manifest);
+        this.logEvent(job.goal_id, job.id, 'security_review_lifecycle_reopened',
+          `Reopened failed security-review lifecycle for explicit recovery of ${job.id}.`, {
+            prior_failure_reason: run?.deepScan?.failureReason || manifest?.failure_reason || null,
+          });
+      } catch {
+        return false;
+      }
+    }
+    const lifecycleState = run?.deepScan?.terminalState;
+    if (lifecycleState !== manifest?.status || !['RUNNING', 'SATURATED'].includes(lifecycleState)) return false;
+
+    let reconciledInvalidWorkers = [];
+    try {
+      reconciledInvalidWorkers = reconcileInvalidSuccessfulDiscoveryWorkers({
+        dbPath: this.db.name,
+        artifactRoot,
+        engagementId: job.engagement_id,
+      });
+      if (reconciledInvalidWorkers.length) {
+        projectSecurityReviewLedgers({ db: this.db, artifactRoot, engagementId: job.engagement_id });
+      }
+    } catch (reconciliationError) {
+      console.warn('[security-review] could not reconcile invalid terminal workers:', reconciliationError.message);
+    }
 
     const rec = this.running.get(job.id);
     if (rec) {
       clearInterval(rec.heartbeat);
       if (rec.deadlineTimer) clearTimeout(rec.deadlineTimer);
+      if (rec.finalizationTimer) clearTimeout(rec.finalizationTimer);
       this.running.delete(job.id);
     }
-    const reason = String(error || 'recoverable coordinator interruption');
+    this.finalizationState.delete(job.id);
+    const reason = [
+      String(error || 'recoverable coordinator interruption'),
+      reconciledInvalidWorkers.length
+        ? `controller demoted schema-invalid successful workers for sequential retry: ${reconciledInvalidWorkers.join(', ')}`
+        : null,
+    ].filter(Boolean).join('; ');
     const checkpoint = securityReviewCheckpoint(this.db, job.engagement_id, artifactRoot);
     let previousCheckpoint = null;
     try { previousCheckpoint = JSON.parse(this.lastContinuation.get(job.id)?.data_json || '{}').checkpoint || null; } catch {}
-    if (previousCheckpoint == null && Number(job.attempts || 0) > 1) return false;
-    if (previousCheckpoint === checkpoint) return false;
-    const prompt = securityReviewContinuationPrompt(job.prompt, { artifactRoot, reason });
-    const stamp = nowIso();
-    const queued = this.requeueInterruptedSecurityReview.run(prompt, stamp, job.id);
-    if (!queued.changes) return false;
-    if (job.goal_id) this.requeueInterruptedSecurityReviewGoal.run(stamp, job.goal_id);
-    this.logEvent(job.goal_id, job.id, 'job_continuation_queued', `Queued durable coordinator continuation for ${job.id}.`, {
+    if (previousCheckpoint === checkpoint && !transientGatewayFailure && !force) return false;
+    const prompt = securityReviewContinuationPrompt(job.prompt, {
+      artifactRoot,
       reason,
-      artifact_root: artifactRoot,
-      deadline_at: Number.isFinite(deadlineMs) ? new Date(deadlineMs).toISOString() : null,
-      next_attempt: Number(job.attempts || 0) + 1,
-      checkpoint,
+      lifecycleState,
+      missingRoles: missingModelRoles(this.db, job.engagement_id),
     });
-    setImmediate(() => this.tick());
+    const queueContinuation = () => {
+      this.transientRetryTimers.delete(job.id);
+      const stamp = nowIso();
+      const queued = this.requeueInterruptedSecurityReview.run(prompt, stamp, job.id);
+      if (!queued.changes) return false;
+      if (job.goal_id) this.requeueInterruptedSecurityReviewGoal.run(stamp, job.goal_id);
+      this.logEvent(job.goal_id, job.id, 'job_continuation_queued', `Queued durable coordinator continuation for ${job.id}.`, {
+        reason,
+        artifact_root: artifactRoot,
+        deadline_at: Number.isFinite(deadlineMs) ? new Date(deadlineMs).toISOString() : null,
+        next_attempt: Number(job.attempts || 0) + 1,
+        checkpoint,
+      });
+      setImmediate(() => this.tick());
+      return true;
+    };
+    if (transientGatewayFailure) {
+      const priorRetries = Number(this.transientRetryCount.get(job.id)?.n || 0);
+      if (priorRetries >= this.transientRetryLimit) return false;
+      const exponential = Math.min(this.transientRetryMaxMs, this.transientRetryBaseMs * (2 ** Math.min(priorRetries, 8)));
+      const jitter = Math.floor(exponential * 0.2 * Math.random());
+      const delayMs = exponential + jitter;
+      this.logEvent(job.goal_id, job.id, 'security_review_transient_retry_scheduled',
+        `Transient gateway failure; retrying ${job.id} from its durable checkpoint.`, {
+          reason, retry_number: priorRetries + 1, retry_limit: this.transientRetryLimit,
+          delay_ms: delayMs, checkpoint,
+        });
+      const timer = setTimeout(queueContinuation, delayMs);
+      timer.unref?.();
+      this.transientRetryTimers.set(job.id, timer);
+      return true;
+    }
+    if (!queueContinuation()) return false;
+    return true;
+  }
+
+  resumeLatestRecoverableSecurityReviewForSession(sessionId) {
+    const raw = this.latestFailedSecurityReviewBySession.get(sessionId);
+    if (!raw) return { ok: false, error: 'no failed security review is available to resume' };
+    const job = decodeRow(raw);
+    if (SECURITY_REVIEW_MAX_CONTINUATIONS != null
+        && Number(job.attempts || 0) >= SECURITY_REVIEW_MAX_CONTINUATIONS) {
+      const previousAttempts = Number(job.attempts || 0);
+      const stamp = nowIso();
+      this.db.prepare(`
+        UPDATE controller_jobs SET attempts=0, updated_at=?
+        WHERE id=? AND status='failed'
+      `).run(stamp, job.id);
+      job.attempts = 0;
+      this.logEvent(job.goal_id, job.id, 'security_review_continuation_budget_reset',
+        `Operator-requested recovery reset the continuation budget for ${job.id}.`, {
+          previous_attempts: previousAttempts,
+          reason: 'explicit operator resume',
+        });
+    }
+    const artifactRoot = securityReviewArtifactRoot(path.dirname(path.dirname(this.db.name)), job.engagement_id);
+    const goal = job.goal_id ? this.getGoal(job.goal_id) : null;
+    let revalidated = null;
+    try {
+      revalidated = revalidateSecurityReview({
+        db: this.db, artifactRoot, engagementId: job.engagement_id,
+        campaignExpected: goal?.metadata?.campaign === true,
+      });
+    } catch {}
+    if (revalidated?.passed) {
+      this._notifySecurityReviewCompleted(job);
+      return { ok: true, completed: true, jobId: job.id, engagementId: job.engagement_id };
+    }
+    if (revalidated?.retryMode === 'controller'
+        && this._scheduleSecurityReviewFinalization(job, null, revalidated)) {
+      return { ok: true, resumed: true, jobId: job.id, engagementId: job.engagement_id };
+    }
+    const reason = job.error
+      ? `security review incomplete: ${job.error}`
+      : 'security review incomplete: operator requested controller resume';
+    if (this._resumeInterruptedSecurityReview(job, reason, { force: true })) {
+      return { ok: true, resumed: true, jobId: job.id, engagementId: job.engagement_id };
+    }
+    return { ok: false, error: 'the failed security review has no recoverable durable checkpoint', jobId: job.id };
+  }
+
+  _scheduleSecurityReviewFinalization(job, coordinatorResult, finalization) {
+    const current = this.getJob(job.id);
+    if (!current || current.cancel_requested || ['succeeded', 'cancelled'].includes(current.status)) return false;
+    const previous = this.running.get(job.id);
+    const state = this.finalizationState.get(job.id) || { startedAt: Date.now(), attempts: 0 };
+    const startedAt = state.startedAt;
+    const attempts = Number(state.attempts || 0);
+    if (previous) {
+      clearInterval(previous.heartbeat);
+      if (previous.deadlineTimer) clearTimeout(previous.deadlineTimer);
+      if (previous.finalizationTimer) clearTimeout(previous.finalizationTimer);
+      this.running.delete(job.id);
+    }
+    if (Date.now() - startedAt >= this.finalizationTimeoutMs) {
+      const blockers = (finalization?.blockers || []).join('; ');
+      this._finishJob(current, 'failed', coordinatorResult,
+        `security-review controller finalization timed out waiting for runtime settlement${blockers ? `: ${blockers}` : ''}`);
+      return false;
+    }
+    const stamp = nowIso();
+    const leaseUntil = nowMs() + this.leaseMs;
+    const marked = this.markSecurityReviewFinalizing.run(this.workerId, leaseUntil, nowMs(), stamp, job.id);
+    if (!marked.changes) return false;
+    const heartbeat = setInterval(() => {
+      try { this.heartbeat.run(nowMs(), nowMs() + this.leaseMs, nowIso(), job.id); } catch {}
+    }, 30_000);
+    heartbeat.unref?.();
+    const delay = Math.min(5_000, this.finalizationRetryMs * (2 ** Math.min(attempts, 5)));
+    const rec = {
+      child: null,
+      heartbeat,
+      deadlineTimer: null,
+      finalizationTimer: null,
+      finalizing: true,
+      finalizationStartedAt: startedAt,
+      finalizationAttempts: attempts + 1,
+    };
+    this.finalizationState.set(job.id, { startedAt, attempts: attempts + 1 });
+    rec.finalizationTimer = setTimeout(() => {
+      const refreshed = this.getJob(job.id);
+      if (!refreshed || refreshed.cancel_requested || refreshed.status !== 'running') return;
+      this._finishJob(refreshed, 'succeeded', coordinatorResult, null);
+    }, delay);
+    rec.finalizationTimer.unref?.();
+    this.running.set(job.id, rec);
+    if (attempts === 0) {
+      this.logEvent(job.goal_id, job.id, 'security_review_finalization_waiting',
+        `Waiting for authoritative runtime settlement before sealing ${job.engagement_id}.`, {
+          phase: finalization?.phase || 'runtime-settlement',
+          blockers: finalization?.blockers || [],
+        });
+    }
     return true;
   }
 
@@ -385,6 +734,26 @@ class ControllerLite {
     this.reconcileStaleWorkerRuns.run(nowIso(), 'dashboard restarted before discovery worker returned');
     this.reconcileStaleWorkerAttempts.run(nowIso(), 'dashboard restarted before discovery worker returned');
     for (const job of this.recoverableSecurityReviewJobs.all()) {
+      const artifactRoot = securityReviewArtifactRoot(path.dirname(path.dirname(this.db.name)), job.engagement_id);
+      const goal = job.goal_id ? this.getGoal(job.goal_id) : null;
+      let revalidated = null;
+      try {
+        revalidated = revalidateSecurityReview({
+          db: this.db,
+          artifactRoot,
+          engagementId: job.engagement_id,
+          campaignExpected: goal?.metadata?.campaign === true,
+        });
+      } catch {}
+      if (revalidated?.passed) {
+        this._notifySecurityReviewCompleted(job);
+        continue;
+      }
+      if (revalidated?.retryMode === 'controller'
+          && this._scheduleSecurityReviewFinalization(job, null, revalidated)) {
+        resumed += 1;
+        continue;
+      }
       if (this._resumeInterruptedSecurityReview(job, job.error)) resumed += 1;
       else {
         this._terminalizeSecurityReview(job, 'failed', job.error || 'security review could not be resumed');
@@ -392,6 +761,44 @@ class ControllerLite {
       }
     }
     return resumed;
+  }
+
+  revalidateSecurityReviewAfterAuthorityChange(engagementId) {
+    const rawJob = this.securityReviewJobByEngagement.get(engagementId);
+    if (!rawJob) return { passed: false, retryMode: 'none', blockers: ['security-review job not found'] };
+    const job = decodeRow(rawJob);
+    if (RUNNING_STATUSES.includes(job.status)) {
+      return { passed: false, retryMode: 'controller', blockers: ['active coordinator turn will finalize the changed authority state'] };
+    }
+    const artifactRoot = securityReviewArtifactRoot(path.dirname(path.dirname(this.db.name)), engagementId);
+    const goal = job.goal_id ? this.getGoal(job.goal_id) : null;
+    const result = revalidateSecurityReview({
+      db: this.db,
+      artifactRoot,
+      engagementId,
+      campaignExpected: goal?.metadata?.campaign === true,
+    });
+    if (result.passed) {
+      this._notifySecurityReviewCompleted(job);
+      return result;
+    }
+    const stamp = nowIso();
+    const reason = `authoritative runtime state changed after sealing: ${(result.blockers || []).join('; ')}`;
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE controller_jobs SET status='failed', error=?, finished_at=?, updated_at=?
+        WHERE id=? AND status='succeeded' AND cancel_requested=0`).run(reason, stamp, stamp, job.id);
+      if (job.goal_id) this.db.prepare(`UPDATE controller_goals SET status='queued', completed_at=NULL, updated_at=?
+        WHERE id=? AND status!='cancelled'`).run(stamp, job.goal_id);
+      this.db.prepare("UPDATE engagements SET status='active', completed_at=NULL WHERE id=?").run(engagementId);
+    })();
+    const reopened = this.getJob(job.id);
+    if (result.retryMode === 'controller'
+        && this._scheduleSecurityReviewFinalization(reopened, null, result)) return result;
+    if (result.retryMode === 'model'
+        && this._resumeInterruptedSecurityReview(reopened, `security review incomplete: ${reason}`)) return result;
+    this._terminalizeSecurityReview(reopened, 'failed', reason);
+    if (job.goal_id) this.updateGoalStatus(job.goal_id, 'failed');
+    return result;
   }
 
   ensureEngagement(target, sessionId = null) {
@@ -421,7 +828,7 @@ class ControllerLite {
   enqueueSecurityReviewPath(localPath, {
     goalId = null,
     engagementId = null,
-    contextMode = 'blind',
+    contextMode = 'auto',
     maxDurationMinutes = null,
     discoveryConcurrency = 3,
     specialistConcurrency = 3,
@@ -464,21 +871,51 @@ class ControllerLite {
       reviewProfile: profile,
       campaign,
     });
+    const requestedContextMode = ['auto', 'blind', 'regression', 'informed'].includes(contextMode) ? contextMode : 'auto';
+    let priorContext = null;
+    if (requestedContextMode !== 'blind') {
+      priorContext = findPriorSecurityReview({
+        investigationsRoot: path.join(runtimeDir, 'investigations'),
+        repositoryPath: abs,
+        remote: inventory.remote,
+        excludeEngagementId: engId,
+      });
+    }
+    const resolvedContextMode = requestedContextMode === 'auto'
+      ? (priorContext ? 'informed' : 'blind')
+      : requestedContextMode;
+    if (['informed', 'regression'].includes(resolvedContextMode) && !priorContext) {
+      throw new Error(`${resolvedContextMode} security review requires a sealed prior review matched by canonical repository path or remote URL`);
+    }
+    if (priorContext) writePriorContext(artifactRoot, priorContext);
+    run.requestedContextMode = requestedContextMode;
+    run.contextMode = resolvedContextMode;
+    run.priorContext = priorContext ? {
+      status: 'AVAILABLE',
+      artifact: 'regression/prior-context.json',
+      priorEngagementId: priorContext.prior_engagement_id,
+      matchBasis: priorContext.match_basis,
+      findingCount: priorContext.findings.length,
+    } : { status: 'NOT_FOUND' };
+    fs.writeFileSync(path.join(artifactRoot, 'run.json'), `${JSON.stringify(run, null, 2)}\n`, { mode: 0o600 });
     writeInventoryVerification(artifactRoot, verifySecurityReviewInventory({ repositoryPath: abs, artifactRoot }));
     const prompt = securityReviewCoordinatorPrompt({
       repositoryPath: abs,
       engagementId: engId,
       goalId: goal.id,
       artifactRoot,
-      contextMode,
+      contextMode: resolvedContextMode,
       deepScan: run.deepScan,
       modelPolicy: run.modelPolicy,
       reviewProfile: profile,
       campaign,
     });
+    persistSecurityReviewContract(artifactRoot, prompt);
     this.insertJob.run(jobId, goal.id, engId, 'glados', 'glados#security-review', 'security_review_workflow_v3', abs, prompt, nowIso());
     this.logEvent(goal.id, jobId, 'job_queued', `Queued staged source-code security review for ${abs}.`, {
-      agent_id: 'glados', target: abs, workflow_version: 3, context_mode: contextMode, artifact_root: artifactRoot,
+      agent_id: 'glados', target: abs, workflow_version: run.workflowVersion,
+      contract_revision: run.contractRevision, orchestration_revision: run.orchestrationRevision,
+      requested_context_mode: requestedContextMode, context_mode: resolvedContextMode, artifact_root: artifactRoot,
       repository_head: inventory.head, deadline_at: run.deepScan.deadlineAt, model_policy: run.modelPolicy,
       review_profile: profile, campaign_repository_count: campaign?.repository_count || 0,
     });
@@ -627,6 +1064,10 @@ class ControllerLite {
     }
 
     const tracked = this.running.get(jobId);
+    if (tracked?.finalizing) {
+      this._finishJob(job, 'cancelled', null, 'cancelled by operator');
+      return { ok: true, jobId, status: 'cancelled', running: false, tracked: true };
+    }
     if (tracked?.child) {
       try { tracked.child.kill('SIGTERM'); } catch {}
       setTimeout(() => {
@@ -656,9 +1097,13 @@ class ControllerLite {
     for (const [jobId, rec] of this.running) {
       clearInterval(rec.heartbeat);
       if (rec.deadlineTimer) clearTimeout(rec.deadlineTimer);
+      if (rec.finalizationTimer) clearTimeout(rec.finalizationTimer);
       try { rec.child?.kill('SIGTERM'); } catch {}
       this.running.delete(jobId);
     }
+    this.finalizationState.clear();
+    for (const timer of this.transientRetryTimers.values()) clearTimeout(timer);
+    this.transientRetryTimers.clear();
   }
 
   tick() {
@@ -701,7 +1146,7 @@ class ControllerLite {
       try { this.heartbeat.run(nowMs(), nowMs() + this.leaseMs, nowIso(), job.id); } catch {}
     }, 30_000);
     heartbeat.unref?.();
-    const rec = { child: tracked.child, heartbeat, deadlineTimer: null, timedOut: false };
+    const rec = { child: tracked.child, heartbeat, deadlineTimer: null, finalizationTimer: null, timedOut: false };
     this.running.set(job.id, rec);
     if (job.job_type === 'security_review_workflow_v3') {
       const runtimeDir = path.dirname(path.dirname(this.db.name));
@@ -742,6 +1187,7 @@ class ControllerLite {
     if (rec) {
       clearInterval(rec.heartbeat);
       if (rec.deadlineTimer) clearTimeout(rec.deadlineTimer);
+      if (rec.finalizationTimer) clearTimeout(rec.finalizationTimer);
       this.running.delete(job.id);
     }
     let finalStatus = status;
@@ -758,17 +1204,36 @@ class ControllerLite {
         engagementId: job.engagement_id,
         campaignExpected: goal?.metadata?.campaign === true,
       });
-      gate = finalized.gate || { passed: false, missing: [], invalid: finalized.blockers || [] };
-      if (finalized.passed && typeof process.send === 'function') {
-        try { process.send({ type: 'glados-security-review-deliverables-ready', engagementId: job.engagement_id }); } catch {}
-      }
+      gate = finalized.passed
+        ? finalized.gate || { passed: true, missing: [], invalid: [] }
+        : {
+            ...(finalized.gate || {}),
+            passed: false,
+            missing: finalized.gate?.missing || [],
+            invalid: [...new Set([
+              ...(finalized.gate?.invalid || []),
+              ...(finalized.blockers || []),
+            ])],
+          };
       finalResult = result && typeof result === 'object'
-        ? { ...result, securityReviewGate: gate }
-        : { result: result || null, securityReviewGate: gate };
-      if (!gate.passed) {
-        const failures = [...gate.missing.map(item => `missing ${item}`), ...gate.invalid].slice(0, 8);
-        const gateError = `security-review hard gates failed: ${failures.join('; ')}`;
-        if ((finalized.recoverable || activeSecurityReviewRun(artifactRoot))
+        ? { ...result, securityReviewGate: gate, ...(finalized.warnings ? { securityReviewWarnings: finalized.warnings } : {}) }
+        : { result: result || null, securityReviewGate: gate, ...(finalized.warnings ? { securityReviewWarnings: finalized.warnings } : {}) };
+      if (!finalized.passed) {
+        const failures = [...gate.missing.map(item => `missing ${item}`), ...gate.invalid];
+        const gateError = finalized.preflight
+          ? `security-review hard gates failed (${failures.length}); read ${finalized.preflight}`
+          : `security-review hard gates failed: ${failures.join('; ')}`;
+        if (activeSecurityReviewRun(artifactRoot)) {
+          try {
+            if (discoverySaturationCheckpoint(artifactRoot).passed) markDeepScanSaturated(artifactRoot);
+          } catch {}
+        }
+        const retryMode = finalized.retryMode || (finalized.recoverable ? 'model' : 'none');
+        if (retryMode === 'controller'
+            && this._scheduleSecurityReviewFinalization(current || job, result, finalized)) {
+          return this.getJob(job.id);
+        }
+        if ((retryMode === 'model' || activeSecurityReviewRun(artifactRoot))
             && this._resumeInterruptedSecurityReview(current || job, `security review incomplete: ${gateError}`)) {
           return this.getJob(job.id);
         }
@@ -777,6 +1242,7 @@ class ControllerLite {
       }
     }
     const stamp = nowIso();
+    this.finalizationState.delete(job.id);
     this.markDone.run(finalStatus, finalResult ? JSON.stringify(finalResult) : null, finalError, stamp, stamp, job.id);
     if (job.job_type === 'security_review_workflow_v3') this._terminalizeSecurityReview(job, finalStatus, finalError);
     if (job.goal_id) {
@@ -787,12 +1253,22 @@ class ControllerLite {
       error: finalError,
       security_review_gate: gate,
     });
+    if (job.job_type === 'security_review_workflow_v3' && finalStatus === 'succeeded') {
+      this._notifySecurityReviewCompleted(job);
+    }
     return this.getJob(job.id);
   }
 
   _terminalizeSecurityReview(job, status, reason) {
     const stamp = nowIso();
-    const taskStatus = status === 'succeeded' ? 'completed' : status === 'cancelled' ? 'cancelled' : 'failed';
+    // Successfully sealed artifacts prove the required work, but they do not
+    // prove that a leftover pending dispatch actually ran. Keep the audit log
+    // truthful: completed workers retain their status and redundant/unstarted
+    // tasks are canceled instead of being backfilled as completed.
+    const taskStatus = status === 'succeeded' || status === 'cancelled' ? 'cancelled' : 'failed';
+    const taskReason = status === 'succeeded'
+      ? 'controller reconciled redundant nonterminal task after successful sealed review'
+      : reason || `controller job ${status}`;
     let artifactState = null;
     try {
       const artifactRoot = securityReviewArtifactRoot(path.dirname(path.dirname(this.db.name)), job.engagement_id);
@@ -811,7 +1287,7 @@ class ControllerLite {
       : artifactState === 'CAPPED' || String(reason || '').includes('wall-clock limit') ? 'capped'
         : status === 'cancelled' ? 'cancelled' : 'failed';
     const tx = this.db.transaction(() => {
-      this.reconcileTasks.run(taskStatus, reason || `controller job ${status}`, stamp, job.engagement_id);
+      this.reconcileTasks.run(taskStatus, taskReason, stamp, job.engagement_id);
       this.finishEngagement.run(engagementStatus, stamp, job.engagement_id);
     });
     tx();
@@ -840,6 +1316,22 @@ function markDeepScanFailed(artifactRoot, reason) {
   }
 }
 
+function reopenFailedDeepScan(artifactRoot, run, manifest) {
+  const writeJson = (file, document) => {
+    const temporary = `${file}.tmp-${process.pid}-${Date.now().toString(36)}`;
+    fs.writeFileSync(temporary, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
+    fs.renameSync(temporary, file);
+  };
+  run.deepScan = { ...(run.deepScan || {}), terminalState: 'RUNNING' };
+  delete run.deepScan.completedAt;
+  delete run.deepScan.failureReason;
+  manifest.status = 'RUNNING';
+  delete manifest.completed_at;
+  delete manifest.failure_reason;
+  writeJson(path.join(artifactRoot, 'run.json'), run);
+  writeJson(path.join(artifactRoot, 'discovery', 'deep', 'manifest.json'), manifest);
+}
+
 function writeInventoryVerification(artifactRoot, receipt) {
   const file = path.join(artifactRoot, 'inventory', 'verification.json');
   fs.writeFileSync(file, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
@@ -859,4 +1351,6 @@ function decodeRow(row) {
 module.exports = {
   ControllerLite,
   engagementIdForTarget,
+  persistSecurityReviewContract,
+  securityReviewContinuationPrompt,
 };
