@@ -1217,10 +1217,17 @@ function validateSemanticIssueClosure(closureRows, candidates, invalid, { strict
   }
 }
 
-function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservations = [], authoritativeWorkerRuns = [], skipSealValidation = false } = {}) {
+function validateDeepScanArtifacts(artifactRoot, {
+  authoritativeModelObservations = [],
+  authoritativeWorkerRuns = [],
+  skipSealValidation = false,
+  preSeal = false,
+} = {}) {
   const sealArtifacts = new Set(['scan-manifest.json', 'completion-receipt.json']);
+  const controllerProjectionArtifacts = new Set(['findings.json', 'coverage.json']);
   const missing = REQUIRED_DEEP_ARTIFACTS
-    .filter(relative => !skipSealValidation || !sealArtifacts.has(relative))
+    .filter(relative => !(skipSealValidation || preSeal) || !sealArtifacts.has(relative))
+    .filter(relative => !preSeal || !controllerProjectionArtifacts.has(relative))
     .filter(relative => !fs.existsSync(path.join(artifactRoot, relative)));
   const invalid = [];
   const available = relative => !missing.includes(relative);
@@ -1635,57 +1642,60 @@ function validateDeepScanArtifacts(artifactRoot, { authoritativeModelObservation
   const validatorModel = validatorReceipt?.observation_ids?.map(id => observations.get(id)?.gateway_model_id).find(Boolean);
   if (run?.modelPolicy?.requireDiversity && primaryModel === validatorModel && !run?.modelPolicy?.diversityWaiver) invalid.push('model policy: primary discovery and independent validator used the same actual model without an operator waiver');
 
-  const findingsDocument = json('findings.json');
-  const findingRows = Array.isArray(findingsDocument?.findings) ? findingsDocument.findings : [];
-  if (findingsDocument && !Array.isArray(findingsDocument.findings)) invalid.push('findings.json.findings: required array');
-  const findings = keyed(findingRows, 'id', 'findings.json.findings', invalid);
-  const expectedFindingIds = new Map();
-  closureRows.filter(row => String(row.disposition || '').toUpperCase() === 'REPORTABLE').forEach(row => (row.finding_ids || []).forEach(id => expectedFindingIds.set(id, true)));
-  requireExactKeys(expectedFindingIds, findings, 'reportable candidate findings vs findings.json', invalid);
-  findingRows.forEach((finding, index) => {
-    for (const field of ['title', 'severity', 'description', 'impact', 'recommendation', 'source', 'sink', 'reachability']) requireText(finding[field], `finding ${finding.id || index + 1}.${field}`, invalid);
-    if (!Array.isArray(finding.locations) || finding.locations.length === 0) invalid.push(`finding ${finding.id || index + 1}.locations: required non-empty array`);
-  });
+  if (!preSeal) {
+    const findingsDocument = json('findings.json');
+    const findingRows = Array.isArray(findingsDocument?.findings) ? findingsDocument.findings : [];
+    if (findingsDocument && !Array.isArray(findingsDocument.findings)) invalid.push('findings.json.findings: required array');
+    const findings = keyed(findingRows, 'id', 'findings.json.findings', invalid);
+    const expectedFindingIds = new Map();
+    closureRows.filter(row => String(row.disposition || '').toUpperCase() === 'REPORTABLE').forEach(row => (row.finding_ids || []).forEach(id => expectedFindingIds.set(id, true)));
+    requireExactKeys(expectedFindingIds, findings, 'reportable candidate findings vs findings.json', invalid);
+    findingRows.forEach((finding, index) => {
+      for (const field of ['title', 'severity', 'description', 'impact', 'recommendation', 'source', 'sink', 'reachability']) requireText(finding[field], `finding ${finding.id || index + 1}.${field}`, invalid);
+      if (!Array.isArray(finding.locations) || finding.locations.length === 0) invalid.push(`finding ${finding.id || index + 1}.locations: required non-empty array`);
+    });
 
-  const observationCount = closureRows.filter(row => String(row.disposition || '').toUpperCase() === 'OBSERVATION').length;
-  const observationsDocument = fs.existsSync(path.join(artifactRoot, 'observations.json'))
-    ? json('observations.json')
-    : observationCount ? (missing.push('observations.json'), null) : { observations: [] };
-  const observationRows = Array.isArray(observationsDocument?.observations) ? observationsDocument.observations : [];
-  if (observationsDocument && !Array.isArray(observationsDocument.observations)) invalid.push('observations.json.observations: required array');
-  const observationsById = keyed(observationRows, 'id', 'observations.json.observations', invalid);
-  const expectedObservationIds = new Map();
-  closureRows.filter(row => String(row.disposition || '').toUpperCase() === 'OBSERVATION').forEach(row => (row.observation_ids || []).forEach(id => expectedObservationIds.set(id, true)));
-  requireExactKeys(expectedObservationIds, observationsById, 'observation candidate dispositions vs observations.json', invalid);
-  observationRows.forEach((row, index) => {
-    for (const field of ['title', 'category', 'rationale', 'recommendation', 'evidence', 'reachability', 'counterevidence']) requireText(row[field], `observation ${row.id || index + 1}.${field}`, invalid);
-    if (!Array.isArray(row.locations) || row.locations.length === 0) invalid.push(`observation ${row.id || index + 1}.locations: required non-empty array`);
-    if (!Array.isArray(row.proof_gaps)) invalid.push(`observation ${row.id || index + 1}.proof_gaps: required array`);
-  });
+    const observationCount = closureRows.filter(row => String(row.disposition || '').toUpperCase() === 'OBSERVATION').length;
+    const observationsDocument = fs.existsSync(path.join(artifactRoot, 'observations.json'))
+      ? json('observations.json')
+      : observationCount ? (missing.push('observations.json'), null) : { observations: [] };
+    const observationRows = Array.isArray(observationsDocument?.observations) ? observationsDocument.observations : [];
+    if (observationsDocument && !Array.isArray(observationsDocument.observations)) invalid.push('observations.json.observations: required array');
+    const observationsById = keyed(observationRows, 'id', 'observations.json.observations', invalid);
+    const expectedObservationIds = new Map();
+    closureRows.filter(row => String(row.disposition || '').toUpperCase() === 'OBSERVATION').forEach(row => (row.observation_ids || []).forEach(id => expectedObservationIds.set(id, true)));
+    requireExactKeys(expectedObservationIds, observationsById, 'observation candidate dispositions vs observations.json', invalid);
+    observationRows.forEach((row, index) => {
+      for (const field of ['title', 'category', 'rationale', 'recommendation', 'evidence', 'reachability', 'counterevidence']) requireText(row[field], `observation ${row.id || index + 1}.${field}`, invalid);
+      if (!Array.isArray(row.locations) || row.locations.length === 0) invalid.push(`observation ${row.id || index + 1}.locations: required non-empty array`);
+      if (!Array.isArray(row.proof_gaps)) invalid.push(`observation ${row.id || index + 1}.proof_gaps: required array`);
+    });
 
-  const coverageDocument = json('coverage.json');
-  const coverageRows = Array.isArray(coverageDocument?.files) ? coverageDocument.files : [];
-  if (coverageDocument && !Array.isArray(coverageDocument.files)) invalid.push('coverage.json.files: required array');
-  const canonicalCoverage = keyed(coverageRows, 'path', 'coverage.json.files', invalid, { allowEmpty: false });
-  requireExactKeys(inventoryFiles, canonicalCoverage, 'inventory files vs canonical coverage', invalid);
-  coverageRows.forEach(row => {
-    requireText(row.disposition, `coverage ${row.path}.disposition`, invalid);
-    requireText(row.review_method, `coverage ${row.path}.review_method`, invalid);
-  });
+    const coverageDocument = json('coverage.json');
+    const coverageRows = Array.isArray(coverageDocument?.files) ? coverageDocument.files : [];
+    if (coverageDocument && !Array.isArray(coverageDocument.files)) invalid.push('coverage.json.files: required array');
+    const canonicalCoverage = keyed(coverageRows, 'path', 'coverage.json.files', invalid, { allowEmpty: false });
+    requireExactKeys(inventoryFiles, canonicalCoverage, 'inventory files vs canonical coverage', invalid);
+    coverageRows.forEach(row => {
+      requireText(row.disposition, `coverage ${row.path}.disposition`, invalid);
+      requireText(row.review_method, `coverage ${row.path}.review_method`, invalid);
+    });
+  }
 
-  const scanManifest = skipSealValidation ? null : json('scan-manifest.json');
-  if (!skipSealValidation && scanManifest?.producer !== 'glados-security-review/v1') invalid.push('scan-manifest.json.producer: expected glados-security-review/v1');
-  if (!skipSealValidation && scanManifest?.terminal_state !== 'SATURATED') invalid.push('scan-manifest.json.terminal_state: expected SATURATED');
-  if (!skipSealValidation && scanManifest?.repository_head !== run?.head) invalid.push('scan-manifest.json.repository_head: does not match run.json');
-  const receipt = skipSealValidation ? null : json('completion-receipt.json');
-  if (!skipSealValidation && (receipt?.status !== 'SEALED' || receipt?.terminal_state !== 'SATURATED')) invalid.push('completion-receipt.json: expected SEALED SATURATED receipt');
+  const skipFinalSealValidation = skipSealValidation || preSeal;
+  const scanManifest = skipFinalSealValidation ? null : json('scan-manifest.json');
+  if (!skipFinalSealValidation && scanManifest?.producer !== 'glados-security-review/v1') invalid.push('scan-manifest.json.producer: expected glados-security-review/v1');
+  if (!skipFinalSealValidation && scanManifest?.terminal_state !== 'SATURATED') invalid.push('scan-manifest.json.terminal_state: expected SATURATED');
+  if (!skipFinalSealValidation && scanManifest?.repository_head !== run?.head) invalid.push('scan-manifest.json.repository_head: does not match run.json');
+  const receipt = skipFinalSealValidation ? null : json('completion-receipt.json');
+  if (!skipFinalSealValidation && (receipt?.status !== 'SEALED' || receipt?.terminal_state !== 'SATURATED')) invalid.push('completion-receipt.json: expected SEALED SATURATED receipt');
   const digests = receipt?.artifact_sha256 || {};
   const scanManifestFile = path.join(artifactRoot, 'scan-manifest.json');
-  if (!skipSealValidation && fs.existsSync(scanManifestFile)
+  if (!skipFinalSealValidation && fs.existsSync(scanManifestFile)
       && receipt?.scan_manifest_sha256 !== sha256File(scanManifestFile)) {
     invalid.push('completion-receipt.json: scan_manifest_sha256 mismatch');
   }
-  if (!skipSealValidation) for (const relative of Object.keys(digests)) {
+  if (!skipFinalSealValidation) for (const relative of Object.keys(digests)) {
       if (!fs.existsSync(path.join(artifactRoot, relative))) continue;
       const actual = sha256File(path.join(artifactRoot, relative));
       if (digests[relative] !== actual) invalid.push(`completion-receipt.json: digest mismatch for ${relative}`);

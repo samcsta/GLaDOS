@@ -379,17 +379,21 @@ test('v4 report library provides searchable, source-filtered navigation with dur
   assert.match(css, /\.report-document\.severity-critical/);
   assert.match(css, /--report-tone/);
   assert.match(css, /\.reports-tree \.file\.active[\s\S]*?box-shadow: inset 3px 0 0 var\(--accent\)/);
-  assert.match(css, /\.report-tree-delete/);
+  assert.match(css, /\.report-row-menu/);
   assert.match(app, /function deleteReportEntry/);
-  assert.match(app, /reportTreeAction\('delete', n, 'file'\)/);
-  assert.match(app, /reportTreeAction\('delete', n, 'dir'\)/);
+  assert.match(app, /function reportTreeActionMenu/);
+  assert.match(app, /actions\.push\(\['rename', 'Rename'\], \['delete'/);
   assert.match(app, /viewer\.innerHTML = header \+ `<div class="report-empty">error:/);
-  assert.match(app, /row\.append\(head, reportTreeAction\('rename', n, 'dir'\), reportTreeAction\('delete', n, 'dir'\)\)/);
+  assert.match(app, /row\.append\(head, reportTreeActionMenu\(n, 'dir'/);
   assert.match(app, /Delete security review/);
   assert.match(app, /Delete investigation/);
   assert.match(app, /function renameReportEntry/);
   assert.match(app, /id="report-rename"/);
-  assert.match(css, /\.report-tree-rename/);
+  assert.match(app, /function moveReportEntry/);
+  assert.match(app, /id="report-move"/);
+  assert.match(app, /\/api\/reports\/move/);
+  assert.match(css, /\.report-action-button/);
+  assert.match(css, /\.report-move-modal/);
 });
 
 test('investigation UI describes scoped blackboard and SDK reset behavior accurately', () => {
@@ -423,11 +427,10 @@ test('dashboard health polling falls back to the Electron main process when rend
   assert.match(app, /return window\.gladosDesktop\.getDashboardHealth\(\)/);
 });
 
-test('v4 report index budgets reports and investigations independently', () => {
+test('v4 report index has no item-count ceiling', () => {
   const source = fs.readFileSync(path.join(ROOT, 'dashboard/lib/reports.js'), 'utf8');
-  assert.match(source, /ROOTS\.map\(r => \{\s*const state = \{ count: 0, truncated: false \}/);
-  assert.match(source, /truncatedRoots/);
-  assert.match(source, /GLADOS_REPORT_TREE_MAX_ENTRIES \|\| 3000/);
+  assert.doesNotMatch(source, /GLADOS_REPORT_TREE_MAX_ENTRIES/);
+  assert.doesNotMatch(source, /MAX_TREE_ENTRIES/);
   assert.match(source, /GLADOS_REPORT_TREE_MAX_DEPTH \|\| 16/);
 });
 

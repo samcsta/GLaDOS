@@ -900,6 +900,23 @@ test('source review gate passes a complete machine-verifiable artifact set', () 
   assert.equal(result.passed, true);
 });
 
+test('pre-seal gate validates source evidence before controller projections exist', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-source-review-pre-seal-'));
+  completeReviewArtifacts(root);
+  for (const relative of [
+    'findings.json',
+    'observations.json',
+    'coverage.json',
+    'scan-manifest.json',
+    'completion-receipt.json',
+  ]) fs.rmSync(path.join(root, relative));
+
+  const result = sourceReviewGateStatus(root, { ...authoritativeDeepOptions(root), preSeal: true });
+  assert.deepEqual(result.missing, []);
+  assert.deepEqual(result.invalid, []);
+  assert.equal(result.passed, true);
+});
+
 test('source review gate rejects class-level high-risk coverage and semantic omissions', () => {
   const classLevel = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-source-review-class-level-'));
   completeReviewArtifacts(classLevel, { classLevelCoverage: true });

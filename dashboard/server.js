@@ -2577,6 +2577,12 @@ app.patch('/api/reports/file', (req, res) => {
     res.json(reports.renamePath(String(reportPath || ''), String(name || '')));
   } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 });
+app.post('/api/reports/move', (req, res) => {
+  try {
+    const { path: reportPath, destination } = req.body || {};
+    res.json(reports.movePath(String(reportPath || ''), String(destination || '')));
+  } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
 app.put('/api/reports/file', (req, res) => {
   try {
     const { path: p, content } = req.body || {};

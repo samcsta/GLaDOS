@@ -372,6 +372,10 @@ function validateEvidence(evidence, label, invalid, { expectedFile = null, expec
 }
 
 function sourceReviewGateStatus(artifactRoot, options = {}) {
+  // Before sealing, the controller must validate model-owned evidence without
+  // requiring its own canonical projections. Those projections are generated
+  // only after this pre-seal gate succeeds.
+  const preSeal = options.preSeal === true;
   let runPreview = null;
   try { runPreview = JSON.parse(fs.readFileSync(path.join(artifactRoot, 'run.json'), 'utf8')); } catch {}
   const campaignExpected = options.campaignExpected === true;
@@ -380,9 +384,11 @@ function sourceReviewGateStatus(artifactRoot, options = {}) {
     ? ['inventory/sensitive-data-head.json', 'inventory/pii-head.json', 'inventory/pii-history.json']
     : [];
   const sealArtifacts = new Set(['scan-manifest.json', 'completion-receipt.json']);
+  const controllerProjectionArtifacts = new Set(['findings.json', 'observations.json', 'coverage.json']);
   const requiredArtifacts = (campaignExpected || campaignEnabled
     ? [...REQUIRED_REVIEW_ARTIFACTS, ...sensitiveArtifacts, 'portfolio/repositories.json', 'portfolio/coverage.jsonl']
     : [...REQUIRED_REVIEW_ARTIFACTS, ...sensitiveArtifacts])
+    .filter(relative => !preSeal || (!sealArtifacts.has(relative) && !controllerProjectionArtifacts.has(relative)))
     .filter(relative => !options.skipSealValidation || !sealArtifacts.has(relative));
   const missing = requiredArtifacts.filter(relative => !fs.existsSync(path.join(artifactRoot, relative)));
   const invalid = [];

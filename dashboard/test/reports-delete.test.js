@@ -35,6 +35,22 @@ test('Reports indexes sealed security reviews as a dedicated collection', () => 
   assert.equal(reports.readFile('investigations/eng-1/security-review/EXECUTIVE-SUMMARY.md').kind, 'markdown');
 });
 
+test('Reports indexes every item beyond the former 3,000-entry ceiling', () => {
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-reports-unlimited-index-'));
+  const folder = path.join(runtime, 'reports', 'large-report');
+  fs.mkdirSync(folder, { recursive: true });
+  for (let i = 0; i < 3005; i += 1) {
+    fs.writeFileSync(path.join(folder, `item-${String(i).padStart(4, '0')}.md`), `# Item ${i}\n`);
+  }
+  const reports = loadReports(runtime);
+  const index = reports.tree();
+  const published = index.tree.find(node => node.path === 'reports');
+  const largeReport = published.children.find(node => node.path === 'reports/large-report');
+  assert.equal(largeReport.children.length, 3005);
+  assert.equal('truncated' in index, false);
+  assert.equal('maxEntries' in index, false);
+});
+
 test('Reports preserve the engagement identity when a sealed review folder is renamed in Finder', () => {
   const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-reports-renamed-review-'));
   const review = path.join(runtime, 'investigations', 'friendly-folder', 'security-review');
@@ -181,6 +197,59 @@ test('Reports rename supports collection aliases and rejects invalid names and c
   assert.match(JSON.stringify(reports.tree()), /Customer Reports/);
   assert.throws(() => reports.renamePath('reports/one.md', '../escape.md'), /single non-empty path component/);
   assert.throws(() => reports.renamePath('reports/one.md', 'two.md'), /already exists/);
+});
+
+test('Reports move files and folders within a collection and preserve nested display labels', () => {
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-reports-move-'));
+  const reportsRoot = path.join(runtime, 'reports');
+  fs.mkdirSync(path.join(reportsRoot, 'incoming', 'bundle'), { recursive: true });
+  fs.mkdirSync(path.join(reportsRoot, 'archive'), { recursive: true });
+  fs.writeFileSync(path.join(reportsRoot, 'incoming', 'draft.md'), '# draft\n');
+  fs.writeFileSync(path.join(reportsRoot, 'incoming', 'bundle', 'finding.md'), '# finding\n');
+  fs.writeFileSync(path.join(runtime, 'report-labels.json'), JSON.stringify({
+    'reports/incoming/bundle/finding.md': 'Customer finding',
+  }));
+  const reports = loadReports(runtime);
+
+  assert.deepEqual(reports.movePath('reports/incoming/draft.md', 'reports/archive'), {
+    ok: true,
+    path: 'reports/archive/draft.md',
+    previousPath: 'reports/incoming/draft.md',
+    moved: true,
+  });
+  assert.equal(fs.existsSync(path.join(reportsRoot, 'archive', 'draft.md')), true);
+  assert.deepEqual(reports.movePath('reports/incoming/bundle', 'reports/archive'), {
+    ok: true,
+    path: 'reports/archive/bundle',
+    previousPath: 'reports/incoming/bundle',
+    moved: true,
+  });
+  assert.equal(fs.existsSync(path.join(reportsRoot, 'archive', 'bundle', 'finding.md')), true);
+  assert.match(JSON.stringify(reports.tree()), /Customer finding/);
+});
+
+test('Reports move rejects unsafe destinations, identity folders, collisions, and sealed reviews', () => {
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-reports-move-invalid-'));
+  const reportsRoot = path.join(runtime, 'reports');
+  const investigationsRoot = path.join(runtime, 'investigations');
+  fs.mkdirSync(path.join(reportsRoot, 'source', 'nested'), { recursive: true });
+  fs.mkdirSync(path.join(reportsRoot, 'destination'), { recursive: true });
+  fs.mkdirSync(path.join(investigationsRoot, 'eng-1', 'security-review', 'deliverables'), { recursive: true });
+  fs.writeFileSync(path.join(reportsRoot, 'source', 'report.md'), '# source\n');
+  fs.writeFileSync(path.join(reportsRoot, 'destination', 'report.md'), '# collision\n');
+  fs.writeFileSync(path.join(investigationsRoot, 'eng-1', 'notes.md'), '# notes\n');
+  fs.writeFileSync(path.join(investigationsRoot, 'eng-1', 'security-review', 'deliverables', 'SECURITY-REVIEW.md'), '# sealed\n');
+  fs.writeFileSync(path.join(investigationsRoot, 'eng-1', 'security-review', 'completion-receipt.json'), '{"status":"SEALED","terminal_state":"SATURATED"}\n');
+  const reports = loadReports(runtime);
+
+  assert.throws(() => reports.movePath('reports/source/report.md', 'investigations/eng-1'), /current collection/);
+  assert.throws(() => reports.movePath('reports/source', 'reports/source/nested'), /cannot be moved into itself/);
+  assert.throws(() => reports.movePath('reports/source/report.md', 'reports/destination'), /already exists/);
+  assert.throws(() => reports.movePath('investigations/eng-1', 'investigations'), /identity folders/);
+  assert.throws(() => reports.movePath('security-reviews/eng-1/SECURITY-REVIEW.md', 'security-reviews/eng-1'), /cannot be moved/);
+  assert.throws(() => reports.movePath('investigations/eng-1/security-review', 'investigations'), /cannot be moved/);
+  assert.throws(() => reports.writeMarkdown('security-reviews/eng-1/SECURITY-REVIEW.md', '# changed\n'), /cannot be edited/);
+  assert.throws(() => reports.writeMarkdown('investigations/eng-1/security-review/deliverables/SECURITY-REVIEW.md', '# changed\n'), /cannot be edited/);
 });
 
 test('raw report delivery supports byte ranges used by inline PDF viewers', async () => {

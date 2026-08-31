@@ -14,10 +14,6 @@ const ROOTS = [
   { key: 'security-reviews', name: 'Completed Security Reviews', root: INVESTIGATIONS_ROOT, virtual: true },
   { key: 'investigations', name: 'Investigation Workspaces', root: INVESTIGATIONS_ROOT },
 ];
-// Directory rows are rendered lazily, but the complete index still crosses the
-// process boundary as JSON. Keep the default payload bounded for large evidence
-// corpora; operators can raise the limit explicitly when they need deep history.
-const MAX_TREE_ENTRIES = Math.max(100, Number(process.env.GLADOS_REPORT_TREE_MAX_ENTRIES || 3000));
 const MAX_TREE_DEPTH = Math.max(1, Number(process.env.GLADOS_REPORT_TREE_MAX_DEPTH || 16));
 const IGNORED_DIRECTORY_NAMES = new Set([
   '.git', '.hg', '.svn',
@@ -102,34 +98,25 @@ function shouldIgnoreFile(name, rel = '') {
   return depth <= 1 && isLoosePlaywrightArtifact(name);
 }
 
-function walk(dir, rel = '', state = { count: 0, truncated: false }, depth = 0) {
-  if (state.count >= MAX_TREE_ENTRIES || depth > MAX_TREE_DEPTH) {
-    state.truncated = true;
-    return [];
-  }
+function walk(dir, rel = '', depth = 0) {
+  if (depth > MAX_TREE_DEPTH) return [];
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch { return []; }
   const out = [];
   for (const e of entries) {
-    if (state.count >= MAX_TREE_ENTRIES) {
-      state.truncated = true;
-      break;
-    }
     if (e.name.startsWith('.')) continue;
     const full = path.join(dir, e.name);
     const r = rel ? `${rel}/${e.name}` : e.name;
     if (e.isDirectory()) {
       if (shouldIgnoreDirectory(e.name, full)) continue;
-      state.count += 1;
-      const children = walk(full, r, state, depth + 1);
+      const children = walk(full, r, depth + 1);
       if (children.length) out.push({ type: 'dir', name: e.name, path: r, children });
     } else if (e.isFile()) {
       // Playwright MCP emits disposable page snapshots and console captures at
       // its output root. Evidence saved inside an engagement remains visible.
       if (shouldIgnoreFile(e.name, rel)) continue;
-      state.count += 1;
       const ext = path.extname(e.name).toLowerCase();
       let size = 0, mtime = 0;
       try { const st = fs.statSync(full); size = st.size; mtime = st.mtimeMs; } catch {}
@@ -142,22 +129,19 @@ function walk(dir, rel = '', state = { count: 0, truncated: false }, depth = 0) 
   });
 }
 
-function completedSecurityReviews(state = { count: 0, truncated: false }) {
+function completedSecurityReviews() {
   const nodes = [];
   for (const engagement of securityReviewDirectories().sort((a, b) => a.directory.localeCompare(b.directory))) {
-    if (state.count >= MAX_TREE_ENTRIES) continue;
     const { reviewRoot, receipt } = engagement;
     if (receipt?.status !== 'SEALED' || receipt?.terminal_state !== 'SATURATED') continue;
     const identity = receipt.engagement_id || engagement.directory;
-    state.count += 1;
     const deliveryRoot = path.join(reviewRoot, 'deliverables');
-    let children = walk(deliveryRoot, identity, state, 1);
+    let children = walk(deliveryRoot, identity, 1);
     children = children.filter(node => node.type === 'dir' || SECURITY_REVIEW_REPORT_NAMES.has(node.name));
-    const rawChildren = walk(reviewRoot, `${identity}/raw`, state, 1).filter(node => node.name !== 'deliverables');
+    const rawChildren = walk(reviewRoot, `${identity}/raw`, 1).filter(node => node.name !== 'deliverables');
     if (rawChildren.length) children.push({ type: 'dir', name: 'Artifacts & Source Data', path: `${identity}/raw`, children: rawChildren });
     if (children.length) nodes.push({ type: 'dir', name: engagement.directory, path: identity, children });
   }
-  if (state.count >= MAX_TREE_ENTRIES) state.truncated = true;
   return nodes;
 }
 
@@ -173,21 +157,14 @@ function tree() {
     name: labels[node.path] || node.name,
     children: node.children ? applyLabels(node.children) : undefined,
   }));
-  const rootStates = {};
   const nodes = ROOTS.map(r => {
-    const state = { count: 0, truncated: false };
-    const children = prefixNodes(r.virtual ? completedSecurityReviews(state) : walk(r.root, '', state), r.key);
-    rootStates[r.key] = state;
+    const children = prefixNodes(r.virtual ? completedSecurityReviews() : walk(r.root), r.key);
     return { type: 'dir', name: labels[r.key] || r.name, path: r.key, children: applyLabels(children) };
   }).filter(n => n.children.length);
-  const truncatedRoots = Object.entries(rootStates).filter(([, state]) => state.truncated).map(([key]) => key);
   return {
     root: `reports: ${REPORTS_ROOT} | investigations: ${INVESTIGATIONS_ROOT}`,
     roots: Object.fromEntries(ROOTS.map(r => [r.key, r.root])),
     tree: nodes,
-    truncated: truncatedRoots.length > 0,
-    truncatedRoots,
-    maxEntries: MAX_TREE_ENTRIES,
   };
 }
 
@@ -290,6 +267,54 @@ function renamePath(relPath, requestedName) {
   }
   if (JSON.stringify(migrated) !== JSON.stringify(labels)) writeLabels(migrated);
   return { ok: true, path: newPath, previousPath: relPath, name, alias: false };
+}
+
+function movePath(relPath, requestedDestination) {
+  const parts = String(relPath || '').split('/').filter(Boolean);
+  const destinationParts = String(requestedDestination || '').split('/').filter(Boolean);
+  const key = parts[0];
+  const destinationKey = destinationParts[0];
+  if (!ROOTS.some(root => root.key === key) || !ROOTS.some(root => root.key === destinationKey)) {
+    throw new Error('source and destination must be report-library paths');
+  }
+  if (key === 'security-reviews' || /^investigations\/[^/]+\/security-review(?:\/|$)/.test(String(relPath || ''))) {
+    throw new Error('sealed security-review entries cannot be moved');
+  }
+  if (key !== destinationKey) throw new Error('reports can only be moved within their current collection');
+  if (isIdentityBoundPath(relPath)) throw new Error('collection and investigation identity folders cannot be moved');
+
+  const source = safeResolve(relPath);
+  const destinationDirectory = safeResolve(requestedDestination);
+  const sourceStat = fs.lstatSync(source);
+  const destinationStat = fs.lstatSync(destinationDirectory);
+  if (sourceStat.isSymbolicLink() || (!sourceStat.isDirectory() && !sourceStat.isFile())) {
+    throw new Error('refusing to move unsupported filesystem object');
+  }
+  if (destinationStat.isSymbolicLink() || !destinationStat.isDirectory()) {
+    throw new Error('move destination must be a regular directory');
+  }
+  if (sourceStat.isDirectory()
+      && (destinationDirectory === source || destinationDirectory.startsWith(`${source}${path.sep}`))) {
+    throw new Error('a folder cannot be moved into itself');
+  }
+  if (path.dirname(source) === destinationDirectory) {
+    return { ok: true, path: relPath, previousPath: relPath, moved: false };
+  }
+
+  const destination = path.join(destinationDirectory, path.basename(source));
+  if (fs.existsSync(destination)) throw new Error(`an entry named ${path.basename(source)} already exists in the destination`);
+  fs.renameSync(source, destination);
+
+  const newPath = [...destinationParts, parts.at(-1)].join('/');
+  const labels = readLabels();
+  const migrated = {};
+  for (const [labelPath, label] of Object.entries(labels)) {
+    migrated[labelPath === relPath || labelPath.startsWith(`${relPath}/`)
+      ? `${newPath}${labelPath.slice(relPath.length)}`
+      : labelPath] = label;
+  }
+  if (JSON.stringify(migrated) !== JSON.stringify(labels)) writeLabels(migrated);
+  return { ok: true, path: newPath, previousPath: relPath, moved: true };
 }
 
 function deleteTarget(relPath) {
@@ -395,6 +420,10 @@ function deletePath(relPath) {
 
 // Edit is restricted to .md to avoid accidental clobbering of code/binaries.
 function writeMarkdown(relPath, content) {
+  if (/^security-reviews(?:\/|$)/.test(String(relPath || ''))
+      || /^investigations\/[^/]+\/security-review(?:\/|$)/.test(String(relPath || ''))) {
+    throw new Error('sealed security-review entries cannot be edited');
+  }
   const resolved = safeResolve(relPath);
   if (!/\.md$/i.test(resolved)) throw new Error('editing is only allowed for .md files');
   fs.writeFileSync(resolved, content, 'utf8');
@@ -409,6 +438,7 @@ module.exports = {
   deletePath,
   deleteTarget,
   renamePath,
+  movePath,
   completedSecurityReviews,
   writeMarkdown,
   walk,

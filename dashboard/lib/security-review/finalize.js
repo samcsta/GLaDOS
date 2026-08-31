@@ -492,7 +492,7 @@ function finalizeSecurityReview({ db, artifactRoot, engagementId, campaignExpect
       authoritativeWorkerRuns: authority.workers,
       authoritativeModelObservations: authority.observations,
       campaignExpected,
-      skipSealValidation: true,
+      preSeal: true,
     });
     if (preSealGate.missing.length || preSealGate.invalid.length) {
       const gate = { ...preSealGate, passed: false };

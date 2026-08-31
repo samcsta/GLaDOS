@@ -17,7 +17,7 @@ const state = {
   transcripts: new Map(), // tabId -> { es, el, events[], sending }
   agentsLoadedOnce: false,
   update: { lines: [], running: false, es: null, autoStart: false },
-  reports: { query: '', scope: 'all', selectedPath: null },
+  reports: { query: '', scope: 'all', selectedPath: null, tree: [] },
   investigationSessions: [],
   investigationProjects: [],
   currentSessionId: null,
@@ -3683,27 +3683,31 @@ async function renderReportsPane() {
       <div class="reports-library-header">
         <div class="reports-library-title-row">
           <div>
-            <h1>Report Library</h1>
-            <p id="reports-summary">Loading index...</p>
+            <span class="reports-eyebrow">Workspace</span>
+            <h1>Reports</h1>
+            <p>Browse, edit, and organize deliverables.</p>
           </div>
           <button type="button" class="report-refresh" id="reports-refresh" title="Refresh report library" aria-label="Refresh report library">↻</button>
         </div>
+        <div class="reports-library-summary" id="reports-summary" aria-live="polite">
+          <span><strong>—</strong> files</span><span><strong>—</strong> collections</span>
+        </div>
         <div class="report-search-field">
+          <span class="report-search-icon" aria-hidden="true"></span>
           <input id="reports-search" type="search" placeholder="Search reports" autocomplete="off" aria-label="Search reports" />
           <button type="button" id="reports-search-clear" title="Clear search" aria-label="Clear search">×</button>
         </div>
         <div class="report-source-tabs" role="tablist" aria-label="Report source">
-          <button type="button" role="tab" data-report-scope="all">All</button>
-          <button type="button" role="tab" data-report-scope="reports">Reports</button>
-          <button type="button" role="tab" data-report-scope="security-reviews">Security</button>
-          <button type="button" role="tab" data-report-scope="investigations">Investigations</button>
+          <button type="button" role="tab" data-report-scope="all"><span>All</span><b data-report-count="all">0</b></button>
+          <button type="button" role="tab" data-report-scope="reports"><span>Published</span><b data-report-count="reports">0</b></button>
+          <button type="button" role="tab" data-report-scope="security-reviews"><span>Security</span><b data-report-count="security-reviews">0</b></button>
+          <button type="button" role="tab" data-report-scope="investigations"><span>Working</span><b data-report-count="investigations">0</b></button>
         </div>
-        <div class="report-index-notice" id="report-index-notice" hidden></div>
       </div>
       <div class="reports-tree" id="reports-tree"><div class="report-tree-loading">Loading reports...</div></div>
     </aside>
     <div class="report-viewer" id="report-viewer">
-      <div class="report-empty"><strong>No report selected</strong></div>
+      <div class="report-empty report-empty-welcome"><span aria-hidden="true"></span><strong>Choose a report</strong><p>Select a file from the library to preview it here.</p></div>
     </div>`;
   paneEl.appendChild(wrap);
 
@@ -3718,19 +3722,16 @@ async function renderReportsPane() {
     const j = await fetchJson('/api/reports/tree', { timeoutMs: 30000, retries: 1 });
     const treeEl = wrap.querySelector('#reports-tree');
     const summaryEl = wrap.querySelector('#reports-summary');
-    const noticeEl = wrap.querySelector('#report-index-notice');
     const tree = j.tree || [];
+    state.reports.tree = tree;
     const totalFiles = countReportFiles(tree);
     const totalCollections = tree.length;
-    summaryEl.textContent = `${totalFiles.toLocaleString()} ${totalFiles === 1 ? 'file' : 'files'} in ${totalCollections} ${totalCollections === 1 ? 'collection' : 'collections'}`;
-    if (j.truncated) {
-      noticeEl.hidden = false;
-      const limited = Array.isArray(j.truncatedRoots) && j.truncatedRoots.length
-        ? j.truncatedRoots.join(' and ')
-        : 'large collections';
-      noticeEl.textContent = `${limited} limited to ${Number(j.maxEntries || 0).toLocaleString()} indexed items`;
-    }
-
+    summaryEl.innerHTML = `<span><strong>${totalFiles.toLocaleString()}</strong> ${totalFiles === 1 ? 'file' : 'files'}</span><span><strong>${totalCollections}</strong> ${totalCollections === 1 ? 'collection' : 'collections'}</span>`;
+    wrap.querySelectorAll('[data-report-count]').forEach(counter => {
+      const scope = counter.dataset.reportCount;
+      const count = scope === 'all' ? totalFiles : countReportFiles(tree.filter(node => node.path === scope));
+      counter.textContent = count.toLocaleString();
+    });
     const renderTree = () => {
       const visibleTree = filterReportTree(tree, state.reports.query, state.reports.scope);
       treeEl.innerHTML = '';
@@ -3823,6 +3824,75 @@ function formatReportDate(value) {
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(date);
 }
 
+function reportEntryCanEdit(relPath) {
+  const value = String(relPath || '');
+  return /\.md$/i.test(value)
+    && !value.startsWith('security-reviews/')
+    && !/^investigations\/[^/]+\/security-review(?:\/|$)/.test(value);
+}
+
+function reportEntryCanMove(relPath) {
+  const value = String(relPath || '');
+  return /^(?:reports|investigations)\/.+/.test(value)
+    && !/^investigations\/[^/]+$/.test(value)
+    && !/^investigations\/[^/]+\/security-review(?:\/|$)/.test(value);
+}
+
+function reportMoveDestinations(sourcePath, type) {
+  const key = String(sourcePath || '').split('/')[0];
+  const currentParent = String(sourcePath || '').split('/').slice(0, -1).join('/');
+  const options = [];
+  const visit = (nodes, depth = 0) => {
+    for (const node of nodes || []) {
+      if (node.type !== 'dir' || !String(node.path || '').startsWith(`${key}`)) continue;
+      const insideSource = type === 'dir' && (node.path === sourcePath || node.path.startsWith(`${sourcePath}/`));
+      if (!insideSource && node.path !== currentParent) options.push({ path: node.path, name: node.name, depth });
+      if (!insideSource) visit(node.children || [], depth + 1);
+    }
+  };
+  visit(state.reports.tree.filter(node => node.path === key));
+  return options;
+}
+
+function showReportMoveDialog(sourcePath, name, type) {
+  const destinations = reportMoveDestinations(sourcePath, type);
+  return new Promise(resolve => {
+    const root = document.getElementById('modal-root');
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    const options = destinations.map(item => `<option value="${escapeHtml(item.path)}">${escapeHtml(`${'  '.repeat(Math.max(0, item.depth))}${item.name}`)}</option>`).join('');
+    backdrop.innerHTML = `<section class="app-modal report-move-modal" role="dialog" aria-modal="true" aria-labelledby="report-move-title">
+      <header><div><h2 id="report-move-title">Move ${type === 'dir' ? 'folder' : 'report'}</h2><small>${escapeHtml(name)}</small></div><button type="button" data-modal-close aria-label="Close">×</button></header>
+      <div class="app-modal-copy"><label class="report-move-field"><span>Destination</span><select aria-label="Move destination" ${destinations.length ? '' : 'disabled'}>${options || '<option>No other folders are available</option>'}</select></label><p>Items stay inside their current collection. Existing links to the previous path may need to be updated.</p></div>
+      <footer><button type="button" data-modal-cancel>Cancel</button><button type="button" data-modal-confirm class="safe" ${destinations.length ? '' : 'disabled'}>Move</button></footer>
+    </section>`;
+    const finish = value => { backdrop.remove(); resolve(value); };
+    backdrop.querySelector('[data-modal-close]').addEventListener('click', () => finish(null));
+    backdrop.querySelector('[data-modal-cancel]').addEventListener('click', () => finish(null));
+    backdrop.querySelector('[data-modal-confirm]').addEventListener('click', () => finish(backdrop.querySelector('select').value));
+    backdrop.addEventListener('click', event => { if (event.target === backdrop) finish(null); });
+    root.replaceChildren(backdrop);
+    (destinations.length ? backdrop.querySelector('select') : backdrop.querySelector('[data-modal-cancel]')).focus();
+  });
+}
+
+async function moveReportEntry(relPath, name, type) {
+  const destination = await showReportMoveDialog(relPath, name, type);
+  if (!destination) return;
+  const response = await fetch('/api/reports/move', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path: relPath, destination }),
+  });
+  const body = await response.json();
+  if (!response.ok || !body.ok) throw new Error(body.error || 'move failed');
+  if (state.reports.selectedPath === relPath || state.reports.selectedPath?.startsWith(`${relPath}/`)) {
+    state.reports.selectedPath = `${body.path}${state.reports.selectedPath.slice(relPath.length)}`;
+  }
+  showToast(`${name} moved.`, { kind: 'success', label: 'Reports' });
+  renderPane();
+}
+
 async function renameReportEntry(relPath, currentName) {
   const name = await showNameInput({
     title: 'Rename report entry', value: currentName, confirmLabel: 'Rename',
@@ -3859,23 +3929,64 @@ async function deleteReportEntry(relPath, name, type) {
   renderPane();
 }
 
-function reportTreeAction(kind, node, type) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = `report-tree-${kind}${type === 'file' ? ' file-action' : ''}`;
-  button.title = `${kind === 'rename' ? 'Rename' : 'Delete'} ${node.name}`;
-  button.setAttribute('aria-label', button.title);
-  button.textContent = kind === 'rename' ? '✎' : '×';
-  button.addEventListener('click', async event => {
+function reportTreeActionMenu(node, type, openEntry) {
+  const wrap = document.createElement('div');
+  wrap.className = 'report-row-actions';
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'report-row-menu-trigger';
+  trigger.title = `Actions for ${node.name}`;
+  trigger.setAttribute('aria-label', trigger.title);
+  trigger.setAttribute('aria-expanded', 'false');
+  trigger.textContent = '•••';
+  const menu = document.createElement('div');
+  menu.className = 'report-row-menu';
+  menu.hidden = true;
+  menu.setAttribute('role', 'menu');
+
+  const actions = [];
+  if (type === 'file') actions.push(['open', 'Open']);
+  if (type === 'file' && reportEntryCanEdit(node.path)) actions.push(['edit', 'Edit']);
+  if (reportEntryCanMove(node.path)) actions.push(['move', 'Move to…']);
+  actions.push(['rename', 'Rename'], ['delete', type === 'dir' ? 'Delete folder' : 'Delete']);
+  for (const [kind, label] of actions) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = kind === 'delete' ? 'danger' : '';
+    button.dataset.reportAction = kind;
+    button.setAttribute('role', 'menuitem');
+    button.innerHTML = `<span aria-hidden="true">${kind === 'open' ? '↗' : kind === 'edit' ? '✎' : kind === 'move' ? '→' : kind === 'rename' ? 'Aa' : '×'}</span>${escapeHtml(label)}`;
+    button.addEventListener('click', async event => {
+      event.stopPropagation();
+      menu.hidden = true;
+      trigger.setAttribute('aria-expanded', 'false');
+      try {
+        if (kind === 'open') await openEntry(false);
+        else if (kind === 'edit') await openEntry(true);
+        else if (kind === 'move') await moveReportEntry(node.path, node.name, type);
+        else if (kind === 'rename') await renameReportEntry(node.path, node.name);
+        else await deleteReportEntry(node.path, node.name, type);
+      } catch (error) {
+        pushNotification('error', `${label.replace('…', '')} failed: ${error.message}`, { toast: true, label: 'Reports' });
+      }
+    });
+    menu.appendChild(button);
+  }
+  trigger.addEventListener('click', event => {
     event.stopPropagation();
-    try {
-      if (kind === 'rename') await renameReportEntry(node.path, node.name);
-      else await deleteReportEntry(node.path, node.name, type);
-    } catch (error) {
-      pushNotification('error', `${kind === 'rename' ? 'Rename' : 'Delete'} failed: ${error.message}`, { toast: true, label: 'Reports' });
-    }
+    document.querySelectorAll('.report-row-menu:not([hidden])').forEach(other => {
+      if (other !== menu) other.hidden = true;
+    });
+    const open = menu.hidden;
+    menu.hidden = !open;
+    trigger.setAttribute('aria-expanded', String(open));
+    if (open) setTimeout(() => document.addEventListener('click', () => {
+      menu.hidden = true;
+      trigger.setAttribute('aria-expanded', 'false');
+    }, { once: true }), 0);
   });
-  return button;
+  wrap.append(trigger, menu);
+  return wrap;
 }
 
 function buildTreeNodes(nodes, { depth = 0, forceOpen = false } = {}) {
@@ -3909,7 +4020,8 @@ function buildTreeNodes(nodes, { depth = 0, forceOpen = false } = {}) {
         childUl.hidden = !open;
         if (open) populate();
       });
-      row.append(head, reportTreeAction('rename', n, 'dir'), reportTreeAction('delete', n, 'dir'));
+      const toggleDirectory = () => head.click();
+      row.append(head, reportTreeActionMenu(n, 'dir', toggleDirectory));
       li.appendChild(row);
       li.appendChild(childUl);
     } else {
@@ -3919,9 +4031,12 @@ function buildTreeNodes(nodes, { depth = 0, forceOpen = false } = {}) {
       fileEl.dataset.path = n.path;
       fileEl.title = n.path;
       fileEl.innerHTML = `<span class="file-kind">${escapeHtml(reportFileType(n))}</span><span class="file-copy"><span class="file-name">${escapeHtml(n.name)}</span><span class="file-details"><span>${escapeHtml(formatReportDate(n.mtime))}</span><span>${escapeHtml(formatReportSize(n.size))}</span></span></span>`;
-      fileEl.addEventListener('click', () => loadReport(n.path, fileEl));
-      li.appendChild(fileEl);
-      li.append(reportTreeAction('rename', n, 'file'), reportTreeAction('delete', n, 'file'));
+      const openFile = async edit => {
+        await loadReport(n.path, fileEl);
+        if (edit) document.getElementById('report-edit')?.click();
+      };
+      fileEl.addEventListener('click', () => openFile(false));
+      li.append(fileEl, reportTreeActionMenu(n, 'file', openFile));
     }
     frag.appendChild(li);
   }
@@ -3933,17 +4048,22 @@ async function loadReport(relPath, clickedEl) {
   document.querySelectorAll('.reports-tree .file.active').forEach(e => e.classList.remove('active'));
   if (clickedEl) clickedEl.classList.add('active');
   const viewer = document.getElementById('report-viewer');
-  viewer.innerHTML = '<div class="report-empty">loading…</div>';
+  viewer.innerHTML = '<div class="report-empty report-loading"><span></span><strong>Opening report…</strong></div>';
   const isMd = /\.md$/i.test(relPath);
   const reviewMatch = relPath.match(/^security-reviews\/([^/]+)\//);
-  const header = `<div class="report-header"><span>${escapeHtml(relPath)}</span>
-    <span class="report-actions">
-      ${isMd && !reviewMatch ? `<button class="btn-link" id="report-edit">edit</button>` : ''}
-      ${reviewMatch && window.gladosDesktop?.exportSecurityReviewPdf ? '<button class="btn-link" id="report-export-pdf">export PDF</button>' : ''}
-      <a href="/api/reports/raw?path=${encodeURIComponent(relPath)}" target="_blank" rel="noopener">open raw</a>
-      <button class="btn-link" id="report-rename">rename</button>
-      <button class="btn-link danger" id="report-delete">delete</button>
-    </span></div>`;
+  const pathParts = relPath.split('/');
+  const fileName = pathParts.at(-1);
+  const parentPath = pathParts.slice(0, -1).join(' / ');
+  const header = `<div class="report-header">
+    <div class="report-header-copy"><span>Report</span><strong>${escapeHtml(fileName)}</strong><small title="${escapeHtml(relPath)}">${escapeHtml(parentPath)}</small></div>
+    <div class="report-actions">
+      <a class="report-action-button primary" href="/api/reports/raw?path=${encodeURIComponent(relPath)}" target="_blank" rel="noopener">Open file <span aria-hidden="true">↗</span></a>
+      ${isMd && !reviewMatch ? `<button class="report-action-button" id="report-edit">Edit</button>` : ''}
+      ${reportEntryCanMove(relPath) ? '<button class="report-action-button" id="report-move">Move</button>' : ''}
+      ${reviewMatch && window.gladosDesktop?.exportSecurityReviewPdf ? '<button class="report-action-button" id="report-export-pdf">Export PDF</button>' : ''}
+      <button class="report-action-button" id="report-rename">Rename</button>
+      <button class="report-action-button danger" id="report-delete">Delete</button>
+    </div></div>`;
   try {
     const j = await fetch('/api/reports/file?path=' + encodeURIComponent(relPath)).then(r => r.json());
     if (j.error) {
@@ -4028,14 +4148,19 @@ function wireReportActions(relPath, fileMeta, viewer) {
     try { await renameReportEntry(relPath, relPath.split('/').at(-1)); }
     catch (error) { pushNotification('error', `Rename failed: ${error.message}`, { toast: true, label: 'Reports' }); }
   });
+  const moveBtn = viewer.querySelector('#report-move');
+  if (moveBtn) moveBtn.addEventListener('click', async () => {
+    try { await moveReportEntry(relPath, relPath.split('/').at(-1), 'file'); }
+    catch (error) { pushNotification('error', `Move failed: ${error.message}`, { toast: true, label: 'Reports' }); }
+  });
   const editBtn = viewer.querySelector('#report-edit');
   if (editBtn && fileMeta.kind === 'markdown') editBtn.addEventListener('click', () => {
     const original = fileMeta.content;
-    viewer.innerHTML = `<div class="report-header"><span>${escapeHtml(relPath)} <em>(editing)</em></span>
-        <span class="report-actions">
-          <button class="btn-link" id="report-save">save</button>
-          <button class="btn-link" id="report-cancel">cancel</button>
-        </span></div>
+    viewer.innerHTML = `<div class="report-header editing"><div class="report-header-copy"><span>Editing</span><strong>${escapeHtml(relPath.split('/').at(-1))}</strong><small>${escapeHtml(relPath.split('/').slice(0, -1).join(' / '))}</small></div>
+        <div class="report-actions">
+          <button class="report-action-button" id="report-cancel">Cancel</button>
+          <button class="report-action-button primary" id="report-save">Save changes</button>
+        </div></div>
       <textarea class="report-editor" spellcheck="false">${escapeHtml(original)}</textarea>`;
     const ta = viewer.querySelector('.report-editor');
     ta.focus();
