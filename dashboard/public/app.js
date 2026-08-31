@@ -3690,7 +3690,7 @@ async function renderReportsPane() {
           <button type="button" class="report-refresh" id="reports-refresh" title="Refresh report library" aria-label="Refresh report library">↻</button>
         </div>
         <div class="reports-library-summary" id="reports-summary" aria-live="polite">
-          <span><strong>—</strong> files</span><span><strong>—</strong> collections</span>
+          <span><strong>—</strong> records</span><span><strong>—</strong> categories</span>
         </div>
         <div class="report-search-field">
           <span class="report-search-icon" aria-hidden="true"></span>
@@ -3699,9 +3699,9 @@ async function renderReportsPane() {
         </div>
         <div class="report-source-tabs" role="tablist" aria-label="Report source">
           <button type="button" role="tab" data-report-scope="all"><span>All</span><b data-report-count="all">0</b></button>
-          <button type="button" role="tab" data-report-scope="reports"><span>Published</span><b data-report-count="reports">0</b></button>
-          <button type="button" role="tab" data-report-scope="security-reviews"><span>Security</span><b data-report-count="security-reviews">0</b></button>
-          <button type="button" role="tab" data-report-scope="investigations"><span>Working</span><b data-report-count="investigations">0</b></button>
+          <button type="button" role="tab" data-report-scope="reports"><span>Published reports</span><b data-report-count="reports">0</b></button>
+          <button type="button" role="tab" data-report-scope="security-reviews"><span>Security reviews</span><b data-report-count="security-reviews">0</b></button>
+          <button type="button" role="tab" data-report-scope="investigations"><span>Investigations</span><b data-report-count="investigations">0</b></button>
         </div>
       </div>
       <div class="reports-tree" id="reports-tree"><div class="report-tree-loading">Loading reports...</div></div>
@@ -3724,12 +3724,12 @@ async function renderReportsPane() {
     const summaryEl = wrap.querySelector('#reports-summary');
     const tree = j.tree || [];
     state.reports.tree = tree;
-    const totalFiles = countReportFiles(tree);
+    const totalRecords = countReportRecords(tree);
     const totalCollections = tree.length;
-    summaryEl.innerHTML = `<span><strong>${totalFiles.toLocaleString()}</strong> ${totalFiles === 1 ? 'file' : 'files'}</span><span><strong>${totalCollections}</strong> ${totalCollections === 1 ? 'collection' : 'collections'}</span>`;
+    summaryEl.innerHTML = `<span><strong>${totalRecords.toLocaleString()}</strong> ${totalRecords === 1 ? 'record' : 'records'}</span><span><strong>${totalCollections}</strong> ${totalCollections === 1 ? 'category' : 'categories'}</span>`;
     wrap.querySelectorAll('[data-report-count]').forEach(counter => {
       const scope = counter.dataset.reportCount;
-      const count = scope === 'all' ? totalFiles : countReportFiles(tree.filter(node => node.path === scope));
+      const count = scope === 'all' ? totalRecords : countReportRecords(tree.filter(node => node.path === scope));
       counter.textContent = count.toLocaleString();
     });
     const renderTree = () => {
@@ -3788,6 +3788,15 @@ async function renderReportsPane() {
 
 function countReportFiles(nodes) {
   return nodes.reduce((total, node) => total + (node.type === 'file' ? 1 : countReportFiles(node.children || [])), 0);
+}
+
+function reportCollectionRecordCount(node) {
+  if (!node || node.type !== 'dir') return 0;
+  return (node.children || []).filter(child => child.path !== 'reports/REPORT-TEMPLATE.md').length;
+}
+
+function countReportRecords(nodes) {
+  return (nodes || []).reduce((total, node) => total + reportCollectionRecordCount(node), 0);
 }
 
 function filterReportTree(nodes, query, scope = 'all') {
@@ -4000,8 +4009,8 @@ function buildTreeNodes(nodes, { depth = 0, forceOpen = false } = {}) {
       const head = document.createElement('button');
       head.type = 'button';
       head.className = `dir${depth === 0 ? ' collection' : ''}`;
-      const fileCount = countReportFiles(n.children || []);
-      head.innerHTML = `<span class="tree-caret" aria-hidden="true">›</span><span class="dir-name">${escapeHtml(n.name)}</span><span class="dir-count">${fileCount.toLocaleString()}</span>`;
+      const itemCount = depth === 0 ? reportCollectionRecordCount(n) : countReportFiles(n.children || []);
+      head.innerHTML = `<span class="tree-caret" aria-hidden="true">›</span><span class="dir-name">${escapeHtml(n.name)}</span><span class="dir-count">${itemCount.toLocaleString()}</span>`;
       const childUl = document.createElement('ul');
       let populated = false;
       const populate = () => {

@@ -372,6 +372,15 @@ test('v4 report library provides searchable, source-filtered navigation with dur
   assert.match(app, /data-report-scope="investigations"/);
   assert.match(app, /data-report-scope="security-reviews"/);
   assert.match(app, /function filterReportTree\(/);
+  assert.match(app, /function countReportRecords\(/);
+  assert.match(app, /function reportCollectionRecordCount\(/);
+  assert.match(app, /child\.path !== 'reports\/REPORT-TEMPLATE\.md'/);
+  assert.match(app, /scope === 'all' \? totalRecords : countReportRecords/);
+  assert.match(app, /depth === 0 \? reportCollectionRecordCount\(n\) : countReportFiles/);
+  assert.doesNotMatch(app, /scope === 'all' \? totalFiles : countReportFiles/);
+  assert.match(app, />Published reports</);
+  assert.match(app, />Security reviews</);
+  assert.match(app, />Investigations</);
   assert.match(app, /state\.reports\.selectedPath = relPath/);
   assert.match(app, /function formatReportDate\(/);
   assert.match(app, /function formatReportMarkdownForDisplay\(/);
