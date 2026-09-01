@@ -16,7 +16,7 @@ const state = {
   currentTab: null,
   transcripts: new Map(), // tabId -> { es, el, events[], sending }
   agentsLoadedOnce: false,
-  update: { lines: [], running: false, es: null, autoStart: false },
+  update: { lines: [], running: false, es: null, autoStart: false, availableVersion: null, dismissedVersion: null },
   reports: { query: '', scope: 'all', selectedPath: null, tree: [] },
   investigationSessions: [],
   investigationProjects: [],
@@ -4205,20 +4205,117 @@ function appendUpdateLine(text, stream = 'info') {
   }
 }
 
+function updateBannerElements() {
+  return {
+    banner: document.getElementById('update-banner'),
+    message: document.getElementById('update-banner-message'),
+    action: document.getElementById('update-banner-action'),
+  };
+}
+
+function renderDesktopUpdateBanner({ message = null, busy = false, error = false } = {}) {
+  const { banner, message: messageElement, action } = updateBannerElements();
+  if (!banner || !messageElement || !action) return;
+  const version = state.update.availableVersion;
+  if (!version || (!busy && state.update.dismissedVersion === version)) {
+    banner.classList.add('hidden');
+    return;
+  }
+  messageElement.textContent = message || `Version ${version} is ready to download and install.`;
+  action.textContent = busy ? 'Updating…' : error ? 'Retry update' : 'Update GLaDOS';
+  action.disabled = busy;
+  banner.classList.toggle('busy', busy);
+  banner.classList.toggle('error', error);
+  banner.classList.remove('hidden');
+}
+
+async function applyPackagedUpdate() {
+  if (state.update.running || !window.gladosDesktop?.applyUpdate) return;
+  state.update.running = true;
+  let handedOffToInstaller = false;
+  renderDesktopUpdateBanner({ message: `Downloading GLaDOS ${state.update.availableVersion || 'update'}…`, busy: true });
+  appendUpdateLine('[desktop] downloading and verifying signed update\n', 'cmd');
+  try {
+    const installed = await window.gladosDesktop.applyUpdate();
+    handedOffToInstaller = Boolean(installed?.ok);
+    if (installed?.snapshotDir) appendUpdateLine(`[desktop] preservation snapshot created: ${installed.snapshotDir}\n`, 'info');
+  } catch (error) {
+    appendUpdateLine(`[desktop] update failed: ${error.message}\n`, 'stderr');
+    renderDesktopUpdateBanner({ message: error.message, error: true });
+    pushNotification('error', error.message, { toast: true, label: 'GLaDOS update' });
+  } finally {
+    if (!handedOffToInstaller) state.update.running = false;
+  }
+}
+
+function handleDesktopUpdateStatus(status = {}) {
+  const version = status.version || state.update.availableVersion;
+  if (status.type === 'available') {
+    state.update.availableVersion = version;
+    state.update.dismissedVersion = null;
+    renderDesktopUpdateBanner();
+    showToast(`GLaDOS ${version} is available.`, { kind: 'info', label: 'Update available', timeoutMs: 7000 });
+    return;
+  }
+  if (status.type === 'not-available') {
+    state.update.availableVersion = null;
+    document.getElementById('update-banner')?.classList.add('hidden');
+    return;
+  }
+  if (status.type === 'downloading') {
+    state.update.availableVersion = version;
+    renderDesktopUpdateBanner({ message: `Downloading GLaDOS ${version}…`, busy: true });
+    return;
+  }
+  if (status.type === 'progress') {
+    const percent = Number.isFinite(Number(status.percent)) ? Math.max(0, Math.min(100, Number(status.percent))) : 0;
+    renderDesktopUpdateBanner({ message: `Downloading GLaDOS ${version || ''}… ${Math.round(percent)}%`, busy: true });
+    return;
+  }
+  if (status.type === 'downloaded' || status.type === 'preparing') {
+    state.update.availableVersion = version;
+    renderDesktopUpdateBanner({ message: 'Update verified. Preserving your GLaDOS data…', busy: true });
+    return;
+  }
+  if (status.type === 'installing') {
+    renderDesktopUpdateBanner({ message: 'Installing update and restarting GLaDOS…', busy: true });
+    return;
+  }
+  if (status.type === 'error') {
+    state.update.running = false;
+    if (version) state.update.availableVersion = version;
+    if (state.update.availableVersion) renderDesktopUpdateBanner({ message: status.message || 'The update could not be installed.', error: true });
+  }
+}
+
+function setupDesktopUpdateNotifications() {
+  if (!window.gladosDesktop?.isPackaged) return;
+  window.gladosDesktop.onUpdateStatus?.(handleDesktopUpdateStatus);
+  document.getElementById('update-banner-action')?.addEventListener('click', applyPackagedUpdate);
+  document.getElementById('update-banner-later')?.addEventListener('click', () => {
+    state.update.dismissedVersion = state.update.availableVersion;
+    document.getElementById('update-banner')?.classList.add('hidden');
+  });
+  window.gladosDesktop.getUpdateStatus?.().then(status => {
+    if (status.available && status.version) handleDesktopUpdateStatus({ type: 'available', version: status.version });
+  }).catch(() => {});
+}
+
 async function refreshUpdateStatus() {
   const el = document.getElementById('update-status');
   if (!el) return;
   try {
     if (window.gladosDesktop?.isPackaged) {
-      const status = await window.gladosDesktop.getUpdateAccessStatus();
-      const feedInput = document.getElementById('update-feed-url');
-      if (feedInput && document.activeElement !== feedInput && status.feedUrl) feedInput.value = status.feedUrl;
+      const status = await window.gladosDesktop.getUpdateStatus();
       const run = document.getElementById('update-run');
-      if (run) run.disabled = !status.configured;
-      el.textContent = status.configured
-        ? `private feed ready · ${status.source} · ${status.storageBackend}`
-        : `private feed not ready · ${status.reason || 'configure access below'}`;
-      el.className = status.configured ? 'update-status ok' : 'update-status warn';
+      if (run) {
+        run.disabled = status.applying;
+        run.textContent = status.available ? 'Update GLaDOS' : 'Check for updates';
+      }
+      el.textContent = status.available
+        ? `GLaDOS ${status.version} is available`
+        : `GLaDOS ${status.currentVersion} · automatic checks enabled`;
+      el.className = status.available ? 'update-status warn' : 'update-status ok';
       return;
     }
     const r = await fetch('/api/update/status');
@@ -4236,7 +4333,6 @@ async function refreshUpdateStatus() {
 async function startInAppUpdate(force = false) {
   if (state.update.running) return;
   if (window.gladosDesktop?.isPackaged) {
-    if (!await confirmAction({ title: 'Check for update', message: 'Check the signed GLaDOS release feed for an update? Operator data under ~/.glados is never part of the update payload.', confirmLabel: 'Check for update' })) return;
     state.update.running = true;
     appendUpdateLine('[desktop] checking signed release feed\n', 'cmd');
     try {
@@ -4246,12 +4342,9 @@ async function startInAppUpdate(force = false) {
         appendUpdateLine('[desktop] GLaDOS is already up to date\n', 'info');
         return;
       }
-      await window.gladosDesktop.downloadUpdate();
-      appendUpdateLine('[desktop] signed update downloaded and verified\n', 'info');
-      if (await confirmAction({ title: 'Install verified update', message: 'The update is signed and verified. GLaDOS will refuse to install while agents are active, snapshot databases and model assignments, then restart. Reports and investigations remain in ~/.glados.', confirmLabel: 'Snapshot and install' })) {
-        const installed = await window.gladosDesktop.installUpdate();
-        appendUpdateLine(`[desktop] preservation snapshot created: ${installed.snapshotDir}\n`, 'info');
-      }
+      state.update.availableVersion = result.version;
+      state.update.running = false;
+      await applyPackagedUpdate();
     } catch (e) {
       appendUpdateLine(`[desktop] update failed: ${e.message}\n`, 'stderr');
     } finally {
@@ -4303,17 +4396,10 @@ function renderUpdatePane() {
   wrap.innerHTML = `
     <div class="update-toolbar">
       <span id="update-status" class="update-status">checking...</span>
-      <button id="update-run">Run Update</button>
+      <button id="update-run">${packaged ? 'Check for updates' : 'Run Update'}</button>
       ${packaged ? '' : '<button id="update-force" title="Continue despite active agents or dirty working tree">Force</button>'}
       <button id="update-clear">Clear Log</button>
     </div>
-    ${packaged ? `<div class="update-access">
-      <label><span>Authenticated HTTPS feed</span><input id="update-feed-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://updates.example.com/glados/macos"></label>
-      <label><span>Access token</span><input id="update-access-token" type="password" autocomplete="new-password" placeholder="Not displayed after saving"></label>
-      <button id="update-access-save">Save Access</button>
-      <button id="update-access-clear" class="danger">Clear Access</button>
-      <small>The token is encrypted by the OS credential store and never placed in the application bundle or dashboard API.</small>
-    </div>` : ''}
     <pre id="update-log" class="update-log"></pre>
   `;
   paneEl.appendChild(wrap);
@@ -4327,25 +4413,6 @@ function renderUpdatePane() {
   pre.scrollTop = pre.scrollHeight;
   wrap.querySelector('#update-run').addEventListener('click', () => startInAppUpdate(false));
   wrap.querySelector('#update-force')?.addEventListener('click', () => startInAppUpdate(true));
-  wrap.querySelector('#update-access-save')?.addEventListener('click', async () => {
-    const feedUrl = wrap.querySelector('#update-feed-url').value;
-    const tokenInput = wrap.querySelector('#update-access-token');
-    try {
-      const status = await window.gladosDesktop.saveUpdateAccess({ feedUrl, token: tokenInput.value });
-      tokenInput.value = '';
-      appendUpdateLine(`[desktop] private feed access saved using ${status.storageBackend}\n`, 'info');
-      await refreshUpdateStatus();
-    } catch (error) {
-      appendUpdateLine(`[desktop] could not save update access: ${error.message}\n`, 'stderr');
-    }
-  });
-  wrap.querySelector('#update-access-clear')?.addEventListener('click', async () => {
-    if (!await confirmAction({ title: 'Clear update access', message: 'Remove the locally encrypted private-feed token?', confirmLabel: 'Clear access' })) return;
-    await window.gladosDesktop.clearUpdateAccess();
-    wrap.querySelector('#update-access-token').value = '';
-    appendUpdateLine('[desktop] private feed access cleared\n', 'info');
-    await refreshUpdateStatus();
-  });
   wrap.querySelector('#update-clear').addEventListener('click', () => {
     state.update.lines = [];
     pre.innerHTML = '';
@@ -6451,3 +6518,4 @@ Promise.all([loadInvestigationSessions(), loadOperatorProfile().catch(() => stat
 
 wirePersistentLayout();
 renderNotifications();
+setupDesktopUpdateNotifications();

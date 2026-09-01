@@ -1,7 +1,7 @@
 # GLaDOS Desktop
 
-Electron shell for GLaDOS v4.5.5. The macOS bundle is named `GLaDOS.app`; the
-Ubuntu package is `GLaDOS-4.5.5-x86_64.AppImage`.
+Electron shell for GLaDOS v4.5.6. The macOS bundle is named `GLaDOS.app`; the
+Ubuntu package is `GLaDOS-4.5.6-x86_64.AppImage`.
 
 See [DISTRIBUTION_PLAN.md](DISTRIBUTION_PLAN.md) for the Developer ID,
 notarization, Apple-silicon/Ubuntu architecture, first-run dependency, and
@@ -38,12 +38,12 @@ bundle.
   workstation proxy CA, and performs live LiteLLM and proxy verification.
   Secret values are never returned to the dashboard after saving.
 - Source checkouts use the SSE git updater and restart the supervised dashboard
-  child. Packaged apps use the authenticated generic HTTPS feed documented in
-  `services/private-update-feed/README.md`.
-- Private-feed tokens are encrypted by the OS credential store under
-  `~/.glados/electron/private-update-auth.json`; they are never bundled or
-  returned to the dashboard renderer. Ubuntu refuses Electron's `basic_text`
-  password backend.
+  child. Packaged apps automatically use the Red Team VPN-only HTTPS feed
+  documented in `services/private-update-feed/README.md`; users do not enter a
+  feed URL or credential.
+- Packaged GLaDOS checks after startup and every six hours. A compact update
+  banner provides one action that downloads, verifies, snapshots, installs,
+  and restarts the app.
 - Before installation, the main process checks that no agents are active and
   requests a SQLite/config snapshot under `~/.glados/backups/updates/`.
   Reports, investigations, evidence, model assignments, and workspaces remain

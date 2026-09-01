@@ -1,19 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
-const { UpdateCredentialStore, validateFeedUrl } = require('../lib/private-update.cjs');
+const { validateFeedUrl } = require('../lib/private-update.cjs');
+const { DEFAULT_UPDATE_ORIGIN, platformFeedPath, resolveUpdateAccess } = require('../lib/update-channel.cjs');
 const { targetArch } = require('../scripts/rebuild-resources.cjs');
-
-function fakeStorage(backend = 'gnome_libsecret') {
-  return {
-    isEncryptionAvailable: () => true,
-    getSelectedStorageBackend: () => backend,
-    encryptString: value => Buffer.from(`encrypted:${Buffer.from(value).toString('base64')}`),
-    decryptString: value => Buffer.from(value.toString().replace(/^encrypted:/, ''), 'base64').toString(),
-  };
-}
 
 test('private update configuration requires HTTPS and strips a trailing slash', () => {
   assert.equal(validateFeedUrl('https://updates.example.test/glados/'), 'https://updates.example.test/glados');
@@ -22,37 +13,45 @@ test('private update configuration requires HTTPS and strips a trailing slash', 
   assert.throws(() => validateFeedUrl('https://updates.example.test/glados?token=nope'), /query string/);
 });
 
-test('update tokens are encrypted outside the app and never returned by status', () => {
-  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-update-auth-'));
-  try {
-    const fixtureCredential = ['private', 'red-team', 'fixture', '12345'].join('-');
-    const store = new UpdateCredentialStore({ runtimeDir, safeStorage: fakeStorage(), platform: 'darwin', env: {} });
-    const saved = store.save({ feedUrl: 'https://updates.example.test/glados', token: fixtureCredential });
-    assert.equal(saved.configured, true);
-    const raw = fs.readFileSync(store.file, 'utf8');
-    assert.equal(raw.includes(fixtureCredential), false);
-    assert.equal(fs.statSync(store.file).mode & 0o777, 0o600);
-    assert.deepEqual(store.load(), {
-      feedUrl: 'https://updates.example.test/glados',
-      token: fixtureCredential,
-      source: 'keychain',
-    });
-    const status = store.status();
-    assert.equal(status.configured, true);
-    assert.equal('token' in status, false);
-  } finally { fs.rmSync(runtimeDir, { recursive: true, force: true }); }
+test('packaged clients derive the VPN update feed without user configuration', () => {
+  assert.equal(platformFeedPath('darwin', 'arm64'), 'macos/arm64');
+  assert.equal(platformFeedPath('linux', 'x64'), 'linux/x64');
+  assert.equal(platformFeedPath('win32', 'x64'), 'windows/x64');
+  assert.throws(() => platformFeedPath('darwin', 'x64'), /does not support/);
+  assert.deepEqual(resolveUpdateAccess({ env: {}, platform: 'darwin', arch: 'arm64' }), {
+    feedUrl: `${DEFAULT_UPDATE_ORIGIN}/macos/arm64`,
+    source: 'built-in',
+    requestHeaders: {},
+  });
 });
 
-test('Linux refuses plaintext password backends for persisted update tokens', () => {
-  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-update-auth-'));
-  try {
-    const fixtureCredential = ['private', 'red-team', 'fixture', '12345'].join('-');
-    const store = new UpdateCredentialStore({ runtimeDir, safeStorage: fakeStorage('basic_text'), platform: 'linux', env: {} });
-    assert.throws(() => store.save({
-      feedUrl: 'https://updates.example.test/glados',
-      token: fixtureCredential,
-    }), /refusing to store/);
-  } finally { fs.rmSync(runtimeDir, { recursive: true, force: true }); }
+test('update feed and optional bearer authentication remain operator-overridable', () => {
+  const access = resolveUpdateAccess({
+    platform: 'linux',
+    arch: 'x64',
+    env: {
+      GLADOS_UPDATE_FEED_ORIGIN: 'https://staging-updates.example.test/glados/',
+      GLADOS_UPDATE_BEARER_TOKEN: 'fixture-update-token-12345',
+    },
+  });
+  assert.equal(access.feedUrl, 'https://staging-updates.example.test/glados/linux/x64');
+  assert.equal(access.source, 'environment');
+  assert.deepEqual(access.requestHeaders, { Authorization: 'Bearer fixture-update-token-12345' });
+});
+
+test('packaged update bridge exposes one guarded apply action and a notification banner', () => {
+  const desktopDir = path.resolve(__dirname, '..');
+  const main = fs.readFileSync(path.join(desktopDir, 'main.cjs'), 'utf8');
+  const preload = fs.readFileSync(path.join(desktopDir, 'preload.cjs'), 'utf8');
+  const dashboard = fs.readFileSync(path.join(desktopDir, '..', 'dashboard', 'public', 'index.html'), 'utf8');
+  assert.match(main, /ipcMain\.handle\('desktop:update:apply'/);
+  assert.doesNotMatch(main, /ipcMain\.handle\('desktop:update:(?:download|install)'/);
+  assert.match(main, /beforeDownload\.activeAgents/);
+  assert.match(main, /beforeInstall\.activeAgents/);
+  assert.match(preload, /applyUpdate\(\)/);
+  assert.doesNotMatch(preload, /downloadUpdate\(|installUpdate\(/);
+  assert.match(dashboard, /id="update-banner"/);
+  assert.match(dashboard, />Update GLaDOS</);
 });
 
 test('electron-builder architecture enum is passed through to native rebuilds', () => {

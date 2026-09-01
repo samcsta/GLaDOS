@@ -1,6 +1,6 @@
 # GLaDOS
 
-GLaDOS v4.5.3 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
+GLaDOS v4.5.6 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
 
 The application has no OpenClaw or Burp Suite runtime dependency. HTTP capture, replay, history, metrics, and per-agent attribution are provided by a supervised local mitmproxy process behind `/api/proxy/*`. Signed macOS packages include the pinned official Apple-silicon mitmproxy runtime; source installations continue to use the bootstrap-managed Homebrew installation.
 
@@ -133,7 +133,7 @@ scripts/glados-ca.sh rotate
 
 Source checkouts use the operator-initiated Settings update button or `scripts/update.sh`. The app blocks normal updates while agents are active or the tree is dirty, streams progress over SSE, then asks the Electron supervisor to restart the dashboard child.
 
-Packaged instances use an authenticated generic HTTPS feed through `electron-updater`. Each operator stores a per-user feed token with the OS credential store and chooses when to check, download, and install. Developer ID signing, hardened runtime, and notarization are release-time requirements. Updates replace the app bundle only; runtime state under `~/.glados` remains outside the payload and is snapshotted before installation.
+Packaged instances use the Red Team VPN-only HTTPS feed through `electron-updater`. GLaDOS derives the correct platform feed automatically, checks after startup and every six hours, and shows a compact banner only when a newer release is available. **Update GLaDOS** downloads and verifies the release, snapshots runtime state, installs it, and restarts the app in one action; installation remains blocked while agents are active. Developer ID/Authenticode signing and Linux artifact verification are release-time requirements. Updates replace the app bundle only; runtime state under `~/.glados` remains outside the payload and is snapshotted before installation.
 
 ## Models And Agents
 
@@ -177,6 +177,6 @@ npm run pack --prefix desktop
 npm run verify:pack --prefix desktop
 ```
 
-The release marker is `v4.5.3`. Build artifacts are written under
+The release marker is `v4.5.6`. Build artifacts are written under
 `artifacts/desktop/` and use the product name `GLaDOS`, so the bundle remains
 `GLaDOS.app`.

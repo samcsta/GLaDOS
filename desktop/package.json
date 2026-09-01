@@ -1,6 +1,6 @@
 {
   "name": "glados",
-  "version": "4.5.5",
+  "version": "4.5.6",
   "private": true,
   "description": "Electron shell for the GLaDOS operator app.",
   "author": {
@@ -66,7 +66,9 @@
       {
         "from": "../dashboard/node_modules",
         "to": "dashboard/node_modules",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "../blackboard",
@@ -79,7 +81,9 @@
       {
         "from": "../watchdog/node_modules",
         "to": "watchdog/node_modules",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "../tools",
@@ -168,7 +172,7 @@
     "publish": [
       {
         "provider": "generic",
-        "url": "https://updates.invalid/glados",
+        "url": "https://updates.r3dt34m.net/glados",
         "channel": "latest"
       }
     ]

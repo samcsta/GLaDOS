@@ -7,6 +7,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const Database = require('better-sqlite3');
+const EXPECTED_VERSION = fs.readFileSync(path.join(__dirname, '..', '..', 'VERSION'), 'utf8').trim();
 
 async function freePort() {
   return await new Promise((resolve, reject) => {
@@ -153,7 +154,7 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     }
     const overview = await request(srv.port, 'GET', '/api/overview');
     assert.equal(overview.status, 200, overview.raw);
-    assert.equal(overview.json.version, 'v4.5.5');
+    assert.equal(overview.json.version, EXPECTED_VERSION);
     assert.equal(overview.json.engagement.target, 'example.com');
     assert.equal(overview.json.phase, 'Awaiting approval');
     assert.equal(overview.json.pendingApprovals, 1);

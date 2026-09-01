@@ -1,6 +1,20 @@
-updates.redteam.example {
-  encode zstd gzip
-  reverse_proxy 127.0.0.1:8088 {
-    header_up X-Forwarded-Proto https
-  }
+updates.r3dt34m.net {
+	encode zstd gzip
+
+	tls {
+		dns googleclouddns {
+			gcp_project ford-4b73927e8436f15d997f4b84
+		}
+	}
+
+	handle_path /installers/* {
+		root * /srv/glados/installers
+		file_server
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8088 {
+			header_up X-Forwarded-Proto https
+		}
+	}
 }

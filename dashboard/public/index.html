@@ -10,7 +10,7 @@
       document.documentElement.dataset.theme = theme === 'classic' ? 'classic' : 'quantum';
     } catch { document.documentElement.dataset.theme = 'quantum'; }
   </script>
-  <link rel="stylesheet" href="/styles.css?v=20260814-project-sessions" />
+  <link rel="stylesheet" href="/styles.css?v=20260901-one-click-updates" />
   <link rel="stylesheet" href="/chat-alternate.css?v=20260814-project-sessions" />
 </head>
 <body>
@@ -34,6 +34,17 @@
     <span class="health-banner-actions">
       <button id="health-details-btn" type="button">Details</button>
       <button id="health-dismiss-btn" type="button" title="Hide until next failure">✕</button>
+    </span>
+  </div>
+
+  <div id="update-banner" class="update-banner hidden" role="status" aria-live="polite">
+    <span class="update-banner-copy">
+      <strong>GLaDOS update available</strong>
+      <span id="update-banner-message">A newer signed version is ready.</span>
+    </span>
+    <span class="update-banner-actions">
+      <button id="update-banner-action" class="safe" type="button">Update GLaDOS</button>
+      <button id="update-banner-later" type="button">Later</button>
     </span>
   </div>
 
@@ -120,6 +131,6 @@
   <script src="/vendor/dompurify/purify.min.js"></script>
   <script src="/vendor/xterm/lib/xterm.js"></script>
   <script src="/vendor/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
-  <script src="/app.js?v=20260814-session-attention"></script>
+  <script src="/app.js?v=20260901-one-click-updates"></script>
 </body>
 </html>

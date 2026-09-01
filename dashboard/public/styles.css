@@ -696,6 +696,21 @@ body.debug-off .entry.session-start { display: none; }
 .health-banner-actions button:last-child {
   background: transparent; border: none; font-size: 14px; padding: 2px 6px;
 }
+.update-banner {
+  flex: 0 0 auto; min-height: 42px; padding: 6px 12px 6px 14px;
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  color: #dff7e8; background: #10281d; border-bottom: 1px solid #285f42;
+  box-shadow: inset 3px 0 0 #4ade80;
+}
+.update-banner.hidden { display: none; }
+.update-banner-copy { min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.update-banner-copy strong { flex: 0 0 auto; font-size: 11px; }
+.update-banner-copy span { min-width: 0; overflow: hidden; color: #acd4bb; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.update-banner-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.update-banner-actions button { min-height: 28px; padding: 4px 10px; }
+.update-banner.busy .update-banner-actions #update-banner-later { display: none; }
+.update-banner.error { color: #ffe0e0; background: #321919; border-bottom-color: #743535; box-shadow: inset 3px 0 0 var(--err); }
+.update-banner.error .update-banner-copy span { color: #e9b5b5; }
 .chat-input {
   display: flex; gap: 8px; padding: 8px; border-top: 1px solid var(--border);
   background: var(--bg-alt);

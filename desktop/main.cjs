@@ -2,9 +2,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { fork, spawnSync } = require('node:child_process');
-const { app, BrowserWindow, dialog, ipcMain, net, safeStorage, session, shell } = require('electron');
-const { AppImageUpdater, DebUpdater, MacUpdater } = require('electron-updater');
-const { UpdateCredentialStore } = require('./lib/private-update.cjs');
+const { app, BrowserWindow, dialog, ipcMain, net, session, shell } = require('electron');
+const { AppImageUpdater, DebUpdater, MacUpdater, NsisUpdater } = require('electron-updater');
+const { resolveUpdateAccess } = require('./lib/update-channel.cjs');
 const { SetupAssistant } = require('./lib/setup-assistant.cjs');
 const { systemNetworkEnvironment } = require('./lib/network-environment.cjs');
 const { loadCompletedSecurityReview, resolveCompletedSecurityReview, safeEngagementId } = require('./lib/security-review-report.cjs');
@@ -40,10 +40,15 @@ let dashboardOrigin = null;
 let updater = null;
 let lastUpdateCheck = null;
 let downloadedUpdateVersion = null;
+let updateCheckPromise = null;
+let updateApplyPromise = null;
+let automaticUpdateStartTimer = null;
+let automaticUpdateInterval = null;
 let lastSetupVerification = null;
 let dashboardNetworkEnv = {};
 
-const updateCredentials = new UpdateCredentialStore({ runtimeDir, safeStorage, platform: process.platform });
+const AUTOMATIC_UPDATE_INITIAL_DELAY_MS = 15_000;
+const AUTOMATIC_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 function dashboardLog(message) {
   try {
@@ -255,6 +260,11 @@ function createWindow(url) {
       sandbox: true,
     },
   });
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (lastUpdateCheck?.isUpdateAvailable) {
+      sendUpdaterStatus('available', { version: lastUpdateCheck.updateInfo?.version || null });
+    }
+  });
   mainWindow.loadURL(url);
   mainWindow.webContents.setWindowOpenHandler(({ url: target }) => {
     shell.openExternal(target);
@@ -287,6 +297,7 @@ app.whenReady().then(async () => {
       return;
     }
     createWindow(url);
+    scheduleAutomaticUpdateChecks();
   } catch (e) {
     dialog.showErrorBox('GLaDOS failed to start', e.message);
     app.quit();
@@ -308,6 +319,8 @@ app.on('before-quit', event => {
   event.preventDefault();
   if (quitInProgress) return;
   quitInProgress = true;
+  clearTimeout(automaticUpdateStartTimer);
+  clearInterval(automaticUpdateInterval);
   stopDashboard().finally(() => {
     dashboardStoppedForQuit = true;
     app.quit();
@@ -332,21 +345,21 @@ function updaterForPlatform(access) {
     provider: 'generic',
     url: access.feedUrl,
     channel: process.env.GLADOS_UPDATE_CHANNEL || 'latest',
-    requestHeaders: { Authorization: `Bearer ${access.token}` },
     useMultipleRangeRequest: true,
   };
+  if (Object.keys(access.requestHeaders || {}).length) options.requestHeaders = access.requestHeaders;
   let next;
   if (process.platform === 'darwin') next = new MacUpdater(options);
   else if (process.platform === 'linux' && process.env.APPIMAGE) next = new AppImageUpdater(options);
   else if (process.platform === 'linux') next = new DebUpdater(options);
-  else throw new Error(`private updater is not configured for ${process.platform}`);
+  else if (process.platform === 'win32') next = new NsisUpdater(options);
+  else throw new Error(`private updater is not configured for ${process.platform}/${process.arch}`);
   next.autoDownload = false;
   next.autoInstallOnAppQuit = false;
   next.logger = null;
-  next.requestHeaders = options.requestHeaders;
+  if (options.requestHeaders) next.requestHeaders = options.requestHeaders;
   next.on('error', error => {
-    mainWindow?.webContents.send('desktop-update-error', { message: error.message });
-    sendUpdaterStatus('error', { message: error.message });
+    dashboardLog(`desktop updater error: ${error.message}`);
   });
   next.on('checking-for-update', () => sendUpdaterStatus('checking'));
   next.on('update-available', info => sendUpdaterStatus('available', { version: info.version }));
@@ -361,6 +374,93 @@ function updaterForPlatform(access) {
     sendUpdaterStatus('downloaded', { version: info.version });
   });
   return next;
+}
+
+function desktopUpdateStatus() {
+  const access = resolveUpdateAccess();
+  return {
+    packaged: app.isPackaged,
+    currentVersion: app.getVersion(),
+    feedUrl: access.feedUrl,
+    source: access.source,
+    available: Boolean(lastUpdateCheck?.isUpdateAvailable),
+    version: lastUpdateCheck?.updateInfo?.version || null,
+    downloaded: downloadedUpdateVersion,
+    checking: Boolean(updateCheckPromise),
+    applying: Boolean(updateApplyPromise),
+  };
+}
+
+async function checkForDesktopUpdate({ automatic = false } = {}) {
+  if (!app.isPackaged) return { packaged: false, reason: 'development builds use the source updater' };
+  if (updateCheckPromise) return updateCheckPromise;
+  updateCheckPromise = (async () => {
+    try {
+      if (!updater) updater = updaterForPlatform(resolveUpdateAccess());
+      lastUpdateCheck = await updater.checkForUpdates();
+      downloadedUpdateVersion = null;
+      return desktopUpdateStatus();
+    } catch (error) {
+      dashboardLog(`desktop update check failed: ${error.message}`);
+      sendUpdaterStatus(automatic ? 'check-failed' : 'error', { message: error.message });
+      throw error;
+    } finally {
+      updateCheckPromise = null;
+    }
+  })();
+  return updateCheckPromise;
+}
+
+async function applyAvailableDesktopUpdate() {
+  if (!app.isPackaged) return { ok: false, reason: 'development builds use the source updater' };
+  if (updateApplyPromise) return updateApplyPromise;
+  updateApplyPromise = (async () => {
+    try {
+      if (!lastUpdateCheck?.isUpdateAvailable) await checkForDesktopUpdate();
+      if (!updater || !lastUpdateCheck?.isUpdateAvailable) throw new Error('GLaDOS is already up to date');
+      const targetVersion = lastUpdateCheck.updateInfo?.version;
+      const beforeDownload = await dashboardJson('/api/healthz');
+      if (Number(beforeDownload.activeAgents || 0) > 0) {
+        throw new Error(`finish or stop ${beforeDownload.activeAgents} active agent(s), then press Update GLaDOS again`);
+      }
+      sendUpdaterStatus('downloading', { version: targetVersion });
+      await updater.downloadUpdate();
+      downloadedUpdateVersion ||= targetVersion;
+      if (!downloadedUpdateVersion) throw new Error('the downloaded update did not report a version');
+      const beforeInstall = await dashboardJson('/api/healthz');
+      if (Number(beforeInstall.activeAgents || 0) > 0) {
+        throw new Error(`update downloaded, but ${beforeInstall.activeAgents} agent(s) became active; stop them and try again`);
+      }
+      sendUpdaterStatus('preparing', { version: downloadedUpdateVersion });
+      const snapshot = await dashboardJson('/api/update/preservation-snapshot', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ targetVersion: downloadedUpdateVersion }),
+      });
+      sendUpdaterStatus('installing', { version: downloadedUpdateVersion });
+      await stopDashboard();
+      dashboardStoppedForQuit = true;
+      setTimeout(() => updater.quitAndInstall(), 250).unref();
+      return { ok: true, version: downloadedUpdateVersion, snapshotDir: snapshot.snapshotDir };
+    } catch (error) {
+      sendUpdaterStatus('error', { message: error.message, version: lastUpdateCheck?.updateInfo?.version || null });
+      throw error;
+    } finally {
+      updateApplyPromise = null;
+    }
+  })();
+  return updateApplyPromise;
+}
+
+function scheduleAutomaticUpdateChecks() {
+  if (!app.isPackaged || process.env.GLADOS_DISABLE_AUTOMATIC_UPDATE_CHECKS === '1') return;
+  clearTimeout(automaticUpdateStartTimer);
+  clearInterval(automaticUpdateInterval);
+  const run = () => checkForDesktopUpdate({ automatic: true }).catch(() => {});
+  automaticUpdateStartTimer = setTimeout(run, AUTOMATIC_UPDATE_INITIAL_DELAY_MS);
+  automaticUpdateStartTimer.unref?.();
+  automaticUpdateInterval = setInterval(run, AUTOMATIC_UPDATE_INTERVAL_MS);
+  automaticUpdateInterval.unref?.();
 }
 
 async function dashboardJson(pathname, options = {}) {
@@ -479,57 +579,15 @@ ipcMain.handle('desktop:setup:verify', async event => {
   return { ...status, lastVerification: lastSetupVerification };
 });
 
-ipcMain.handle('desktop:update-auth:status', event => {
+ipcMain.handle('desktop:update:status', event => {
   assertTrustedDashboardEvent(event);
-  return updateCredentials.status();
+  return desktopUpdateStatus();
 });
-ipcMain.handle('desktop:update-auth:save', (event, input) => {
-  assertTrustedDashboardEvent(event);
-  return updateCredentials.save({ feedUrl: input?.feedUrl, token: input?.token });
-});
-ipcMain.handle('desktop:update-auth:clear', event => {
-  assertTrustedDashboardEvent(event);
-  updater = null;
-  lastUpdateCheck = null;
-  downloadedUpdateVersion = null;
-  return updateCredentials.clear();
-});
-
 ipcMain.handle('desktop:update:check', async event => {
   assertTrustedDashboardEvent(event);
-  if (!app.isPackaged) return { packaged: false, reason: 'development builds use the source updater' };
-  updater = updaterForPlatform(updateCredentials.load());
-  lastUpdateCheck = await updater.checkForUpdates();
-  downloadedUpdateVersion = null;
-  return {
-    packaged: true,
-    currentVersion: app.getVersion(),
-    available: !!lastUpdateCheck?.isUpdateAvailable,
-    version: lastUpdateCheck?.updateInfo?.version || null,
-  };
+  return checkForDesktopUpdate();
 });
-ipcMain.handle('desktop:update:download', async event => {
+ipcMain.handle('desktop:update:apply', async event => {
   assertTrustedDashboardEvent(event);
-  if (!app.isPackaged) throw new Error('signed updater is only available in packaged builds');
-  if (!updater || !lastUpdateCheck?.isUpdateAvailable) throw new Error('no newer update is available to download');
-  await updater.downloadUpdate();
-  return { ok: true, version: lastUpdateCheck.updateInfo.version };
-});
-ipcMain.handle('desktop:update:install', async event => {
-  assertTrustedDashboardEvent(event);
-  if (!app.isPackaged) return { ok: false };
-  if (!updater || !downloadedUpdateVersion) throw new Error('no verified update has been downloaded');
-  const health = await dashboardJson('/api/healthz');
-  if (Number(health.activeAgents || 0) > 0) {
-    throw new Error(`cannot install while ${health.activeAgents} agent(s) are active`);
-  }
-  const snapshot = await dashboardJson('/api/update/preservation-snapshot', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ targetVersion: downloadedUpdateVersion }),
-  });
-  await stopDashboard();
-  dashboardStoppedForQuit = true;
-  setTimeout(() => updater.quitAndInstall(), 250).unref();
-  return { ok: true, version: downloadedUpdateVersion, snapshotDir: snapshot.snapshotDir };
+  return applyAvailableDesktopUpdate();
 });

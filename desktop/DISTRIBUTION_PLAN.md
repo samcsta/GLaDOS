@@ -79,15 +79,17 @@ Trigger the production job only from a protected semantic-version tag such as
 
 ## Installed-user update flow
 
-The `electron-updater` integration now uses an authenticated generic HTTPS
-feed. Each operator configures a per-user bearer token, encrypted through the
-OS credential store, and the Electron main process attaches it to metadata,
-artifact, and range requests. The dashboard renderer can query only sanitized
-configuration status.
+The `electron-updater` integration uses a generic HTTPS feed reachable only
+through the Red Team VPN. The platform-specific URL is built into GLaDOS, so
+operators do not configure a feed or token. An optional bearer token can still
+be supplied through the process environment for deployments outside the VPN
+boundary; it is never compiled into the app.
 
-- Check the stable feed after launch and periodically (for example every 24
-  hours), with a manual **Check now** action retained.
-- Notify before download. Never install while an assessment agent is active.
+- Check the stable feed 15 seconds after launch and every six hours, with a
+  manual **Check for updates** action retained.
+- Show a compact banner when a newer release exists. One **Update GLaDOS**
+  action downloads, verifies, snapshots, installs, and restarts. Never install
+  while an assessment agent is active.
 - Persist the downloaded-update state, then ask the operator to restart and
   install at a safe point.
 - Back up the SQLite runtime and model/config state before installation. The
@@ -107,11 +109,11 @@ configuration status.
 
 ### Preferred for an internal/private app
 
-Use a generic HTTPS feed backed by object storage/CDN. Authenticate operators
-through the organization, issue short-lived feed/download authorization, and
-store any refresh credential in macOS Keychain. Publish channel metadata and
-artifacts atomically. This avoids placing a reusable repository token in every
-installed app.
+Use a generic HTTPS feed restricted to the Red Team VPN and publish channel
+metadata only after every referenced artifact is available. Platform signing
+remains the artifact trust boundary. If the feed ever becomes reachable beyond
+the VPN, add organizational authentication or short-lived download credentials
+without placing a reusable credential in every installed app.
 
 ### Acceptable for non-sensitive public binaries
 

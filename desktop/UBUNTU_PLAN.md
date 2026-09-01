@@ -8,9 +8,7 @@ operator workspaces therefore survive AppImage or DEB upgrades.
 
 - Ubuntu 24.04, x86-64
 - AppImage for installation and in-app self-update
-- Electron `safeStorage` backed by GNOME Secret Service or KWallet; GLaDOS
-  refuses to persist the private-feed token when Electron reports
-  `basic_text`
+- Red Team VPN connectivity to the built-in HTTPS update feed
 
 Build the production release on Ubuntu itself. The Docker command below can
 produce an isolated x86-64 Linux build candidate and recursive native audit on
@@ -32,7 +30,7 @@ The bootstrap installs Node 22, Ubuntu/AppImage prerequisites, the required
 core command-line tools, mitmproxy, application dependencies, and initializes
 the per-user runtime. The installer builds and audits the current release, installs it under
 `~/.local/opt/glados/`, and registers `glados.desktop` for the current user.
-Set `GLADOS_APPIMAGE=/path/to/GLaDOS-4.5.5-x86_64.AppImage` to install an
+Set `GLADOS_APPIMAGE=/path/to/GLaDOS-4.5.6-x86_64.AppImage` to install an
 already-built artifact instead.
 
 `pack:ubuntu` creates `artifacts/desktop/linux-unpacked` and audits every ELF
@@ -44,23 +42,22 @@ release.
 ## Update feed
 
 Publish Linux metadata and artifacts below the private feed's `linux/x64/`
-directory and configure the app with
-`https://updates.redteam.example/glados/linux/x64`. AppImage is the supported
+directory. Packaged GLaDOS automatically uses
+`https://updates.r3dt34m.net/glados/linux/x64`. AppImage is the supported
 self-update format. A DEB can be added later as a separately managed channel
 after package-owner metadata and its privilege/policy experience are defined.
 
 Before production, add an embedded Ed25519/minisign public key and verify a
-detached signature for the Linux payload before installation. HTTPS, bearer
-authentication, and electron-builder's SHA-512 metadata protect transport and
+detached signature for the Linux payload before installation. HTTPS, the VPN
+boundary, and electron-builder's SHA-512 metadata protect transport and
 integrity, but Linux has no Developer ID equivalent that independently proves
 publisher identity after a feed compromise.
 
 ## Remaining Ubuntu acceptance gates
 
 1. Build and native audit on clean Ubuntu 24.04 x86-64.
-2. Verify Secret Service is unlocked and the token survives logout/reboot.
-3. Validate the system MITM CA flow and Chromium trust behavior.
-4. Add and test application-level release signature verification.
-5. Exercise an AppImage update while checking hashes/counts for
+2. Validate the system MITM CA flow and Chromium trust behavior.
+3. Add and test application-level release signature verification.
+4. Exercise an AppImage update while checking hashes/counts for
    `~/.glados/reports`, `investigations`, `model-overrides.json`, and agent
    workspaces before and after.

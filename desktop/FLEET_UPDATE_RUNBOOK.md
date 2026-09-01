@@ -5,11 +5,11 @@
 - Mac 1: macOS Apple Silicon (`arm64`)
 - Mac 2: macOS Apple Silicon (`arm64`)
 - Ubuntu 1: Ubuntu 24.04 (`x86_64`) running the AppImage
-- macOS feed: `https://updates.redteam.example/glados/macos/arm64`
-- Ubuntu feed: `https://updates.redteam.example/glados/linux/x64`
+- macOS feed: `https://updates.r3dt34m.net/glados/macos/arm64`
+- Ubuntu feed: `https://updates.r3dt34m.net/glados/linux/x64`
 
-Replace `updates.redteam.example` with the private update hostname. Keep the app ID
-`com.glados.ops`, signing identity, feed paths, and architecture stable.
+Keep the app ID `com.glados.ops`, signing identity, feed paths, and architecture
+stable.
 
 ## v4.4.8 clean-Mac correction
 
@@ -60,30 +60,23 @@ chmod 0755 GLaDOS-4.0.0-x86_64.AppImage
 ./GLaDOS-4.0.0-x86_64.AppImage
 ```
 
-GNOME Secret Service or KWallet must be installed and unlocked. GLaDOS refuses
-to save the feed bearer token if Electron falls back to plaintext storage.
+## Deploy the VPN-only HTTPS feed
 
-## Deploy the authenticated HTTPS feed
-
-1. Provision a private DNS hostname and valid TLS certificate.
+1. Provision `updates.r3dt34m.net` through the split-DNS Red Team pattern and
+   issue its TLS certificate with Caddy's Google Cloud DNS challenge provider.
 2. Install `services/private-update-feed` on the feed host and use the supplied
    systemd and Caddy templates.
-3. Generate three credentials so each workstation can be revoked separately:
-
-   ```bash
-   npm run token --prefix services/private-update-feed
-   npm run token --prefix services/private-update-feed
-   npm run token --prefix services/private-update-feed
-   ```
-
-4. Give one plaintext `token=` value to each workstation through the team's
-   secret-sharing channel. Put only the three `sha256=` values in the server's
-   `GLADOS_UPDATE_TOKEN_HASHES` setting.
-5. Create `/srv/glados/releases/macos/arm64` and
+3. Set `GLADOS_UPDATE_REQUIRE_AUTH=0`; the GCP ingress firewall, split DNS, and
+   routing are the access boundary. Keep the optional bearer mode disabled
+   unless this endpoint is intentionally exposed beyond the VPN.
+4. Create `/srv/glados/releases/macos/arm64` and
    `/srv/glados/releases/linux/x64`. Keep the feed service on loopback behind
    Caddy and expose only HTTPS.
-6. In the GLaDOS Update settings, configure both Macs with the macOS feed URL
-   and Ubuntu with the Linux feed URL, plus each machine's unique token.
+5. Put first-install DMGs and AppImages under `/srv/glados/installers`; Caddy
+   serves direct installer paths only to clients that can reach the VPN-only
+   host.
+6. No workstation feed setup is required. Packaged GLaDOS selects the correct
+   URL and checks automatically.
 
 ## Publish v4.0.1
 
@@ -124,11 +117,13 @@ under a higher version.
 
 ## Update all three machines
 
-On Mac 1, Mac 2, and Ubuntu 1:
+GLaDOS checks 15 seconds after launch and every six hours. When a newer release
+exists it shows a compact update banner. On Mac 1, Mac 2, and Ubuntu 1:
 
 1. Finish or stop every active agent run.
-2. Open Update and select **Check for updates**.
-3. Download v4.0.1, then approve restart and installation.
+2. Press **Update GLaDOS** in the banner.
+3. GLaDOS downloads, verifies, snapshots, installs, and restarts without a
+   second approval dialog.
 4. GLaDOS refuses installation while agents are active and creates a
    pre-install SQLite/config snapshot under `~/.glados/backups/updates/`.
 5. After restart, confirm v4.0.1, `/api/healthz`, proxy startup, model
@@ -136,12 +131,12 @@ On Mac 1, Mac 2, and Ubuntu 1:
 
 Pilot Mac 1 first. After its health and preservation checks pass, update Mac 2
 and Ubuntu 1. The update metadata is shared per platform, so all clients see the
-same release; the per-machine bearer tokens only control access and revocation.
+same signed release.
 
 ## Production gates still requiring owner infrastructure
 
 - Developer ID Application certificate and Apple notarization credentials
-- The private HTTPS hostname/feed host and three issued bearer tokens
+- The private HTTPS hostname/feed host and VPN-only DNS/routing
 - A protected release runner and secret store
 - Application-level detached signature verification for Linux payloads before
   treating the Ubuntu channel as hardened against update-host compromise

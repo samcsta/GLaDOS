@@ -30,6 +30,7 @@ function contentType(file) {
   if (/\.zip$/i.test(file)) return 'application/zip';
   if (/\.dmg$/i.test(file)) return 'application/x-apple-diskimage';
   if (/\.deb$/i.test(file)) return 'application/vnd.debian.binary-package';
+  if (/\.(?:exe|msi)$/i.test(file)) return 'application/vnd.microsoft.portable-executable';
   if (/\.AppImage$/i.test(file)) return 'application/octet-stream';
   return 'application/octet-stream';
 }
@@ -67,8 +68,10 @@ function parseRange(header, size) {
   return { start, end: Math.min(end, size - 1) };
 }
 
-function createHandler({ root, basePath = '/glados', tokenHashes, trustProxyTls = false }) {
-  const hashes = Array.isArray(tokenHashes) ? tokenHashes : parseTokenHashes(tokenHashes);
+function createHandler({ root, basePath = '/glados', tokenHashes, requireAuth = true, trustProxyTls = false }) {
+  const hashes = requireAuth
+    ? (Array.isArray(tokenHashes) ? tokenHashes : parseTokenHashes(tokenHashes))
+    : [];
   return (request, response) => {
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Referrer-Policy', 'no-referrer');
@@ -83,7 +86,7 @@ function createHandler({ root, basePath = '/glados', tokenHashes, trustProxyTls 
       response.end('{"ok":true}\n');
       return;
     }
-    if (!authorized(request, hashes)) {
+    if (requireAuth && !authorized(request, hashes)) {
       response.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': 'Bearer realm="GLaDOS updates"' });
       response.end('{"error":"unauthorized"}\n');
       return;
@@ -130,6 +133,7 @@ function createServer(env = process.env) {
     root,
     basePath: env.GLADOS_UPDATE_BASE_PATH || '/glados',
     tokenHashes: env.GLADOS_UPDATE_TOKEN_HASHES,
+    requireAuth: env.GLADOS_UPDATE_REQUIRE_AUTH !== '0',
     trustProxyTls: env.GLADOS_UPDATE_TRUST_PROXY_TLS === '1',
   });
   if (env.GLADOS_UPDATE_TLS_CERT && env.GLADOS_UPDATE_TLS_KEY) {

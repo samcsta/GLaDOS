@@ -48,3 +48,19 @@ test('feed requires bearer auth and supports updater range requests', async () =
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('VPN-only mode serves updates without per-user application credentials', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-feed-vpn-'));
+  fs.mkdirSync(path.join(root, 'macos', 'arm64'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'macos', 'arm64', 'latest-mac.yml'), 'version: 4.5.6\n');
+  const server = http.createServer(createHandler({ root, requireAuth: false, trustProxyTls: true }));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const response = await request(server.address().port, '/glados/macos/arm64/latest-mac.yml');
+    assert.equal(response.status, 200);
+    assert.match(response.body.toString(), /version:/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
