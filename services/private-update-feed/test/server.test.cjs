@@ -51,16 +51,31 @@ test('feed requires bearer auth and supports updater range requests', async () =
 
 test('VPN-only mode serves updates without per-user application credentials', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-feed-vpn-'));
+  const installerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-installers-vpn-'));
   fs.mkdirSync(path.join(root, 'macos', 'arm64'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'macos', 'arm64', 'latest-mac.yml'), 'version: 4.5.6\n');
-  const server = http.createServer(createHandler({ root, requireAuth: false, trustProxyTls: true }));
+  fs.writeFileSync(path.join(root, 'macos', 'arm64', 'latest-mac.yml'), 'version: 1.2.3\n');
+  fs.mkdirSync(path.join(installerRoot, 'macos'), { recursive: true });
+  fs.writeFileSync(path.join(installerRoot, 'macos', 'GLaDOS-1.2.3-arm64.dmg'), 'signed-dmg');
+  const server = http.createServer(createHandler({
+    root,
+    installerRoot,
+    requireAuth: false,
+    trustProxyTls: true,
+  }));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
     const response = await request(server.address().port, '/glados/macos/arm64/latest-mac.yml');
     assert.equal(response.status, 200);
     assert.match(response.body.toString(), /version:/);
+    const installer = await request(server.address().port, '/installers/macos/GLaDOS-1.2.3-arm64.dmg');
+    assert.equal(installer.status, 200);
+    assert.equal(installer.headers['content-type'], 'application/x-apple-diskimage');
+    assert.equal(installer.body.toString(), 'signed-dmg');
+    const traversal = await request(server.address().port, '/installers/%2e%2e/server.cjs');
+    assert.equal(traversal.status, 404);
   } finally {
     await new Promise(resolve => server.close(resolve));
     fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(installerRoot, { recursive: true, force: true });
   }
 });

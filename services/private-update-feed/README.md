@@ -32,6 +32,11 @@ Apple Silicon, `/glados/linux/x64` on Ubuntu x64, and `/glados/windows/x64` on
 Windows x64. Keeping separate paths prevents a client from ever receiving
 metadata for the wrong operating system or architecture.
 
+When `GLADOS_INSTALLER_ROOT` is configured, separately downloadable installers
+are served under `/installers/` by the same process. This supports a single
+VPN-only Caddy reverse proxy without granting the container write access to
+published artifacts.
+
 Upload the versioned payload and any separate blockmap first. The AppImage's
 block map is embedded in the AppImage itself. Upload `latest-*.yml` last so
 clients can never observe metadata for an unavailable payload. Never replace
@@ -88,6 +93,8 @@ Example environment file (mode `0600`):
 ```bash
 GLADOS_UPDATE_ROOT=/srv/glados/releases
 GLADOS_UPDATE_BASE_PATH=/glados
+GLADOS_INSTALLER_ROOT=/srv/glados/installers
+GLADOS_INSTALLER_BASE_PATH=/installers
 GLADOS_UPDATE_REQUIRE_AUTH=0
 GLADOS_UPDATE_TRUST_PROXY_TLS=1
 GLADOS_UPDATE_HOST=127.0.0.1
@@ -115,6 +122,15 @@ loopback. The Caddy template overwrites `X-Forwarded-Proto`; do not expose port
 The service rejects plain HTTP client traffic, path traversal, unauthenticated
 downloads, and non-GET/HEAD methods. It supports `Range` and `HEAD`, which
 electron-updater needs for efficient downloads.
+
+## Docker Compose deployment
+
+`compose.yaml` runs the feed read-only with all Linux capabilities dropped and
+uses host networking only so it can bind the exact IPv6 loopback upstream Caddy
+expects. Copy this service directory to `/srv/docker/updates`, create the local
+`releases/` and `installers/` directories, and run `docker compose up -d --build`.
+The default upstream is `[::1]:4000`; it can be changed with
+`GLADOS_UPDATE_PORT` if the infrastructure owner assigns another loopback port.
 
 ## Security boundary
 

@@ -1,0 +1,8 @@
+Dockerfile
+compose.yaml
+deploy/
+test/
+node_modules/
+npm-debug.log
+releases/
+installers/

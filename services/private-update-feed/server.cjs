@@ -68,7 +68,15 @@ function parseRange(header, size) {
   return { start, end: Math.min(end, size - 1) };
 }
 
-function createHandler({ root, basePath = '/glados', tokenHashes, requireAuth = true, trustProxyTls = false }) {
+function createHandler({
+  root,
+  basePath = '/glados',
+  installerRoot = null,
+  installerBasePath = '/installers',
+  tokenHashes,
+  requireAuth = true,
+  trustProxyTls = false,
+}) {
   const hashes = requireAuth
     ? (Array.isArray(tokenHashes) ? tokenHashes : parseTokenHashes(tokenHashes))
     : [];
@@ -96,7 +104,8 @@ function createHandler({ root, basePath = '/glados', tokenHashes, requireAuth = 
       response.end();
       return;
     }
-    const file = resolveUpdateFile(root, basePath, request.url);
+    const file = resolveUpdateFile(root, basePath, request.url)
+      || (installerRoot ? resolveUpdateFile(installerRoot, installerBasePath, request.url) : null);
     let stat;
     try { stat = file ? fs.statSync(file) : null; } catch {}
     if (!file || !stat?.isFile()) {
@@ -129,9 +138,15 @@ function createHandler({ root, basePath = '/glados', tokenHashes, requireAuth = 
 function createServer(env = process.env) {
   const root = path.resolve(env.GLADOS_UPDATE_ROOT || '');
   if (!env.GLADOS_UPDATE_ROOT || !fs.statSync(root).isDirectory()) throw new Error('GLADOS_UPDATE_ROOT must be an existing directory');
+  const installerRoot = env.GLADOS_INSTALLER_ROOT ? path.resolve(env.GLADOS_INSTALLER_ROOT) : null;
+  if (installerRoot && !fs.statSync(installerRoot).isDirectory()) {
+    throw new Error('GLADOS_INSTALLER_ROOT must be an existing directory');
+  }
   const handler = createHandler({
     root,
     basePath: env.GLADOS_UPDATE_BASE_PATH || '/glados',
+    installerRoot,
+    installerBasePath: env.GLADOS_INSTALLER_BASE_PATH || '/installers',
     tokenHashes: env.GLADOS_UPDATE_TOKEN_HASHES,
     requireAuth: env.GLADOS_UPDATE_REQUIRE_AUTH !== '0',
     trustProxyTls: env.GLADOS_UPDATE_TRUST_PROXY_TLS === '1',

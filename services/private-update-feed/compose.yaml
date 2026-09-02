@@ -1,0 +1,43 @@
+name: glados-updates
+
+services:
+  feed:
+    build:
+      context: .
+    image: glados-private-update-feed:local
+    container_name: glados-update-feed
+    restart: unless-stopped
+    network_mode: host
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      GLADOS_UPDATE_ROOT: /srv/glados/releases
+      GLADOS_UPDATE_BASE_PATH: /glados
+      GLADOS_INSTALLER_ROOT: /srv/glados/installers
+      GLADOS_INSTALLER_BASE_PATH: /installers
+      GLADOS_UPDATE_REQUIRE_AUTH: "0"
+      GLADOS_UPDATE_TRUST_PROXY_TLS: "1"
+      GLADOS_UPDATE_HOST: "::1"
+      PORT: "${GLADOS_UPDATE_PORT:-4000}"
+    volumes:
+      - ./releases:/srv/glados/releases:ro
+      - ./installers:/srv/glados/installers:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch(`http://[::1]:$${process.env.PORT}/healthz`,
+          {headers:{'x-forwarded-proto':'https'}}).then(response => {
+          if (!response.ok) process.exit(1); }).catch(() => process.exit(1));
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
