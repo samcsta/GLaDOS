@@ -2,28 +2,48 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { mitmCaPaths, checkMitmCaPermissions } = require('./mitm-ca');
+const { mitmCaPaths, checkMitmCaPermissions, commandPath } = require('./mitm-ca');
 
-function proxyBackendConfig(env = process.env) {
+function executableExists(file) {
+  try { fs.accessSync(file, fs.constants.X_OK); return true; } catch { return false; }
+}
+
+function windowsPythonScriptCandidates(home = os.homedir()) {
+  const direct = [
+    path.join(home, '.local', 'bin', 'mitmdump.exe'),
+    path.join(home, 'pipx', 'bin', 'mitmdump.exe'),
+  ];
+  const roots = [
+    path.join(home, 'AppData', 'Roaming', 'Python'),
+    path.join(home, 'AppData', 'Local', 'Programs', 'Python'),
+  ];
+  const found = [...direct];
+  for (const root of roots) {
+    let versions = [];
+    try { versions = fs.readdirSync(root, { withFileTypes: true }).filter(entry => entry.isDirectory()); } catch {}
+    for (const version of versions) found.push(path.join(root, version.name, 'Scripts', 'mitmdump.exe'));
+  }
+  return found;
+}
+
+function proxyBackendConfig(env = process.env, platform = process.platform) {
   const ca = mitmCaPaths(env);
-  const bundledBin = env.GLADOS_DESKTOP_RESOURCES
+  const bundledBin = platform === 'darwin' && env.GLADOS_DESKTOP_RESOURCES
     ? path.join(env.GLADOS_DESKTOP_RESOURCES, 'vendor', 'mitmproxy.app', 'Contents', 'MacOS', 'mitmdump')
     : null;
-  const bundledReady = bundledBin && (() => {
-    try { fs.accessSync(bundledBin, fs.constants.X_OK); return true; } catch { return false; }
-  })();
+  const bundledReady = bundledBin && executableExists(bundledBin);
   if (!bundledReady && /^(1|true|yes)$/i.test(String(env.GLADOS_PROXY_REQUIRE_BUNDLED || ''))) {
     throw new Error(`bundled mitmdump is missing or not executable: ${bundledBin || 'GLADOS_DESKTOP_RESOURCES is unset'}`);
   }
   const defaultBin = [
     bundledReady ? bundledBin : null,
+    commandPath('mitmdump', env, platform),
+    ...(platform === 'win32' ? windowsPythonScriptCandidates() : []),
     '/opt/homebrew/bin/mitmdump',
     '/usr/local/bin/mitmdump',
     path.join(os.homedir(), '.local', 'bin', 'mitmdump'),
     '/usr/bin/mitmdump',
-  ].filter(Boolean).find(candidate => {
-    try { fs.accessSync(candidate, fs.constants.X_OK); return true; } catch { return false; }
-  }) || 'mitmdump';
+  ].filter(Boolean).find(executableExists) || (platform === 'win32' ? 'mitmdump.exe' : 'mitmdump');
   return {
     backend: env.GLADOS_PROXY_BACKEND || 'mitmproxy',
     shadow: /^(1|true|yes)$/i.test(String(env.GLADOS_PROXY_SHADOW || '')),
@@ -64,12 +84,21 @@ function buildMitmproxyArgs(config = proxyBackendConfig(), outFile = flowFile(co
 
 function isGladosMitmproxyCommand(command, config = proxyBackendConfig()) {
   const text = String(command || '');
-  return /(?:^|\/)mitmdump(?:\s|$)/.test(text)
+  return /(?:^|[\\/])mitmdump(?:\.exe)?(?:["']?\s|$)/i.test(text)
     && text.includes(`--listen-port ${config.listenPort}`)
-    && text.includes(`confdir=${config.mitmproxyConfDir}`);
+    && text.toLowerCase().includes(`confdir=${config.mitmproxyConfDir}`.toLowerCase());
 }
 
 function listeningPids(config = proxyBackendConfig()) {
+  if (process.platform === 'win32') {
+    const powershell = commandPath('powershell', process.env) || 'powershell.exe';
+    const script = `Get-NetTCPConnection -State Listen -LocalPort ${config.listenPort} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique`;
+    const result = cp.spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8', windowsHide: true,
+    });
+    if (result.status !== 0 && !result.stdout) return [];
+    return String(result.stdout || '').split(/\s+/).map(Number).filter(Number.isInteger);
+  }
   const lsof = ['/usr/sbin/lsof', '/usr/bin/lsof'].find(fs.existsSync);
   if (!lsof) return [];
   const result = cp.spawnSync(lsof, ['-nP', '-a', `-iTCP:${config.listenPort}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' });
@@ -78,6 +107,14 @@ function listeningPids(config = proxyBackendConfig()) {
 }
 
 function processCommand(pid) {
+  if (process.platform === 'win32') {
+    const powershell = commandPath('powershell', process.env) || 'powershell.exe';
+    const script = `(Get-CimInstance Win32_Process -Filter \"ProcessId=${Number(pid)}\" -ErrorAction SilentlyContinue).CommandLine`;
+    const result = cp.spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8', windowsHide: true,
+    });
+    return result.status === 0 ? String(result.stdout || '').trim() : '';
+  }
   const result = cp.spawnSync('/bin/ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' });
   return result.status === 0 ? String(result.stdout || '').trim() : '';
 }
@@ -93,7 +130,7 @@ function stopStaleOwnedMitmproxy(config = proxyBackendConfig(), { timeoutMs = 25
   }
   const deadline = Date.now() + timeoutMs;
   while (owned.some(processAlive) && Date.now() < deadline) {
-    cp.spawnSync('/bin/sleep', ['0.05']);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
   for (const pid of owned.filter(processAlive)) {
     try { process.kill(pid, 'SIGKILL'); } catch {}

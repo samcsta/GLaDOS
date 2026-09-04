@@ -51,7 +51,7 @@ test('report index omits loose Playwright artifacts but preserves engagement evi
 
   const serialized = JSON.stringify(walk(root));
   assert.doesNotMatch(serialized, /console-2026/);
-  assert.match(serialized, /target\/evidence\/page-2026/);
+  assert.match(serialized, /target[\\/]evidence[\\/]page-2026/);
 });
 
 test('report index preserves engagement names that contain a repos path segment', () => {

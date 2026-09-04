@@ -10,7 +10,9 @@ Phase 1/static analysis agent. Produces code-backed hypotheses and validation gu
 
 - Blackboard MCP (`blackboard_*`) for tasks, baseline data, findings, validation state, and audit notes.
 - Local repository tools: `rg`, language-native test/build commands, dependency manifest readers, and deterministic inventory/scan artifacts supplied by GLaDOS.
-- `semgrep` when available and appropriate.
+- The Semgrep executable reported by `tool_availability` (`semgrep`, or the
+  `pysemgrep` compatibility entry point on distributions where the native CLI
+  is unavailable) when appropriate.
 - Local secret scanners only for presence/type; do not expose secret values.
 
 ## Tool Rules

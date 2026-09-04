@@ -62,6 +62,7 @@ const {
 const { SdkSessionRegistry } = require('./lib/harness/session-registry');
 const { InvestigationSessionStore } = require('./lib/investigation-session-store');
 const { proxyBackendConfig, startMitmproxy } = require('./lib/proxy/mitmproxy-runner');
+const { ensureMitmCa } = require('./lib/proxy/mitm-ca');
 const { ResumeCoordinator } = require('./lib/harness/resume-coordinator');
 const {
   proxyHistory,
@@ -110,16 +111,13 @@ let proxyRuntime = {
 function startDesktopProxy() {
   const config = proxyBackendConfig(process.env);
   if (process.env.GLADOS_DESKTOP !== '1' || config.backend !== 'mitmproxy') return;
-  const caScript = path.resolve(__dirname, '..', 'scripts', 'glados-ca.sh');
-  const generated = require('node:child_process').spawnSync('/bin/bash', [caScript, 'generate'], {
-    env: process.env,
-    encoding: 'utf8',
-  });
-  if (generated.status !== 0) {
+  try {
+    ensureMitmCa({ env: process.env });
+  } catch (error) {
     proxyRuntime = {
       ...proxyRuntime,
       status: 'failed',
-      error: generated.stderr?.trim() || `MITM CA bootstrap exited ${generated.status}`,
+      error: error.message,
     };
     console.warn('[proxy] native proxy CA bootstrap failed:', proxyRuntime.error);
     return;

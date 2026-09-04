@@ -6,6 +6,12 @@ platform-specific feed URL and do not require users to configure a URL or
 credential. Optional bearer authentication remains available for deployments
 that are not protected by the VPN boundary.
 
+New users visit the origin root (for production,
+`https://updates.r3dt34m.net/`). The service renders a no-script download page
+whose platform buttons are derived from the newest versioned files actually
+present under `installers/`. A platform remains marked **Coming soon** until its
+installer has been published, so the page cannot advertise a missing payload.
+
 ## Artifact layout
 
 Point `GLADOS_UPDATE_ROOT` at a release directory with this shape:
@@ -24,18 +30,25 @@ releases/
   windows/
     x64/
       latest.yml
-      GLaDOS-Setup-4.0.1.exe
+      GLaDOS-4.0.1-x64.exe
 ```
 
 GLaDOS automatically uses `https://updates.r3dt34m.net/glados/macos/arm64` on
-Apple Silicon, `/glados/linux/x64` on Ubuntu x64, and `/glados/windows/x64` on
-Windows x64. Keeping separate paths prevents a client from ever receiving
+Apple Silicon, `/glados/linux/x64` on Debian/Kali/Ubuntu or Fedora x64, and
+`/glados/windows/x64` on Windows x64. Keeping separate paths prevents a client from ever receiving
 metadata for the wrong operating system or architecture.
 
 When `GLADOS_INSTALLER_ROOT` is configured, separately downloadable installers
 are served under `/installers/` by the same process. This supports a single
 VPN-only Caddy reverse proxy without granting the container write access to
 published artifacts.
+
+For Linux, publish `install-glados-linux.sh` and `glados.png` beside the latest
+AppImage. For Windows, publish `install-glados-windows.ps1` beside the signed
+NSIS installer. The landing page recommends the appropriate setup script, which provisions
+the workstation and installs the AppImage at a stable, user-writable path so
+future in-app updates can replace it. The direct AppImage remains available for
+workstations whose prerequisites are already installed.
 
 Upload the versioned payload and any separate blockmap first. The AppImage's
 block map is embedded in the AppImage itself. Upload `latest-*.yml` last so
@@ -147,6 +160,6 @@ The default upstream is `[::1]:4000`; it can be changed with
   directly from the authenticated update hostname.
 - Put release signing/notarization credentials in a protected CI environment;
   the feed server never needs them.
-- For Ubuntu, add an application-level Ed25519/minisign verification gate before
+- For Linux, add an application-level Ed25519/minisign verification gate before
   production rollout because Linux does not provide the same Developer ID
   enforcement as macOS.

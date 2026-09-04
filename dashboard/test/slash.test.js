@@ -36,7 +36,7 @@ test('local path detection works for security-review routing', () => {
 });
 
 test('security-review context modes default to automatic prior matching and are mutually exclusive', () => {
-  const fsStub = { existsSync: value => value === '/tmp/repo' || value === '/tmp/repo with spaces' };
+  const fsStub = { existsSync: value => value === path.resolve('/tmp/repo') || value === path.resolve('/tmp/repo with spaces') };
   assert.deepEqual(slash.parseSecurityReviewArg('/tmp/repo', fsStub), {
     ok: true, mode: 'auto', maxDurationMinutes: null, singleModel: null, reviewProfile: 'expedited', campaign: false,
     target: '/tmp/repo', isLocalPath: true, isUrlOrDomain: false,
@@ -56,7 +56,7 @@ test('security-review context modes default to automatic prior matching and are 
 });
 
 test('security-review defaults to expedited and --full selects the comprehensive workflow', () => {
-  const fsStub = { existsSync: value => value === '/tmp/repos' };
+  const fsStub = { existsSync: value => value === path.resolve('/tmp/repos') };
   const parsed = slash.parseSecurityReviewArg('--expedited --campaign --time-limit 8h "/tmp/repos"', fsStub);
   assert.equal(parsed.ok, true);
   assert.equal(parsed.reviewProfile, 'expedited');

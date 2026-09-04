@@ -1,0 +1,61 @@
+name: Platform compatibility
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  linux-x64:
+    name: Debian, Kali, and Fedora x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and smoke-test Debian package
+        run: npm run smoke:debian:gui:docker --prefix desktop
+      - name: Smoke-test the same package on Kali
+        run: npm run smoke:kali:docker --prefix desktop
+      - name: Smoke-test the same package on Fedora
+        run: npm run smoke:fedora:docker --prefix desktop
+
+  windows-x64:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            desktop/package-lock.json
+            dashboard/package-lock.json
+            blackboard/blackboard-mcp/package-lock.json
+            watchdog/package-lock.json
+            watchdog/watchdog-mcp/package-lock.json
+            tools/glados-ops-mcp/package-lock.json
+      - name: Install locked dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix desktop
+          npm ci --prefix dashboard
+          npm ci --prefix blackboard/blackboard-mcp
+          npm ci --prefix watchdog
+          npm ci --prefix watchdog/watchdog-mcp
+          npm ci --prefix tools/glados-ops-mcp
+      - name: Run source tests
+        shell: pwsh
+        run: |
+          npm test --prefix desktop
+          npm test --prefix dashboard
+          npm test --prefix services/private-update-feed
+      - name: Package and audit Windows x64
+        run: npm run pack:windows --prefix desktop
+      - name: Smoke-test packaged dashboard
+        run: npm run smoke:windows --prefix desktop

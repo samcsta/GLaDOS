@@ -206,8 +206,10 @@ test('v4 tool manifest provides a managed core and specialist tool surface', () 
     assert.equal(manifest.tools.some(tool => tool.agents.includes('all') || tool.agents.includes(agent.id)), true, `${agent.id} must have managed CLI coverage`);
   }
   const netexec = manifest.tools.find(tool => tool.id === 'netexec');
+  const semgrep = manifest.tools.find(tool => tool.id === 'semgrep');
   assert.equal(netexec.mac.package, 'git+https://github.com/Pennyw0rth/NetExec');
   assert.deepEqual(netexec.mac.brew_dependencies, ['rust']);
+  assert.deepEqual(semgrep.commands, ['semgrep', 'pysemgrep']);
 });
 
 test('v4 desktop UI keeps app operations in Settings and agent operations in contextual Actions menus', () => {

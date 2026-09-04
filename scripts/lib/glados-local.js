@@ -309,9 +309,14 @@ function updateAgentStatus(paths) {
 }
 
 function which(cmd) {
-  for (const dir of (process.env.PATH || '').split(':')) {
-    const p = path.join(dir, cmd);
-    if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
+  const extensions = process.platform === 'win32'
+    ? String(process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';')
+    : [''];
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    for (const extension of extensions) {
+      const p = path.join(dir, `${cmd}${extension}`);
+      if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
+    }
   }
   return null;
 }
@@ -823,7 +828,7 @@ function doctor({ json = false } = {}) {
   for (const p of [paths.runtimeDir, paths.agentsDir, paths.reportsDir, paths.investigationsDir, paths.blackboardDb, paths.watchdogDb]) {
     if (!fs.existsSync(p)) warnings.push(`missing ${p}`);
   }
-  for (const dir of [paths.runtimeDir, paths.secretsDir, paths.sessionsDir, paths.trafficDir, paths.haltsDir]) {
+  for (const dir of process.platform === 'win32' ? [] : [paths.runtimeDir, paths.secretsDir, paths.sessionsDir, paths.trafficDir, paths.haltsDir]) {
     if (!fs.existsSync(dir)) continue;
     if ((fs.statSync(dir).mode & 0o077) !== 0) issues.push(`${dir} must be chmod 700`);
   }
@@ -992,8 +997,10 @@ function exportReport(engagement) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const safe = engagement.replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^_+|_+$/g, '') || 'engagement';
   const out = path.join(outDir, `${safe}-${stamp}.zip`);
-  const zip = which('zip') || '/usr/bin/zip';
-  const r = cp.spawnSync(zip, ['-qr', out, '.'], { cwd: src, stdio: 'inherit' });
+  const windows = process.platform === 'win32';
+  const archiveTool = windows ? (which('tar') || 'tar.exe') : (which('zip') || '/usr/bin/zip');
+  const args = windows ? ['-a', '-c', '-f', out, '-C', src, '.'] : ['-qr', out, '.'];
+  const r = cp.spawnSync(archiveTool, args, { cwd: src, stdio: 'inherit' });
   if (r.status !== 0) fail('zip export failed');
   log(out);
 }

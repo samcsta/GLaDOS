@@ -1114,7 +1114,7 @@ function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, work
       : `- Read and update USER.md, MEMORY.md, memory/, skills/, and other agent-owned files in ${persistentWorkspace}. Never write operator state into repository templates or the packaged GLaDOS.app Resources directory.`,
     '- If the operator asks what model you are running, answer from the active model above.',
     '- Do not infer current model names from static roster tables, examples, MEMORY.md, or historical workspace files.',
-    `- GLaDOS proxy URL for target HTTP(S): ${proxyUrl || proxyUrlFromEnv()}. For shell HTTP, use /usr/bin/curl -x this URL -k and add X-GLaDOS-Agent: ${agentId}. Do not use legacy :8080 proxy examples unless the operator explicitly overrides it.`,
+    `- GLaDOS proxy URL for target HTTP(S): ${proxyUrl || proxyUrlFromEnv()}. For shell HTTP, use curl -x this URL -k and add X-GLaDOS-Agent: ${agentId}. Do not use legacy :8080 proxy examples unless the operator explicitly overrides it.`,
   ];
   if (securityReview) {
     const repositoryPath = env.GLADOS_SECURITY_REVIEW_REPOSITORY || '(read repository_path from the task)';
@@ -1180,7 +1180,7 @@ function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, work
     lines.push(`- Browser uploads may read only from ${investigationsDir} or ${path.join(GLADOS_RUNTIME_DIR, 'workspaces')}. Create payload files there, never in /tmp. Click the file input once; while the file chooser modal is open, call browser_file_upload directly and do not click the input again.`);
     lines.push('- Prefer browser_snapshot, browser_find, browser_fill_form, browser_click, and browser_file_upload over browser_run_code_unsafe. For browser_evaluate, pass a valid function string such as () => location.href; page is not a variable there. For browser_run_code_unsafe, browser globals such as URLSearchParams must be created inside page.evaluate, not in the outer Node callback.');
     lines.push(`- Local credential helper browser bridge: pass cdp_port=${browserCdpPort(agentId)} to glados-ops__local_auth_login or glados-ops__adfs_active_directory_login. The port is loopback-only and unique to this named agent.`);
-    lines.push('- If this turn is a proxy smoke test, perform exactly one low-impact GET through the GLaDOS proxy URL using browser MCP or /usr/bin/curl -x; include X-GLaDOS-Agent, report the HTTP status/redirect, then stop. Do not crawl, authenticate, enumerate, or do formal recon.');
+    lines.push('- If this turn is a proxy smoke test, perform exactly one low-impact GET through the GLaDOS proxy URL using browser MCP or curl -x; include X-GLaDOS-Agent, report the HTTP status/redirect, then stop. Do not crawl, authenticate, enumerate, or do formal recon.');
     if (agentId === 'webapp-recon') {
       lines.push('- After SSO returns to the target, the first application analysis is the landing-page JavaScript checkpoint. Do not click through navigation before returning its js_handoff to GLaDOS.');
     }

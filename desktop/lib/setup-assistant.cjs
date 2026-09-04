@@ -4,6 +4,11 @@ const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { promisify } = require('node:util');
+const {
+  ensureMitmCa,
+  mitmCaTrusted,
+  trustMitmCa,
+} = require('../../dashboard/lib/proxy/mitm-ca');
 
 const DEFAULT_GATEWAY_URL = 'https://llmapi.redteamstuff.com';
 const DEFAULT_KEYCHAIN_SERVICE = 'glados.llmapi';
@@ -44,6 +49,7 @@ function writePrivateJson(file, value) {
 
 function privateFileStatus(file) {
   if (!fs.existsSync(file)) return { exists: false, ownerOnly: null };
+  if (process.platform === 'win32') return { exists: true, ownerOnly: true };
   const stat = fs.statSync(file);
   return { exists: true, ownerOnly: (stat.mode & 0o077) === 0 };
 }
@@ -122,15 +128,11 @@ class SetupAssistant {
       try { fingerprint = new crypto.X509Certificate(fs.readFileSync(this.caCertFile)).fingerprint256; }
       catch {}
     }
-    let trusted = false;
-    if (certExists && this.platform === 'darwin') {
-      const result = this.spawnSync('/usr/bin/security', [
-        'verify-cert', '-c', this.caCertFile,
-      ], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'ignore'] });
-      trusted = result.status === 0;
-    } else if (certExists && this.platform === 'linux') {
-      trusted = fs.existsSync('/usr/local/share/ca-certificates/glados-operator-mitm-ca.crt');
-    }
+    const trusted = certExists && mitmCaTrusted({
+      env: this.env,
+      platform: this.platform,
+      spawnSync: this.spawnSync,
+    });
     return {
       generated: key.exists && key.ownerOnly === true && certExists && Boolean(fingerprint),
       trusted,
@@ -218,24 +220,16 @@ class SetupAssistant {
 
   async runCaAction(action) {
     if (!['generate', 'trust'].includes(action)) throw new Error('unsupported proxy CA setup action');
-    const script = path.join(this.appRoot, 'scripts', 'glados-ca.sh');
-    if (!fs.existsSync(script)) throw new Error(`proxy CA helper is missing: ${script}`);
-    try {
-      await this.execFile('/bin/bash', [script, action], {
-        cwd: this.appRoot,
-        env: {
-          ...this.env,
-          HOME: this.homeDir,
-          GLADOS_RUNTIME_DIR: this.runtimeDir,
-          PATH: this.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin',
-        },
-        encoding: 'utf8',
-        maxBuffer: 1024 * 1024,
-      });
-    } catch (error) {
-      const detail = String(error?.stderr || error?.message || '').trim();
-      throw new Error(detail || `proxy CA ${action} failed`);
-    }
+    const env = {
+      ...this.env,
+      HOME: this.homeDir,
+      GLADOS_RUNTIME_DIR: this.runtimeDir,
+      PATH: this.env.PATH || (this.platform === 'win32'
+        ? `${process.env.SystemRoot || 'C:\\Windows'}\\System32`
+        : '/usr/bin:/bin:/usr/sbin:/sbin'),
+    };
+    if (action === 'generate') ensureMitmCa({ env, spawnSync: this.spawnSync });
+    else trustMitmCa({ env, platform: this.platform, spawnSync: this.spawnSync });
     return this.caStatus();
   }
 }

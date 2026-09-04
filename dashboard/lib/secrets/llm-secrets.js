@@ -16,6 +16,7 @@ function llmSecretPath(env = process.env) {
 function ownerOnlyModeOk(file) {
   let stat;
   try { stat = fs.statSync(file); } catch { return false; }
+  if (process.platform === 'win32') return true;
   return (stat.mode & 0o077) === 0;
 }
 

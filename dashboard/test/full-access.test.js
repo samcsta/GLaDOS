@@ -29,8 +29,10 @@ test('Full Access is disabled by default and stored owner-only after one UI conf
   const enabled = writeFullAccessState(true, { env });
   assert.equal(enabled.enabled, true);
   assert.equal(enabled.ownerOnly, true);
-  assert.equal(fs.statSync(fullAccessFile(env)).mode & 0o777, 0o600);
-  assert.equal(fs.statSync(path.dirname(fullAccessFile(env))).mode & 0o777, 0o700);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(fullAccessFile(env)).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(path.dirname(fullAccessFile(env))).mode & 0o777, 0o700);
+  }
 
   const disabled = writeFullAccessState(false, { env });
   assert.equal(disabled.enabled, false);

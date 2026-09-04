@@ -5428,16 +5428,26 @@ function openSetupAssistant(initialStatus, onStatus) {
     };
 
     const stepBody = () => {
+      const isMac = status.platform === 'darwin';
+      const isWindows = status.platform === 'win32';
+      const workstationLabel = isMac ? 'Mac' : 'workstation';
+      const credentialStore = isMac ? 'macOS Keychain' : 'the protected local GLaDOS credential store';
+      const caTrustStore = isMac
+        ? 'macOS Keychain'
+        : isWindows ? 'Windows current-user Root store' : 'the system trust store';
+      const caTrustPrompt = isMac
+        ? 'macOS may ask for your login password or Touch ID.'
+        : isWindows ? 'Windows installs this certificate for the current user only.' : 'Linux may request sudo access.';
       if (step === 0) {
-        return `<div class="setup-step-copy"><h3>Connect GLaDOS to LiteLLM</h3><p>The key is written directly to macOS Keychain and is never returned to this page. GLaDOS uses the configured corporate gateway below.</p></div>
+        return `<div class="setup-step-copy"><h3>Connect GLaDOS to LiteLLM</h3><p>The key is written directly to ${credentialStore} and is never returned to this page. GLaDOS uses the configured corporate gateway below.</p></div>
           <div class="setup-readonly"><span>Gateway</span><code>${escapeHtml(status.gatewayUrl || 'not configured')}</code></div>
           <div class="setup-inline-status ${status.llm?.configured ? 'complete' : ''}"><span>${status.llm?.configured ? '✓' : '1'}</span><div><strong>${status.llm?.configured ? 'Key configured' : 'Key required'}</strong><small>${escapeHtml(status.llm?.configured ? `Stored in ${status.llm.source}` : 'Paste the LiteLLM key once. Existing keys can be replaced here.')}</small></div></div>
           <label class="setup-field" for="setup-litellm-key"><span>${status.llm?.configured ? 'Replace LiteLLM key' : 'LiteLLM key'}</span><input id="setup-litellm-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Paste key" /></label>
-          <div class="setup-action-row"><button type="button" class="safe" data-setup-action="save-litellm">${status.llm?.configured ? 'Replace Key' : 'Save to Keychain'}</button></div>`;
+          <div class="setup-action-row"><button type="button" class="safe" data-setup-action="save-litellm">${status.llm?.configured ? 'Replace Key' : 'Save Key'}</button></div>`;
       }
       if (step === 1) {
         const profiles = status.localSecrets?.profiles || [];
-        return `<div class="setup-step-copy"><h3>Optional local credentials</h3><p>Add Ford SSO and Dradis credentials only if this Mac needs those authorized workflows. They are stored in <code>~/.glados/secrets/local-auth.json</code> with owner-only permissions and never committed.</p></div>
+        return `<div class="setup-step-copy"><h3>Optional local credentials</h3><p>Add Ford SSO and Dradis credentials only if this ${workstationLabel} needs those authorized workflows. They are stored in the local GLaDOS runtime secrets directory and never committed.</p></div>
           ${status.localSecrets?.configured ? `<div class="setup-inline-status complete"><span>✓</span><div><strong>Optional profiles configured</strong><small>${escapeHtml(profiles.join(', '))}</small></div></div>` : '<div class="setup-inline-status optional"><span>—</span><div><strong>Safe to skip</strong><small>Core GLaDOS and LiteLLM operation do not require these profiles.</small></div></div>'}
           <div class="setup-field-grid">
             <label class="setup-field"><span>Ford SSO username</span><input id="setup-ford-user" autocomplete="username" /></label>
@@ -5452,9 +5462,9 @@ function openSetupAssistant(initialStatus, onStatus) {
       }
       if (step === 2) {
         const fingerprint = status.ca?.fingerprint || 'Not generated yet';
-        return `<div class="setup-step-copy"><h3>Trust this Mac’s unique proxy CA</h3><p>GLaDOS generates a different interception CA on every workstation. Trusting its public certificate lets authorized proxy traffic work without TLS warnings. The private key never leaves this Mac.</p></div>
+        return `<div class="setup-step-copy"><h3>Trust this ${workstationLabel}’s unique proxy CA</h3><p>GLaDOS generates a different interception CA on every workstation. Trusting its public certificate lets authorized proxy traffic work without TLS warnings. The private key never leaves this ${workstationLabel}.</p></div>
           <div class="setup-inline-status ${status.ca?.generated ? 'complete' : ''}"><span>${status.ca?.generated ? '✓' : '1'}</span><div><strong>${status.ca?.generated ? 'Unique CA generated' : 'Generate unique CA'}</strong><small>Private key permissions: ${status.ca?.privateKeyOwnerOnly === true ? 'owner only' : status.ca?.privateKeyOwnerOnly === false ? 'unsafe' : 'not available'}</small></div></div>
-          <div class="setup-inline-status ${status.ca?.trusted ? 'complete' : ''}"><span>${status.ca?.trusted ? '✓' : '2'}</span><div><strong>${status.ca?.trusted ? 'Trusted in macOS Keychain' : 'Trust is required'}</strong><small>macOS may ask for your login password or Touch ID.</small></div></div>
+          <div class="setup-inline-status ${status.ca?.trusted ? 'complete' : ''}"><span>${status.ca?.trusted ? '✓' : '2'}</span><div><strong>${status.ca?.trusted ? `Trusted in ${caTrustStore}` : 'Trust is required'}</strong><small>${caTrustPrompt}</small></div></div>
           <div class="setup-readonly fingerprint"><span>SHA-256 fingerprint</span><code>${escapeHtml(fingerprint)}</code></div>
           <div class="setup-action-row">
             ${status.ca?.generated ? '' : '<button type="button" data-setup-action="generate-ca">Generate CA</button>'}
@@ -5494,7 +5504,7 @@ function openSetupAssistant(initialStatus, onStatus) {
 
       const reuse = backdrop.querySelector('#setup-reuse-ford');
       reuse?.addEventListener('change', () => { backdrop.querySelector('#setup-dradis-fields').hidden = reuse.checked; });
-      backdrop.querySelector('[data-setup-action="save-litellm"]')?.addEventListener('click', event => run(event.currentTarget, () => bridge.saveLiteLlmKey({ token: backdrop.querySelector('#setup-litellm-key').value }), 'LiteLLM key saved to macOS Keychain.'));
+      backdrop.querySelector('[data-setup-action="save-litellm"]')?.addEventListener('click', event => run(event.currentTarget, () => bridge.saveLiteLlmKey({ token: backdrop.querySelector('#setup-litellm-key').value }), `LiteLLM key saved to ${status.platform === 'darwin' ? 'macOS Keychain' : 'the local credential store'}.`));
       backdrop.querySelector('[data-setup-action="save-local"]')?.addEventListener('click', event => run(event.currentTarget, () => bridge.saveLocalSecrets({
         fordUsername: backdrop.querySelector('#setup-ford-user').value,
         fordPassword: backdrop.querySelector('#setup-ford-pass').value,
@@ -5502,7 +5512,7 @@ function openSetupAssistant(initialStatus, onStatus) {
         dradisUsername: backdrop.querySelector('#setup-dradis-user')?.value || '',
         dradisPassword: backdrop.querySelector('#setup-dradis-pass')?.value || '',
       }), 'Optional local profiles saved with owner-only permissions.'));
-      backdrop.querySelector('[data-setup-action="generate-ca"]')?.addEventListener('click', event => run(event.currentTarget, () => bridge.generateProxyCa(), 'A unique proxy CA was generated for this Mac.'));
+      backdrop.querySelector('[data-setup-action="generate-ca"]')?.addEventListener('click', event => run(event.currentTarget, () => bridge.generateProxyCa(), 'A unique proxy CA was generated for this workstation.'));
       backdrop.querySelector('[data-setup-action="trust-ca"]')?.addEventListener('click', event => run(event.currentTarget, () => bridge.trustProxyCa(), 'The unique proxy CA is trusted.'));
       backdrop.querySelector('[data-setup-action="verify"]')?.addEventListener('click', event => run(event.currentTarget, () => bridge.verifySetup(), null));
     }
@@ -5521,7 +5531,7 @@ async function renderSettingsPane() {
       <div id="setup-summary" class="setup-summary"><div class="setup-summary-loading">Checking setup…</div></div>
     </section>
     <section class="settings-section full-access-section">
-      <div class="settings-section-heading"><div><h2>Computer Use</h2><p class="settings-section-copy">Choose whether GLaDOS stays inside its normal safety boundary or may operate this Mac directly. Full Access is always off by default and requires an explicit confirmation.</p></div></div>
+      <div class="settings-section-heading"><div><h2>Computer Use</h2><p class="settings-section-copy">Choose whether GLaDOS stays inside its normal safety boundary or may operate this workstation directly when supported. Full Access is always off by default and requires an explicit confirmation.</p></div></div>
       <div id="full-access-card" class="full-access-card">
         <div class="full-access-card-head">
           <div id="full-access-status" class="full-access-status restricted"><span></span><div><strong>Checking access mode…</strong><small>Reading the local policy.</small></div></div>

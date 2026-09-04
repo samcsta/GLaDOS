@@ -31,7 +31,9 @@ test('fresh runtime bootstrap seeds writable agent workspaces outside the app pa
     assert.ok(fs.existsSync(path.join(gladosDir, 'USER.md')));
     assert.ok(fs.existsSync(path.join(gladosDir, 'MEMORY.md')));
     assert.ok(fs.existsSync(path.join(gladosDir, 'agent.json')));
-    assert.equal(fs.statSync(path.join(runtimeDir, 'secrets')).mode & 0o777, 0o700);
+    if (process.platform !== 'win32') {
+      assert.equal(fs.statSync(path.join(runtimeDir, 'secrets')).mode & 0o777, 0o700);
+    }
     assert.ok(!gladosDir.includes('.app/Contents/Resources'));
 
     fs.appendFileSync(path.join(gladosDir, 'USER.md'), '\nOperator-owned edit.\n');

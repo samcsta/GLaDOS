@@ -20,8 +20,10 @@ test('chat reasoning preferences are owner-only, validated, and default to auto 
   assert.throws(() => writeChatPreferences({ agentId: 'glados', effort: 'unlimited' }, env), /effort must be one of/);
   const saved = writeChatPreferences({ agentId: 'glados', effort: 'xhigh' }, env);
   assert.equal(saved.efforts.glados, 'xhigh');
-  assert.equal(fs.statSync(preferencesFile(env)).mode & 0o777, 0o600);
-  assert.equal(fs.statSync(path.dirname(preferencesFile(env))).mode & 0o777, 0o700);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(preferencesFile(env)).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(path.dirname(preferencesFile(env))).mode & 0o777, 0o700);
+  }
 });
 
 test('operator chat identity persists a normalized name and derives initials', () => {

@@ -44,6 +44,10 @@ function baseTestEnv(extra = {}) {
   return env;
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 test('resume coordinator preserves the exact interrupted specialist assignment', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-resume-state-'));
   const filePath = path.join(root, 'state', 'paused-agent-work.json');
@@ -56,8 +60,10 @@ test('resume coordinator preserves the exact interrupted specialist assignment',
     operatorPrompt: 'Spawn webapp-recon for a one-request proxy test.',
   });
 
-  assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
-  assert.equal(fs.statSync(path.dirname(filePath)).mode & 0o777, 0o700);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(path.dirname(filePath)).mode & 0o777, 0o700);
+  }
 
   const restored = new ResumeCoordinator({ filePath });
   const snapshot = restored.take('webapp-recon', 'session-a');
@@ -506,7 +512,7 @@ test('optional browser MCP mounts only when enabled and uses the active GLaDOS p
   assert.equal(browserConfig.browser.contextOptions.extraHTTPHeaders['X-GLaDOS-Agent'], 'webapp-recon');
   assert.equal(browserConfig.browser.contextOptions.extraHTTPHeaders['X-GLaDOS-Transport'], 'browser-mcp');
   assert.equal(browserConfig.outputDir, path.join(runtimeDir, 'investigations'));
-  assert.equal(fs.statSync(browserConfig.outputDir).mode & 0o777, 0o700);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(browserConfig.outputDir).mode & 0o777, 0o700);
   const fillDecision = enabled.hooks.PreToolUse[0].hooks[0]({
     hook_event_name: 'PreToolUse',
     tool_name: `${mount}__browser_fill_form`,
@@ -1069,8 +1075,10 @@ test('SDK resume ids are scoped to the durable SDK working directory', () => {
   const cwd = resolveSdkWorkingDirectory({ env: { GLADOS_RUNTIME_DIR: runtime } });
   registry.set('glados', 'session-one', cwd);
   assert.equal(registry.get('glados', cwd), 'session-one');
-  assert.equal(fs.statSync(path.dirname(registry.file)).mode & 0o077, 0);
-  assert.equal(fs.statSync(registry.file).mode & 0o077, 0);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(path.dirname(registry.file)).mode & 0o077, 0);
+    assert.equal(fs.statSync(registry.file).mode & 0o077, 0);
+  }
   const opts = buildAgentSdkOptions('glados', {
     env: baseTestEnv({ GLADOS_RUNTIME_DIR: runtime }),
     resumeSessionId: registry.get('glados', cwd),
@@ -1241,7 +1249,7 @@ test('operator workspace edits change assembled prompts and expose skills', () =
     env: { ...process.env, GLADOS_RUNTIME_DIR: workspaceRoot, ANTHROPIC_AUTH_TOKEN: 'test-token' },
   });
   assert.ok(opts.systemPrompt.includes('edited by operator'));
-  assert.match(opts.systemPrompt, new RegExp(`Persistent writable workspace: ${agentDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(opts.systemPrompt, new RegExp(`Persistent writable workspace: ${escapeRegExp(agentDir)}`));
   assert.match(opts.systemPrompt, /Never write operator state into repository templates or the packaged GLaDOS\.app Resources directory/);
   assert.ok(opts.systemPrompt.includes('Active model for this turn: claude-sonnet-5'));
   assert.ok(opts.systemPrompt.includes('Do not infer current model names from static roster tables'));
@@ -1261,8 +1269,8 @@ test('security-review prompts use the compact versioned contract and propagate i
     }
     fs.writeFileSync(path.join(agentDir, 'skills', 'workspace-only', 'SKILL.md'), 'description: workspace-only review skill\n');
   }
-  const repository = path.join(workspaceRoot, 'repository');
-  const artifactRoot = path.join(workspaceRoot, 'artifacts');
+  const repository = path.join(workspaceRoot, 'repository[qa]');
+  const artifactRoot = path.join(workspaceRoot, 'artifacts+results');
   const env = baseTestEnv({
     GLADOS_SECURITY_REVIEW: '1',
     GLADOS_SECURITY_REVIEW_ENGAGEMENT_ID: 'eng-review-prompt',
@@ -1282,8 +1290,8 @@ test('security-review prompts use the compact versioned contract and propagate i
     subagentAllowlist: ['source-code', 'source-review-validator'],
   });
   for (const agentId of ['source-code', 'source-review-validator']) {
-    assert.match(definitions[agentId].prompt, new RegExp(`Security-review repository root: ${repository}`));
-    assert.match(definitions[agentId].prompt, new RegExp(`Security-review artifact root: ${artifactRoot}`));
+    assert.match(definitions[agentId].prompt, new RegExp(`Security-review repository root: ${escapeRegExp(repository)}`));
+    assert.match(definitions[agentId].prompt, new RegExp(`Security-review artifact root: ${escapeRegExp(artifactRoot)}`));
     assert.match(definitions[agentId].prompt, /Security-review engagement id: eng-review-prompt/);
     assert.match(definitions[agentId].prompt, /do not read or write agent-owned files/);
     assert.match(definitions[agentId].prompt, /Do not reread SOUL\.md, USER\.md/);
@@ -1323,7 +1331,7 @@ test('proxy smoke-test instructions override formal investigation preflight', ()
 
   const webappRecon = buildAgentSdkOptions('webapp-recon', { env });
   assert.ok(webappRecon.systemPrompt.includes('Proxy Smoke Test Mode'));
-  assert.ok(webappRecon.systemPrompt.includes('/usr/bin/curl -x "$GLADOS_PROXY_URL"'));
+  assert.ok(webappRecon.systemPrompt.includes('curl -x "$GLADOS_PROXY_URL"'));
   assert.ok(webappRecon.systemPrompt.includes('Do not authenticate, crawl, enumerate'));
   assert.ok(webappRecon.systemPrompt.includes('Post-Pivot Recon Mode'));
   assert.match(webappRecon.systemPrompt, /landing-page JavaScript checkpoint/i);
@@ -2019,7 +2027,12 @@ test('streamAgentTurn reports the configured first-activity deadline after non-m
       prompt: 'hello glados',
       store: false,
       queryImpl,
-      options: { firstActivityTimeoutMs: 30, firstActivityDiagnostic: false, haltPollMs: 0 },
+      options: {
+        env: baseTestEnv(),
+        firstActivityTimeoutMs: 30,
+        firstActivityDiagnostic: false,
+        haltPollMs: 0,
+      },
     }),
     error => error.code === 'GLADOS_FIRST_ACTIVITY_TIMEOUT'
       && error.timeoutMs === 30
@@ -2065,6 +2078,7 @@ test('streamAgentTurn drops a resumed session and retries once after first-activ
     store: false,
     queryImpl,
     options: {
+      env: baseTestEnv(),
       resumeSessionId: 'stale-session',
       firstActivityTimeoutMs: 25,
       haltPollMs: 0,
@@ -2113,6 +2127,7 @@ test('streamAgentTurn drops a resumed session and retries once after active-turn
     store: false,
     queryImpl,
     options: {
+      env: baseTestEnv(),
       resumeSessionId: 'stale-session',
       turnIdleTimeoutMs: 25,
       haltPollMs: 0,

@@ -20,7 +20,7 @@ function readFullAccessState(env = process.env) {
   let stored = null;
   try { stored = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
   let ownerOnly = null;
-  try { ownerOnly = (fs.statSync(file).mode & 0o077) === 0; } catch {}
+  try { ownerOnly = process.platform === 'win32' || (fs.statSync(file).mode & 0o077) === 0; } catch {}
   return {
     enabled: stored?.enabled === true,
     acknowledgedAt: typeof stored?.acknowledgedAt === 'string' ? stored.acknowledgedAt : null,

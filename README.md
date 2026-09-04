@@ -1,8 +1,8 @@
 # GLaDOS
 
-GLaDOS v4.5.7 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
+GLaDOS v4.5.8 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
 
-The application has no OpenClaw or Burp Suite runtime dependency. HTTP capture, replay, history, metrics, and per-agent attribution are provided by a supervised local mitmproxy process behind `/api/proxy/*`. Signed macOS packages include the pinned official Apple-silicon mitmproxy runtime; source installations continue to use the bootstrap-managed Homebrew installation.
+The application has no OpenClaw or Burp Suite runtime dependency. HTTP capture, replay, history, metrics, and per-agent attribution are provided by a supervised local mitmproxy process behind `/api/proxy/*`. Signed macOS packages include the pinned official Apple-silicon mitmproxy runtime; Linux and Windows first-time installers provision the pinned command-line runtime.
 
 ## Operator Data
 
@@ -20,7 +20,7 @@ Application code is replaceable. Operator data is not.
 | MITM CA and fallback secrets | `~/.glados/secrets/` |
 | Per-agent model overrides | `~/.glados/model-overrides.json` |
 
-Updates never include or delete `~/.glados`. The LiteLLM key is stored in macOS Keychain, with a `0600` file fallback; it does not belong in `.env`.
+Updates never include or delete the GLaDOS runtime directory (`~/.glados` on macOS/Linux and the equivalent user-profile path on Windows). The LiteLLM key is stored in macOS Keychain, with a private per-user file fallback on Linux and Windows; it does not belong in `.env`.
 
 ## Repository Layout
 
@@ -44,7 +44,9 @@ overwriting operator edits.
 
 Internal macOS operators should follow the full
 [Gitea macOS installation guide](docs/install-macos-from-gitea.md). The
-supported production targets are Apple Silicon macOS and Ubuntu 24.04 x86-64.
+desktop target matrix is Apple Silicon macOS, Debian-family Linux (including
+Kali and Ubuntu) x86-64, Fedora x86-64, and Windows x64. Windows appears on the
+production download page only after its signed native release gates pass.
 macOS prerequisites are Apple Command Line Tools, Homebrew, and Node 20 or 22.
 
 ```bash
@@ -85,17 +87,34 @@ unregisters the installed and trashed bundles from Launch Services and
 refreshes Spotlight metadata for `/Applications` so GLaDOS no longer appears
 as an installed application in Spotlight.
 
-On Ubuntu 24.04 x86-64, bootstrap and install the AppImage for the current
-user:
+For a first installation, connect to the Red Team VPN and open
+`https://updates.r3dt34m.net/`. The download page offers only installers that
+have passed their platform release gates and are currently published. After
+installation, GLaDOS uses the same private origin for in-app updates.
+
+Linux users should choose **Download easy installer** and run the downloaded
+script with `bash ~/Downloads/install-glados-linux.sh`. It detects
+Debian/Kali/Ubuntu or Fedora, installs the required runtime tools, places
+GLaDOS in the application menu, and uses a stable AppImage path that the
+in-app updater can replace.
+
+On a supported Linux x86-64 workstation, bootstrap and install the AppImage
+for the current user:
 
 ```bash
-scripts/bootstrap-ubuntu.sh
+scripts/bootstrap-linux.sh
 scripts/setup-llm-secret.sh
 scripts/glados-ca.sh trust
 scripts/glados-doctor.sh
-scripts/install-desktop-app-ubuntu.sh
+scripts/install-desktop-app-linux.sh
 ~/.local/opt/glados/GLaDOS.AppImage
 ```
+
+Windows x64 users should download `install-glados-windows.ps1` from the VPN
+landing page and run it in PowerShell. The script provisions the required CLI
+runtime, verifies both the update metadata hash and the installer's
+Authenticode signature, and launches the per-user NSIS installer. Complete CA
+trust and LiteLLM setup in **Settings → Setup Assistant** after first launch.
 
 Bootstrap installs the app/MCP dependencies, the required core CLI set, seeds missing agent workspaces without overwriting operator edits, creates the runtime databases, and generates a unique local MITM CA. `scripts/setup-redteam-tools.sh --all --install` installs the wider specialist tool set.
 
@@ -133,7 +152,7 @@ scripts/glados-ca.sh rotate
 
 Source checkouts use the operator-initiated Settings update button or `scripts/update.sh`. The app blocks normal updates while agents are active or the tree is dirty, streams progress over SSE, then asks the Electron supervisor to restart the dashboard child.
 
-Packaged instances use the Red Team VPN-only HTTPS feed through `electron-updater`. GLaDOS derives the correct platform feed automatically, checks after startup and every six hours, and shows a compact banner only when a newer release is available. **Update GLaDOS** downloads and verifies the release, snapshots runtime state, installs it, and restarts the app in one action; installation remains blocked while agents are active. Developer ID/Authenticode signing and Linux artifact verification are release-time requirements. Updates replace the app bundle only; runtime state under `~/.glados` remains outside the payload and is snapshotted before installation.
+Packaged instances use the Red Team VPN-only HTTPS feed through `electron-updater`. GLaDOS derives the correct platform feed automatically, checks after startup and every six hours, and shows a compact banner only when a newer release is available. **Update GLaDOS** downloads and verifies the release, snapshots runtime state, installs it, and restarts the app in one action; installation remains blocked while agents are active. Developer ID/Authenticode signing and Linux artifact verification are release-time requirements. Updates replace the application only; per-user runtime state remains outside the payload and is snapshotted before installation.
 
 ## Models And Agents
 
@@ -175,8 +194,10 @@ npm test --prefix dashboard
 scripts/glados-doctor.sh
 npm run pack --prefix desktop
 npm run verify:pack --prefix desktop
+npm run smoke:kali:docker --prefix desktop
+npm run smoke:fedora:docker --prefix desktop
 ```
 
-The release marker is `v4.5.7`. Build artifacts are written under
+The release marker is `v4.5.8`. Build artifacts are written under
 `artifacts/desktop/` and use the product name `GLaDOS`, so the bundle remains
 `GLaDOS.app`.

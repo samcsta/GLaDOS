@@ -1,6 +1,6 @@
 {
   "name": "glados",
-  "version": "4.5.7",
+  "version": "4.5.8",
   "private": true,
   "description": "Electron shell for the GLaDOS operator app.",
   "author": {
@@ -16,14 +16,26 @@
     "verify:pack": "node scripts/verify-packaged.cjs",
     "verify:native:mac": "node scripts/verify-native-architectures.cjs",
     "verify:native:ubuntu": "node scripts/verify-native-linux.cjs",
+    "verify:native:linux": "node scripts/verify-native-linux.cjs",
+    "verify:native:windows": "node scripts/verify-native-windows.cjs",
     "dist": "npm run prepare:mac:assets && PATH=\"$PWD/scripts/bin:$PATH\" electron-builder",
     "dist:mac:arm64": "npm run prepare:mac:assets && PATH=\"$PWD/scripts/bin:$PATH\" electron-builder --mac --arm64",
     "release:mac": "node scripts/release-macos.cjs",
     "pack:ubuntu": "electron-builder --dir --linux --x64 && node scripts/verify-native-linux.cjs",
     "dist:ubuntu": "electron-builder --linux AppImage --x64",
+    "dist:linux": "electron-builder --linux AppImage --x64",
     "dist:ubuntu:docker": "docker build --platform linux/amd64 --target artifacts --output type=local,dest=../artifacts/desktop/ubuntu-x64 -f Dockerfile.ubuntu ..",
     "smoke:ubuntu:backend:docker": "docker build --platform linux/amd64 --target backend-smoke -f Dockerfile.ubuntu ..",
     "smoke:ubuntu:gui:docker": "docker build --platform linux/amd64 --target gui-smoke -f Dockerfile.ubuntu ..",
+    "smoke:debian:backend:docker": "docker build --platform linux/amd64 --target backend-smoke -f Dockerfile.ubuntu ..",
+    "smoke:debian:gui:docker": "docker build --platform linux/amd64 --target gui-smoke -f Dockerfile.ubuntu ..",
+    "dist:linux:docker": "docker build --platform linux/amd64 --target artifacts --output type=local,dest=../artifacts/desktop/linux-x64 -f Dockerfile.ubuntu ..",
+    "smoke:kali:docker": "docker build --platform linux/amd64 --target kali-smoke -f Dockerfile.ubuntu ..",
+    "smoke:fedora:docker": "docker build --platform linux/amd64 --target fedora-smoke -f Dockerfile.ubuntu ..",
+    "pack:windows": "electron-builder --dir --win --x64 && node scripts/verify-native-windows.cjs",
+    "smoke:windows": "node scripts/smoke-packaged-dashboard.cjs",
+    "dist:windows": "electron-builder --win nsis --x64",
+    "release:windows": "node scripts/release-windows.cjs",
     "test": "node --test test/*.test.cjs"
   },
   "allowScripts": {
@@ -165,6 +177,20 @@
       "target": [
         "AppImage"
       ]
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false
     },
     "artifactName": "${productName}-${version}-${arch}.${ext}",
     "afterPack": "scripts/rebuild-resources.cjs",

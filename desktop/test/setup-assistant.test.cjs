@@ -44,8 +44,10 @@ test('optional local profiles use an atomic owner-only file and may reuse Ford c
       useFordForDradis: true,
     });
     assert.deepEqual(status.profiles, ['dradis', 'ford-sso']);
-    assert.equal(fs.statSync(assistant.localAuthFile).mode & 0o777, 0o600);
-    assert.equal(fs.statSync(path.dirname(assistant.localAuthFile)).mode & 0o777, 0o700);
+    if (process.platform !== 'win32') {
+      assert.equal(fs.statSync(assistant.localAuthFile).mode & 0o777, 0o600);
+      assert.equal(fs.statSync(path.dirname(assistant.localAuthFile)).mode & 0o777, 0o700);
+    }
     const saved = JSON.parse(fs.readFileSync(assistant.localAuthFile, 'utf8'));
     assert.equal(saved.profiles['ford-sso'].password, fixturePassword);
     assert.equal(saved.profiles.dradis.password, fixturePassword);

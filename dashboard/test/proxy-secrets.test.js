@@ -14,7 +14,9 @@ function tempRuntime() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'glados-secrets-test-'));
 }
 
-test('MITM CA permission check fails closed on world-readable private key', () => {
+test('MITM CA permission check fails closed on world-readable private key', {
+  skip: process.platform === 'win32' ? 'POSIX file modes are not available on Windows' : false,
+}, () => {
   const dir = tempRuntime();
   const env = { GLADOS_RUNTIME_DIR: dir };
   const paths = mitmCaPaths(env);
@@ -26,7 +28,9 @@ test('MITM CA permission check fails closed on world-readable private key', () =
   assert.match(result.issues.join('\n'), /chmod 600/);
 });
 
-test('LLM fallback secret refuses insecure file modes', () => {
+test('LLM fallback secret refuses insecure file modes', {
+  skip: process.platform === 'win32' ? 'POSIX file modes are not available on Windows' : false,
+}, () => {
   const dir = tempRuntime();
   const env = { GLADOS_RUNTIME_DIR: dir };
   const file = llmSecretPath(env);
@@ -68,7 +72,7 @@ test('packaged proxy prefers the bundled mitmdump and can require it for clean-m
     GLADOS_RUNTIME_DIR: tempRuntime(),
     GLADOS_DESKTOP_RESOURCES: resources,
     GLADOS_PROXY_REQUIRE_BUNDLED: '1',
-  });
+  }, 'darwin');
   assert.equal(config.mitmproxyBin, bundled);
   assert.equal(config.mitmproxyBundled, true);
 });
@@ -78,7 +82,7 @@ test('clean-machine verification fails when the packaged mitmdump is absent', ()
     GLADOS_RUNTIME_DIR: tempRuntime(),
     GLADOS_DESKTOP_RESOURCES: tempRuntime(),
     GLADOS_PROXY_REQUIRE_BUNDLED: '1',
-  }), /bundled mitmdump is missing or not executable/);
+  }, 'darwin'), /bundled mitmdump is missing or not executable/);
 });
 
 test('mitmproxy ownership detection only matches the GLaDOS listener and CA directory', () => {
@@ -144,7 +148,8 @@ addon.request(flow)
 addon.response(flow)
 print(json.dumps({'headers': req.headers, 'event': json.loads(open(sys.argv[2]).readline())}))
 `;
-  const result = require('node:child_process').spawnSync('python3', ['-c', script, addon, traffic], {
+  const python = process.platform === 'win32' ? 'python.exe' : 'python3';
+  const result = require('node:child_process').spawnSync(python, ['-c', script, addon, traffic], {
     env: { ...process.env, GLADOS_PROXY_TRAFFIC_JSONL: traffic },
     encoding: 'utf8',
   });
@@ -173,7 +178,9 @@ test('mitmproxy uses the GLaDOS CA material with owner-only permissions', () => 
   assert.equal(ownerOnlyModeOk(combined), true);
 });
 
-test('MITM CA rotation preserves owner-only keys and archives the previous operator key', () => {
+test('MITM CA rotation preserves owner-only keys and archives the previous operator key', {
+  skip: process.platform === 'win32' ? 'shell CA rotation is covered by the native Windows CA manager' : false,
+}, () => {
   const dir = tempRuntime();
   const script = path.resolve(__dirname, '..', '..', 'scripts', 'glados-ca.sh');
   const env = { ...process.env, GLADOS_RUNTIME_DIR: dir };
@@ -272,7 +279,7 @@ test('runtime refresh clears active and archived proxy capture state', () => {
   assert.equal(result.ok, true);
   assert.equal(result.filesRemoved, 2);
   assert.equal(fs.readFileSync(config.trafficJsonl, 'utf8'), '');
-  assert.equal(fs.statSync(config.trafficJsonl).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(config.trafficJsonl).mode & 0o777, 0o600);
   assert.equal(fs.existsSync(archive), false);
   assert.equal(fs.existsSync(flows), false);
   assert.equal(fs.readFileSync(unrelated, 'utf8'), 'keep');

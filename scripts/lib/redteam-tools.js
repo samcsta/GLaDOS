@@ -14,10 +14,15 @@ function loadManifest() {
 }
 
 function which(command, env = process.env) {
+  const extensions = process.platform === 'win32'
+    ? String(env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';')
+    : [''];
   for (const dir of String(env.PATH || '').split(path.delimiter)) {
     if (!dir) continue;
-    const candidate = path.join(dir, command);
-    try { fs.accessSync(candidate, fs.constants.X_OK); return candidate; } catch {}
+    for (const extension of extensions) {
+      const candidate = path.join(dir, `${command}${extension}`);
+      try { fs.accessSync(candidate, fs.constants.X_OK); return candidate; } catch {}
+    }
   }
   return null;
 }

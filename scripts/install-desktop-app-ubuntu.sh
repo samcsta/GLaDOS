@@ -11,17 +11,17 @@ ICON_FILE="$ICON_ROOT/glados.png"
 LAUNCHER="$INSTALL_ROOT/glados"
 
 if [[ "$(uname -s)" != "Linux" ]] || [[ ! -r /etc/os-release ]]; then
-  echo "install-desktop-app-ubuntu.sh requires Ubuntu Linux" >&2
+  echo "install-desktop-app-ubuntu.sh requires a supported Linux distribution" >&2
   exit 1
 fi
 # shellcheck disable=SC1091
 source /etc/os-release
-if [[ "${ID:-}" != "ubuntu" ]]; then
-  echo "install-desktop-app-ubuntu.sh supports Ubuntu; detected ${ID:-unknown}" >&2
-  exit 1
-fi
-if [[ "$(dpkg --print-architecture)" != "amd64" ]]; then
-  echo "install-desktop-app-ubuntu.sh supports Ubuntu x86-64; detected $(dpkg --print-architecture)" >&2
+case " ${ID:-} ${ID_LIKE:-} " in
+  *' debian '*|*' fedora '*|*' rhel '*) ;;
+  *) echo "install-desktop-app-ubuntu.sh supports Debian/Kali/Ubuntu and Fedora; detected ${ID:-unknown}" >&2; exit 1 ;;
+esac
+if [[ "$(uname -m)" != "x86_64" ]]; then
+  echo "install-desktop-app-ubuntu.sh supports Linux x86-64; detected $(uname -m)" >&2
   exit 1
 fi
 
@@ -43,8 +43,8 @@ else
     echo "Desktop build dependencies are missing; installing them now."
     npm install --prefix "$ROOT/desktop"
   fi
-  npm run dist:ubuntu --prefix "$ROOT/desktop"
-  npm run verify:native:ubuntu --prefix "$ROOT/desktop"
+  npm run dist:linux --prefix "$ROOT/desktop"
+  npm run verify:native:linux --prefix "$ROOT/desktop"
   SOURCE="$ARTIFACT_ROOT/GLaDOS-${EXPECTED_VERSION#v}-x86_64.AppImage"
 fi
 
@@ -71,7 +71,21 @@ set -euo pipefail
 
 export PATH="$HOME/.local/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
 launcher_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$launcher_dir/GLaDOS.AppImage" "$@"
+appimage="$launcher_dir/GLaDOS.AppImage"
+restarted_after_update=0
+while true; do
+  before="$(stat -Lc '%d:%i:%s:%Y' "$appimage")"
+  set +e
+  "$appimage" "$@"
+  status=$?
+  set -e
+  after="$(stat -Lc '%d:%i:%s:%Y' "$appimage" 2>/dev/null || true)"
+  if [[ "$status" -eq 0 && "$restarted_after_update" -eq 0 && -n "$after" && "$after" != "$before" ]]; then
+    restarted_after_update=1
+    continue
+  fi
+  exit "$status"
+done
 EOF
 chmod 0755 "$LAUNCHER"
 

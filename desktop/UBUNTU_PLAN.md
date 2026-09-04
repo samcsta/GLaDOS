@@ -1,62 +1,68 @@
-# Ubuntu desktop build
+# Linux desktop build
 
-Ubuntu uses the same Electron shell and `~/.glados` runtime boundary as macOS.
-Reports, investigations, model assignments, credentials, proxy history, and
-operator workspaces therefore survive AppImage or DEB upgrades.
+This legacy-named document covers the shared Debian/Kali/Ubuntu and Fedora
+build. Linux uses the same Electron shell and `~/.glados` runtime boundary as
+macOS. Reports, investigations, model assignments, credentials, proxy history,
+and operator workspaces therefore survive AppImage upgrades.
 
-## Supported first target
+## Supported targets
 
-- Ubuntu 24.04, x86-64
+- Debian-family Linux, including Debian, Kali, and Ubuntu, on x86-64
+- Fedora Linux on x86-64
 - AppImage for installation and in-app self-update
 - Red Team VPN connectivity to the built-in HTTPS update feed
 
-Build the production release on Ubuntu itself. The Docker command below can
-produce an isolated x86-64 Linux build candidate and recursive native audit on
-an Apple-silicon Mac, but Electron/Chromium is not a reliable QEMU GUI smoke
-target. Both `better-sqlite3` and `node-pty` must be rebuilt against the
-packaged Electron ABI on Linux, and the final AppImage must launch on native
-Ubuntu 24.04 x86-64 hardware.
+Build one AppImage from the Debian 12 baseline so its glibc requirement remains
+compatible with the supported distributions. The build uses Clang 19 for
+Electron 43's C++20 headers, rebuilds `better-sqlite3` and `node-pty` against
+the packaged Electron ABI, and recursively audits every ELF file as x86-64.
+The same unpacked payload is then launched under Xvfb on Debian, current Kali
+rolling, and current Fedora:
 
 ```bash
-npm run dist:ubuntu:docker --prefix desktop
+npm run dist:linux:docker --prefix desktop
+npm run smoke:debian:backend:docker --prefix desktop
+npm run smoke:debian:gui:docker --prefix desktop
+npm run smoke:kali:docker --prefix desktop
+npm run smoke:fedora:docker --prefix desktop
 ```
+
+For a source checkout on any supported Linux distribution:
 
 ```bash
-scripts/bootstrap-ubuntu.sh
-scripts/install-desktop-app-ubuntu.sh
+scripts/bootstrap-linux.sh
+scripts/install-desktop-app-linux.sh
 ```
 
-The bootstrap installs Node 22, Ubuntu/AppImage prerequisites, the required
-core command-line tools, mitmproxy, application dependencies, and initializes
-the per-user runtime. The installer builds and audits the current release, installs it under
-`~/.local/opt/glados/`, and registers `glados.desktop` for the current user.
-Set `GLADOS_APPIMAGE=/path/to/GLaDOS-4.5.7-x86_64.AppImage` to install an
-already-built artifact instead.
-
-`pack:ubuntu` creates `artifacts/desktop/linux-unpacked` and audits every ELF
-helper and native Node module as x86-64 before a distributable is accepted.
-Run a packaged smoke test on a clean Ubuntu 24.04 workstation, including terminal PTY,
-proxy startup, browser MCP, report persistence, and an upgrade from the prior
-release.
+The compatibility aliases `bootstrap-ubuntu.sh` and
+`install-desktop-app-ubuntu.sh` remain available for existing automation. The
+bootstrap detects the apt or dnf family, installs Node 22 and the required
+runtime tools, and initializes the per-user runtime. The installer builds and
+audits the current release, installs it under `~/.local/opt/glados/`, and
+registers `glados.desktop` for the current user. Set
+`GLADOS_APPIMAGE=/path/to/GLaDOS-4.5.8-x86_64.AppImage` to install an existing
+artifact instead.
 
 ## Update feed
 
 Publish Linux metadata and artifacts below the private feed's `linux/x64/`
 directory. Packaged GLaDOS automatically uses
 `https://updates.r3dt34m.net/glados/linux/x64`. AppImage is the supported
-self-update format. A DEB can be added later as a separately managed channel
-after package-owner metadata and its privilege/policy experience are defined.
+self-update format. A distro-specific package can be added later as a separate
+channel after package-owner metadata and its privilege/policy experience are
+defined.
 
-Before production, add an embedded Ed25519/minisign public key and verify a
-detached signature for the Linux payload before installation. HTTPS, the VPN
-boundary, and electron-builder's SHA-512 metadata protect transport and
+Before a hardened rollout, add an embedded Ed25519/minisign public key and
+verify a detached signature for the Linux payload before installation. HTTPS,
+the VPN boundary, and electron-builder's SHA-512 metadata protect transport and
 integrity, but Linux has no Developer ID equivalent that independently proves
 publisher identity after a feed compromise.
 
-## Remaining Ubuntu acceptance gates
+## Remaining Linux acceptance gates
 
-1. Build and native audit on clean Ubuntu 24.04 x86-64.
-2. Validate the system MITM CA flow and Chromium trust behavior.
+1. Complete clean-host first-install tests on Debian/Kali and Fedora x86-64.
+2. Validate the system MITM CA flow and Chromium trust behavior on both distro
+   families.
 3. Add and test application-level release signature verification.
 4. Exercise an AppImage update while checking hashes/counts for
    `~/.glados/reports`, `investigations`, `model-overrides.json`, and agent

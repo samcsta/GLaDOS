@@ -1,4 +1,4 @@
-# GLaDOS Apple-Silicon and Ubuntu Distribution Plan
+# GLaDOS Desktop Distribution Plan
 
 ## Recommended channel
 
@@ -29,11 +29,14 @@ References:
 
 2. **Supported architecture matrix**
    - macOS: Apple Silicon (`arm64`) only.
-   - Ubuntu 24.04: Intel/AMD (`x86_64`) only, using AppImage for installation
-     and in-app self-update.
-   - Publish separate `/macos/arm64` and `/linux/x64` feeds. Recursively audit
-     `better-sqlite3`, `node-pty`, Electron, and every packaged helper for the
-     target architecture before publishing.
+   - Debian-family Linux (Debian, Kali, and Ubuntu): Intel/AMD (`x86_64`) only,
+     using AppImage for installation and in-app self-update.
+   - Fedora Linux: Intel/AMD (`x86_64`) only, using the same AppImage.
+   - Windows: Intel/AMD (`x64`) only, using a per-user NSIS installer and
+     in-app self-update.
+   - Publish separate `/macos/arm64`, `/linux/x64`, and `/windows/x64` feeds.
+     Recursively audit `better-sqlite3`, `node-pty`, Electron, and every
+     packaged helper for the target architecture before publishing.
 
 3. **First-run prerequisites**
    - The macOS package bundles the official signed mitmproxy arm64 app and
@@ -44,6 +47,9 @@ References:
    - First launch must stop with a clear actionable diagnostic when a required
      dependency is missing. It must not present a healthy proxy or assessment
      state when the dependency failed.
+   - Linux and Windows first-time installers provision mitmproxy and the core
+     command-line tools. The Setup Assistant installs the per-workstation CA
+     in the Debian/Fedora trust store or the Windows current-user Root store.
 
 4. **Release build must fail closed**
    - Add `forceCodeSigning: true`; never publish when signing credentials are
@@ -52,6 +58,8 @@ References:
    - Notarize with `notarytool`, staple the ticket, and inspect the notary log.
    - Keep signing and notarization credentials only in the protected CI release
      environment.
+   - Windows release builds require Authenticode credentials and must reject an
+     installer whose `Get-AuthenticodeSignature` status is not `Valid`.
 
 ## CI release pipeline
 
@@ -60,8 +68,8 @@ Trigger the production job only from a protected semantic-version tag such as
 
 1. Check that `VERSION` and `desktop/package.json` match the tag.
 2. Install locked dependencies and run the complete dashboard test suite.
-3. Build macOS arm64 on an Apple-silicon macOS runner and Ubuntu x64 on a
-   native Ubuntu 24.04 x64 runner.
+3. Build macOS arm64 on an Apple-silicon macOS runner, the Linux x64 AppImage
+   from a Debian 12 baseline, and Windows x64 on a native Windows runner.
 4. Sign every executable/native module with Developer ID and hardened runtime.
 5. Notarize and staple the application/distribution artifact.
 6. Run all release verification gates:
@@ -72,7 +80,10 @@ Trigger the production job only from a protected semantic-version tag such as
    - clean-Mac first-install test
    - upgrade test from the previous stable release while preserving
      `~/.glados`
-7. Generate the DMG, update ZIP, AppImage, blockmaps, platform channel
+   - Debian, Kali, and Fedora packaged GUI smoke tests
+   - Windows PE architecture audit, packaged dashboard smoke test, and
+     Authenticode verification
+7. Generate the DMG, update ZIP, AppImage, NSIS installer, blockmaps, platform channel
    metadata, SHA-256 manifests, and release notes.
 8. Upload artifacts first and publish the channel metadata last. This prevents
    clients from seeing an update whose payload is not available yet.
@@ -123,10 +134,10 @@ token on each user machine and is explicitly not intended for general users.
 
 ## Rollout and support
 
-1. Test on a clean Apple-silicon Mac and a clean Ubuntu 24.04 x64 workstation,
-   including first launch, proxy startup, browser MCP, one harmless assessment
-   fixture, update, rollback release, and uninstall/reinstall with data
-   preservation.
+1. Test on a clean Apple-silicon Mac, Debian/Kali x64, Fedora x64, and Windows
+   x64 workstations, including first launch, proxy startup, browser MCP, one
+   harmless assessment fixture, update, rollback release, and
+   uninstall/reinstall with data preservation.
 2. Pilot with two or three internal operators for at least one complete
    investigation each.
 3. Review crash logs, dashboard health latency, first-activity timeouts, update
@@ -135,14 +146,15 @@ token on each user machine and is explicitly not intended for general users.
    status, sanitized health data, dependency doctor results, and recent app
    errors without credentials or target evidence.
 
-## Current repository gaps before the first external release
+## Remaining rollout gates
 
-- Local builds currently skip Developer ID signing and notarization when
-  credentials are absent.
-- There is no protected CI release workflow.
-- Machine-level assessment dependencies need a first-run installation/doctor
-  experience.
-- Production still needs your Developer ID identity, notarization credential,
-  update hostname, and protected server/CI environments.
-- Ubuntu packaging and native-module audits are configured, but the final
-  application-level artifact signature and clean-host acceptance test remain.
+- The compatibility workflow is intentionally unsigned; production signing
+  belongs in a protected, manually approved release environment.
+- Linux packaging, dependency-provisioning smokes, and native-module audits are
+  configured. The channel still relies on the SHA-512 value in HTTPS metadata;
+  add independent Ed25519/minisign verification before a hardened broad rollout.
+- Windows packaging, native PE auditing, packaged smoke testing, and fail-closed
+  Authenticode checks are configured. A protected Windows signing identity and
+  clean Windows release/pilot machines remain owner infrastructure.
+- Complete clean physical/VM first-install and previous-version update pilots on
+  Debian/Kali, Fedora, and Windows before enabling those production channels.

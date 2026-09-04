@@ -3,17 +3,22 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$(uname -s)" != "Linux" ]] || [[ ! -r /etc/os-release ]]; then
-  echo "bootstrap-ubuntu.sh requires Ubuntu Linux" >&2
+  echo "bootstrap-ubuntu.sh requires a supported Linux distribution" >&2
   exit 1
 fi
 # shellcheck disable=SC1091
 source /etc/os-release
-if [[ "${ID:-}" != "ubuntu" ]]; then
-  echo "bootstrap-ubuntu.sh supports Ubuntu; detected ${ID:-unknown}" >&2
+linux_family=''
+case " ${ID:-} ${ID_LIKE:-} " in
+  *' debian '*) linux_family='debian' ;;
+  *' fedora '*|*' rhel '*) linux_family='fedora' ;;
+esac
+if [[ -z "$linux_family" ]]; then
+  echo "bootstrap-ubuntu.sh supports Debian/Kali/Ubuntu and Fedora; detected ${ID:-unknown}" >&2
   exit 1
 fi
-if [[ "$(dpkg --print-architecture)" != "amd64" ]]; then
-  echo "bootstrap-ubuntu.sh supports Ubuntu x86-64; detected $(dpkg --print-architecture)" >&2
+if [[ "$(uname -m)" != "x86_64" ]]; then
+  echo "bootstrap-ubuntu.sh supports Linux x86-64; detected $(uname -m)" >&2
   exit 1
 fi
 
@@ -23,14 +28,27 @@ if command -v node >/dev/null 2>&1; then
   node_major="$(node -p 'Number(process.versions.node.split(".")[0])')"
 fi
 
-sudo apt-get update
-sudo apt-get install -y \
-  build-essential ca-certificates curl file git jq libfuse2t64 libsecret-1-0 \
-  gnome-keyring openssl python3 python3-venv pipx nmap sqlite3 unzip
+if [[ "$linux_family" == 'debian' ]]; then
+  sudo apt-get update
+  fuse_package='libfuse2'
+  apt-cache show libfuse2t64 >/dev/null 2>&1 && fuse_package='libfuse2t64'
+  sudo apt-get install -y \
+    build-essential ca-certificates curl file git jq "$fuse_package" libsecret-1-0 lsof \
+    gnome-keyring openssl python3 python3-venv pipx nmap sqlite3 unzip
+else
+  sudo dnf install -y \
+    '@Development Tools' ca-certificates clang curl file findutils fuse-libs git lsof \
+    gnome-keyring jq libsecret nmap openssl pipx python3 sqlite unzip
+fi
 
 if [[ "$node_major" -ne "$NODE_MAJOR" ]]; then
-  curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | sudo -E bash -
-  sudo apt-get install -y nodejs
+  if [[ "$linux_family" == 'debian' ]]; then
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | sudo -E bash -
+    sudo apt-get install -y nodejs
+  else
+    curl -fsSL "https://rpm.nodesource.com/setup_${NODE_MAJOR}.x" | sudo -E bash -
+    sudo dnf install -y nodejs
+  fi
 fi
 
 if [[ "$(node -p 'Number(process.versions.node.split(".")[0])')" -ne "$NODE_MAJOR" ]]; then
@@ -64,16 +82,24 @@ if ! command -v httpx >/dev/null 2>&1; then
   )
 fi
 
-SEMGREP_VERSION="1.172.0"
-if ! command -v semgrep >/dev/null 2>&1; then
+SEMGREP_VERSION="1.176.0"
+if ! command -v semgrep >/dev/null 2>&1 && ! command -v pysemgrep >/dev/null 2>&1; then
   python3 -m pipx install "semgrep==${SEMGREP_VERSION}"
 fi
 
 httpx -version
-semgrep --version
+if semgrep --version >/dev/null 2>&1; then
+  semgrep --version
+elif command -v pysemgrep >/dev/null 2>&1; then
+  pysemgrep --version
+else
+  echo "Semgrep was installed, but neither CLI entry point is usable." >&2
+  exit 1
+fi
 
+MITMPROXY_VERSION="$(python3 -c 'import sys; print("12.2.3" if sys.version_info >= (3, 12) else "11.0.2")')"
 if ! command -v mitmdump >/dev/null 2>&1 && [[ ! -x "$HOME/.local/bin/mitmdump" ]]; then
-  python3 -m pipx install mitmproxy
+  python3 -m pipx install "mitmproxy==${MITMPROXY_VERSION}"
 fi
 
 node scripts/lib/glados-local.js install-deps
@@ -88,5 +114,5 @@ echo "Store the LiteLLM key: scripts/setup-llm-secret.sh"
 echo "To explicitly trust the per-user interception CA system-wide, run:"
 echo "  $ROOT/scripts/glados-ca.sh trust"
 echo "Run: scripts/glados-doctor.sh"
-echo "Build and install the desktop app: scripts/install-desktop-app-ubuntu.sh"
+echo "Build and install the desktop app: scripts/install-desktop-app-linux.sh"
 echo "For source development only: npm start --prefix desktop"

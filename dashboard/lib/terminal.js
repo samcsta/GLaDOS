@@ -1,14 +1,20 @@
 const pty = require('node-pty');
 const os = require('node:os');
 
+function terminalCommand(platform = os.platform(), env = process.env) {
+  if (platform === 'win32') return { shell: env.GLADOS_TERMINAL_SHELL || 'powershell.exe', args: ['-NoLogo'] };
+  if (env.SHELL) return { shell: env.SHELL, args: ['-l'] };
+  return { shell: '/bin/sh', args: ['-l'] };
+}
+
 // Spawns a PTY and bridges it to a WebSocket. One shell per connection.
 // Client frames (JSON): { type: "data", data: "<str>" } or { type: "resize", cols, rows }.
 // Server frames: raw text chunks.
 function attachTerminal(ws) {
-  const shell = process.env.SHELL || (os.platform() === 'win32' ? 'powershell.exe' : '/bin/zsh');
+  const command = terminalCommand();
   let term;
   try {
-    term = pty.spawn(shell, ['-l'], {
+    term = pty.spawn(command.shell, command.args, {
       name: 'xterm-256color',
       cols: 120,
       rows: 32,
@@ -40,4 +46,4 @@ function attachTerminal(ws) {
   ws.on('error', () => { try { term.kill(); } catch {} });
 }
 
-module.exports = { attachTerminal };
+module.exports = { attachTerminal, terminalCommand };

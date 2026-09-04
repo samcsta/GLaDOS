@@ -60,7 +60,13 @@ trust() {
   if [[ "$(uname -s)" == "Linux" ]] && command -v update-ca-certificates >/dev/null 2>&1; then
     sudo install -m 0644 "$CERT_FILE" /usr/local/share/ca-certificates/glados-operator-mitm-ca.crt
     sudo update-ca-certificates
-    echo "Trusted $CERT_FILE in the Ubuntu system certificate store."
+    echo "Trusted $CERT_FILE in the Debian-family system certificate store."
+    return
+  fi
+  if [[ "$(uname -s)" == "Linux" ]] && command -v update-ca-trust >/dev/null 2>&1; then
+    sudo install -m 0644 "$CERT_FILE" /etc/pki/ca-trust/source/anchors/glados-operator-mitm-ca.crt
+    sudo update-ca-trust extract
+    echo "Trusted $CERT_FILE in the Fedora system certificate store."
     return
   fi
   echo "Automatic trust is unsupported on this operating system." >&2
@@ -76,7 +82,13 @@ untrust() {
   if [[ "$(uname -s)" == "Linux" ]] && command -v update-ca-certificates >/dev/null 2>&1; then
     sudo rm -f /usr/local/share/ca-certificates/glados-operator-mitm-ca.crt
     sudo update-ca-certificates
-    echo "Removed the GLaDOS Operator MITM CA from the Ubuntu system certificate store."
+    echo "Removed the GLaDOS Operator MITM CA from the Debian-family system certificate store."
+    return
+  fi
+  if [[ "$(uname -s)" == "Linux" ]] && command -v update-ca-trust >/dev/null 2>&1; then
+    sudo rm -f /etc/pki/ca-trust/source/anchors/glados-operator-mitm-ca.crt
+    sudo update-ca-trust extract
+    echo "Removed the GLaDOS Operator MITM CA from the Fedora system certificate store."
     return
   fi
   echo "Automatic untrust is unsupported on this operating system." >&2

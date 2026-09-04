@@ -37,6 +37,8 @@ test('feed requires bearer auth and supports updater range requests', async () =
     assert.equal(plaintext.status, 426);
     const unauthorized = await request(server.address().port, '/glados/macos/arm64/GLaDOS.zip');
     assert.equal(unauthorized.status, 401);
+    const unauthorizedLanding = await request(server.address().port, '/');
+    assert.equal(unauthorizedLanding.status, 401);
     const partial = await request(server.address().port, '/glados/macos/arm64/GLaDOS.zip', { token: fixtureCredential, range: 'bytes=2-5' });
     assert.equal(partial.status, 206);
     assert.equal(partial.headers['content-range'], 'bytes 2-5/10');
@@ -56,6 +58,12 @@ test('VPN-only mode serves updates without per-user application credentials', as
   fs.writeFileSync(path.join(root, 'macos', 'arm64', 'latest-mac.yml'), 'version: 1.2.3\n');
   fs.mkdirSync(path.join(installerRoot, 'macos'), { recursive: true });
   fs.writeFileSync(path.join(installerRoot, 'macos', 'GLaDOS-1.2.3-arm64.dmg'), 'signed-dmg');
+  fs.mkdirSync(path.join(installerRoot, 'linux'), { recursive: true });
+  fs.writeFileSync(path.join(installerRoot, 'linux', 'GLaDOS-1.2.4-x86_64.AppImage'), 'appimage');
+  fs.writeFileSync(path.join(installerRoot, 'linux', 'install-glados-linux.sh'), '#!/bin/sh\n');
+  fs.mkdirSync(path.join(installerRoot, 'windows'), { recursive: true });
+  fs.writeFileSync(path.join(installerRoot, 'windows', 'GLaDOS-1.2.5-x64.exe'), 'signed-windows-installer');
+  fs.writeFileSync(path.join(installerRoot, 'windows', 'install-glados-windows.ps1'), 'Write-Host GLaDOS\n');
   const server = http.createServer(createHandler({
     root,
     installerRoot,
@@ -71,6 +79,24 @@ test('VPN-only mode serves updates without per-user application credentials', as
     assert.equal(installer.status, 200);
     assert.equal(installer.headers['content-type'], 'application/x-apple-diskimage');
     assert.equal(installer.body.toString(), 'signed-dmg');
+    const landing = await request(server.address().port, '/');
+    assert.equal(landing.status, 200);
+    assert.match(landing.headers['content-security-policy'], /default-src 'none'/);
+    assert.match(landing.body.toString(), /Download GLaDOS/);
+    assert.match(landing.body.toString(), /\/installers\/macos\/GLaDOS-1\.2\.3-arm64\.dmg/);
+    assert.match(landing.body.toString(), /\/installers\/linux\/GLaDOS-1\.2\.4-x86_64\.AppImage/);
+    assert.match(landing.body.toString(), /\/installers\/linux\/install-glados-linux\.sh/);
+    assert.match(landing.body.toString(), /Download easy installer/);
+    assert.match(landing.body.toString(), /\/installers\/windows\/GLaDOS-1\.2\.5-x64\.exe/);
+    assert.match(landing.body.toString(), /\/installers\/windows\/install-glados-windows\.ps1/);
+    const setup = await request(server.address().port, '/installers/linux/install-glados-linux.sh');
+    assert.equal(setup.status, 200);
+    assert.equal(setup.headers['content-type'], 'text/x-shellscript; charset=utf-8');
+    assert.equal(setup.headers['cache-control'], 'private, no-cache');
+    const windowsSetup = await request(server.address().port, '/installers/windows/install-glados-windows.ps1');
+    assert.equal(windowsSetup.status, 200);
+    assert.equal(windowsSetup.headers['content-type'], 'text/plain; charset=utf-8');
+    assert.equal(windowsSetup.headers['cache-control'], 'private, no-cache');
     const traversal = await request(server.address().port, '/installers/%2e%2e/server.cjs');
     assert.equal(traversal.status, 404);
   } finally {

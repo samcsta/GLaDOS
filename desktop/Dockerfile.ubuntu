@@ -1,24 +1,21 @@
-FROM ubuntu:24.04 AS package
+FROM debian:12-slim AS package
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PATH=/opt/mitmproxy/bin:$PATH
-ENV CC=clang
-ENV CXX=clang++
+ENV CC=clang-19
+ENV CXX=clang++-19
 ARG NODE_VERSION=22.23.1
 ARG NODE_SHA256=9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578
 RUN dpkg --print-architecture | grep -qx amd64 \
   && apt-get update \
   && apt-get install -y --no-install-recommends \
-    ca-certificates clang curl file fakeroot g++ git make python3 python3-venv xz-utils \
-    xvfb libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libcups2t64 libdrm2 \
-    libgbm1 libgtk-3-0t64 libnotify4 libnss3 libsecret-1-0 libx11-xcb1 \
+    ca-certificates clang-19 curl file fakeroot g++ git make python3 python3-venv sqlite3 xz-utils \
+    xvfb libasound2 libatk-bridge2.0-0 libatk1.0-0 libcups2 libdrm2 \
+    libgbm1 libgtk-3-0 libnotify4 libnss3 libsecret-1-0 libx11-xcb1 \
     libxkbcommon0 libxss1 libxtst6 \
   && curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
   && echo "${NODE_SHA256}  node-v${NODE_VERSION}-linux-x64.tar.xz" | sha256sum -c - \
   && tar -xJf "node-v${NODE_VERSION}-linux-x64.tar.xz" -C /usr/local --strip-components=1 \
   && rm "node-v${NODE_VERSION}-linux-x64.tar.xz" \
-  && python3 -m venv /opt/mitmproxy \
-  && /opt/mitmproxy/bin/pip install --no-cache-dir mitmproxy \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
@@ -63,9 +60,66 @@ RUN set -eu; \
 
 FROM package AS gui-smoke
 
+ENV PATH="/root/.local/bin:${PATH}"
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends lsof openssl pipx python3-venv xauth \
+  && rm -rf /var/lib/apt/lists/* \
+  && MITMPROXY_VERSION="$(python3 -c 'import sys; print("12.2.3" if sys.version_info >= (3, 12) else "11.0.2")')" \
+  && python3 -m pipx install "mitmproxy==$MITMPROXY_VERSION" \
+  && python3 -m pipx install 'semgrep==1.176.0' \
+  && mitmdump --version \
+  && SEMGREP_CLI="$(if semgrep --version >/dev/null 2>&1; then printf semgrep; else printf pysemgrep; fi)" \
+  && "$SEMGREP_CLI" --version \
+  && printf 'value == value\n' >/tmp/semgrep-smoke.py \
+  && "$SEMGREP_CLI" --quiet -l python -e '$X == $X' /tmp/semgrep-smoke.py
 RUN executable="artifacts/desktop/linux-unpacked/glados" \
   && test -x "$executable" \
   && GLADOS_PACKAGED_SMOKE=1 GLADOS_RUNTIME_DIR=/tmp/glados-packaged-gui-smoke \
+    xvfb-run -a "$executable" --no-sandbox
+
+FROM kalilinux/kali-rolling AS kali-smoke
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/root/.local/bin:${PATH}"
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates curl libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 \
+    libcups2t64 libdrm2 libgbm1 libgtk-3-0t64 libnotify4 libnss3 libsecret-1-0 \
+    libx11-xcb1 libxkbcommon0 libxss1 libxtst6 lsof openssl pipx python3 python3-venv sqlite3 xauth xvfb \
+  && rm -rf /var/lib/apt/lists/* \
+  && MITMPROXY_VERSION="$(python3 -c 'import sys; print("12.2.3" if sys.version_info >= (3, 12) else "11.0.2")')" \
+  && python3 -m pipx install "mitmproxy==$MITMPROXY_VERSION" \
+  && python3 -m pipx install 'semgrep==1.176.0' \
+  && mitmdump --version \
+  && SEMGREP_CLI="$(if semgrep --version >/dev/null 2>&1; then printf semgrep; else printf pysemgrep; fi)" \
+  && "$SEMGREP_CLI" --version \
+  && printf 'value == value\n' >/tmp/semgrep-smoke.py \
+  && "$SEMGREP_CLI" --quiet -l python -e '$X == $X' /tmp/semgrep-smoke.py
+WORKDIR /workspace
+COPY --from=package /workspace/artifacts/desktop/linux-unpacked ./linux-unpacked
+RUN executable="/workspace/linux-unpacked/glados" \
+  && GLADOS_PACKAGED_SMOKE=1 GLADOS_RUNTIME_DIR=/tmp/glados-kali-smoke \
+    xvfb-run -a "$executable" --no-sandbox
+
+FROM fedora:latest AS fedora-smoke
+
+ENV PATH="/root/.local/bin:${PATH}"
+RUN dnf install -y \
+    alsa-lib atk at-spi2-atk cups-libs gtk3 libdrm libnotify nss libsecret \
+    libXScrnSaver libxkbcommon libXtst lsof openssl pipx python3 sqlite xorg-x11-server-Xvfb xorg-x11-xauth \
+  && dnf clean all \
+  && MITMPROXY_VERSION="$(python3 -c 'import sys; print("12.2.3" if sys.version_info >= (3, 12) else "11.0.2")')" \
+  && python3 -m pipx install "mitmproxy==$MITMPROXY_VERSION" \
+  && python3 -m pipx install 'semgrep==1.176.0' \
+  && mitmdump --version \
+  && SEMGREP_CLI="$(if semgrep --version >/dev/null 2>&1; then printf semgrep; else printf pysemgrep; fi)" \
+  && "$SEMGREP_CLI" --version \
+  && printf 'value == value\n' >/tmp/semgrep-smoke.py \
+  && "$SEMGREP_CLI" --quiet -l python -e '$X == $X' /tmp/semgrep-smoke.py
+WORKDIR /workspace
+COPY --from=package /workspace/artifacts/desktop/linux-unpacked ./linux-unpacked
+RUN executable="/workspace/linux-unpacked/glados" \
+  && GLADOS_PACKAGED_SMOKE=1 GLADOS_RUNTIME_DIR=/tmp/glados-fedora-smoke \
     xvfb-run -a "$executable" --no-sandbox
 
 FROM scratch AS artifacts

@@ -25,6 +25,9 @@ function authorized(request, hashes) {
 }
 
 function contentType(file) {
+  if (/\.sh$/i.test(file)) return 'text/x-shellscript; charset=utf-8';
+  if (/\.ps1$/i.test(file)) return 'text/plain; charset=utf-8';
+  if (/\.png$/i.test(file)) return 'image/png';
   if (/\.ya?ml$/i.test(file)) return 'application/yaml; charset=utf-8';
   if (/\.json$/i.test(file)) return 'application/json; charset=utf-8';
   if (/\.zip$/i.test(file)) return 'application/zip';
@@ -33,6 +36,82 @@ function contentType(file) {
   if (/\.(?:exe|msi)$/i.test(file)) return 'application/vnd.microsoft.portable-executable';
   if (/\.AppImage$/i.test(file)) return 'application/octet-stream';
   return 'application/octet-stream';
+}
+
+function immutableArtifact(file) {
+  const name = path.basename(file);
+  if (/\.ya?ml$/i.test(name) || /\.(?:sh|ps1)$/i.test(name)) return false;
+  if (/^glados\.png$/i.test(name)) return false;
+  return /\d+\.\d+\.\d+/.test(name);
+}
+
+function installerVersion(name) {
+  const match = String(name).match(/-(\d+)\.(\d+)\.(\d+)(?:[-+][A-Za-z0-9.-]+)?(?:-|\.)/);
+  return match ? match.slice(1, 4).map(Number) : null;
+}
+
+function compareVersions(left, right) {
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] - right[index];
+  }
+  return 0;
+}
+
+function latestInstaller(root, platform, pattern) {
+  if (!root) return null;
+  const directory = path.join(root, platform);
+  let entries;
+  try { entries = fs.readdirSync(directory, { withFileTypes: true }); }
+  catch { return null; }
+  return entries
+    .filter(entry => entry.isFile() && pattern.test(entry.name))
+    .map(entry => ({ name: entry.name, version: installerVersion(entry.name) }))
+    .filter(entry => entry.version)
+    .sort((left, right) => compareVersions(right.version, left.version))[0] || null;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[character]);
+}
+
+function renderDownloadPage(installerRoot, installerBasePath = '/installers') {
+  const platforms = [
+    {
+      directory: 'macos', title: 'macOS', detail: 'Apple silicon · macOS 13 or newer',
+      pattern: /^GLaDOS-.*-arm64\.dmg$/i, action: 'Download DMG',
+    },
+    {
+      directory: 'linux', title: 'Linux', detail: 'Fedora, Kali/Debian, or Ubuntu · x86-64',
+      pattern: /^GLaDOS-.*-(?:x86_64|x64)\.AppImage$/i, action: 'Download AppImage',
+      setupPath: `${installerBasePath}/linux/install-glados-linux.sh`,
+      setupLabel: 'Download easy installer',
+      setupHint: '<code>bash ~/Downloads/install-glados-linux.sh</code>',
+    },
+    {
+      directory: 'windows', title: 'Windows', detail: 'Windows 11 · Intel/AMD 64-bit',
+      pattern: /^GLaDOS-.*-(?:x86_64|x64).*(?:\.exe|\.msi)$/i, action: 'Download installer',
+      setupPath: `${installerBasePath}/windows/install-glados-windows.ps1`,
+      setupLabel: 'Download setup script',
+      setupHint: '<code>powershell -ExecutionPolicy Bypass -File .\\install-glados-windows.ps1</code>',
+    },
+  ];
+  const cards = platforms.map(platform => {
+    const installer = latestInstaller(installerRoot, platform.directory, platform.pattern);
+    const setup = installer && platform.setupPath
+      ? `<a class="download" href="${platform.setupPath}" download>${platform.setupLabel}</a><span class="hint">Then run ${platform.setupHint}</span>`
+      : '';
+    const download = installer
+      ? `${setup}<a class="${setup ? 'secondary' : 'download'}" href="${installerBasePath}/${platform.directory}/${encodeURIComponent(installer.name)}" download>${platform.action}</a><span class="version">Version ${installer.version.join('.')}</span>`
+      : '<span class="unavailable">Coming soon</span>';
+    return `<section class="card"><h2>${platform.title}</h2><p>${platform.detail}</p>${download}</section>`;
+  }).join('');
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Download GLaDOS</title><style>
+:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;background:#090d0f;color:#f5f7f8}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 50% 0,#24343a 0,#0d1417 42%,#090d0f 75%)}main{width:min(1040px,calc(100% - 40px));margin:0 auto;padding:80px 0}header{max-width:700px;margin-bottom:42px}.eyebrow{color:#8ae6c1;font-size:.78rem;font-weight:800;letter-spacing:.18em;text-transform:uppercase}h1{font-size:clamp(2.5rem,7vw,5.5rem);line-height:.95;margin:.35em 0 .25em;letter-spacing:-.06em}header p{color:#aebbc0;font-size:1.08rem;line-height:1.65}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.card{min-height:230px;padding:25px;border:1px solid #2a3a3f;border-radius:18px;background:rgba(17,25,28,.88);display:flex;flex-direction:column}.card h2{margin:0 0 8px;font-size:1.2rem}.card p{margin:0;color:#94a4aa;line-height:1.5}.download,.unavailable{margin-top:auto;border-radius:10px;padding:12px 14px;text-align:center;font-weight:750}.download{background:#75e0b5;color:#07120e;text-decoration:none}.download:hover{background:#98edca}.secondary{color:#8ae6c1;text-align:center;margin-top:12px;font-size:.84rem}.hint{color:#89999f;text-align:center;font-size:.76rem;line-height:1.45;margin-top:10px}.hint code{color:#bac8cc}.unavailable{border:1px solid #33454b;color:#76868c}.version{margin-top:10px;color:#7d8d92;text-align:center;font-size:.8rem}footer{margin-top:38px;color:#718086;font-size:.85rem}@media(max-width:760px){main{padding:50px 0}.grid{grid-template-columns:1fr}.card{min-height:190px}}
+</style></head><body><main><header><div class="eyebrow">Red Team software</div><h1>Download GLaDOS</h1><p>Connect to the Red Team VPN, choose your operating system, and launch the installer. Linux supports Fedora, Kali/Debian, and Ubuntu on x86-64. Once installed, GLaDOS checks this private release channel and offers future updates in the app.</p></header><div class="grid">${cards}</div><footer>Private distribution · Red Team VPN required</footer></main></body></html>`;
 }
 
 function resolveUpdateFile(root, basePath, requestUrl) {
@@ -104,6 +183,20 @@ function createHandler({
       response.end();
       return;
     }
+    const pathname = new URL(request.url, 'http://update-feed.local').pathname;
+    if (pathname === '/' || pathname === '/downloads') {
+      const body = renderDownloadPage(installerRoot, installerBasePath);
+      response.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'content-length': String(Buffer.byteLength(body)),
+        'cache-control': 'private, no-cache',
+        'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+        'x-frame-options': 'DENY',
+      });
+      if (request.method === 'HEAD') return response.end();
+      response.end(body);
+      return;
+    }
     const file = resolveUpdateFile(root, basePath, request.url)
       || (installerRoot ? resolveUpdateFile(installerRoot, installerBasePath, request.url) : null);
     let stat;
@@ -125,7 +218,7 @@ function createHandler({
       'accept-ranges': 'bytes',
       'content-type': contentType(file),
       'content-length': String(end - start + 1),
-      'cache-control': /\.ya?ml$/i.test(file) ? 'private, no-cache' : 'private, max-age=31536000, immutable',
+      'cache-control': immutableArtifact(file) ? 'private, max-age=31536000, immutable' : 'private, no-cache',
       etag: `"${stat.size.toString(16)}-${Math.trunc(stat.mtimeMs).toString(16)}"`,
     };
     if (range) headers['content-range'] = `bytes ${start}-${end}/${stat.size}`;
@@ -178,4 +271,7 @@ if (require.main === module) {
   }
 }
 
-module.exports = { authorized, createHandler, createServer, parseRange, parseTokenHashes, resolveUpdateFile, tokenHash };
+module.exports = {
+  authorized, createHandler, createServer, immutableArtifact, latestInstaller, parseRange, parseTokenHashes,
+  renderDownloadPage, resolveUpdateFile, tokenHash,
+};

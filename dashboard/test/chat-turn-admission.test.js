@@ -29,7 +29,7 @@ test('investigation reset replaces stale mutable agent status with idle state', 
   assert.deepEqual(result, { reset: 1, errors: [] });
   assert.match(fs.readFileSync(file, 'utf8'), /GLaDOS is idle/);
   assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /Old target/);
-  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 });
 
 test('full reset removes loose browser artifacts but preserves durable evidence', () => {

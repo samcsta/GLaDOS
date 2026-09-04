@@ -1,11 +1,15 @@
 # GLaDOS Desktop
 
-Electron shell for GLaDOS v4.5.7. The macOS bundle is named `GLaDOS.app`; the
-Ubuntu package is `GLaDOS-4.5.7-x86_64.AppImage`.
+Electron shell for GLaDOS v4.5.8. The macOS bundle is named `GLaDOS.app`; the
+Linux package is `GLaDOS-<version>-x86_64.AppImage`; the Windows production
+package format is an Authenticode-signed `GLaDOS-<version>-x64.exe` NSIS
+installer.
 
 See [DISTRIBUTION_PLAN.md](DISTRIBUTION_PLAN.md) for the Developer ID,
-notarization, Apple-silicon/Ubuntu architecture, first-run dependency, and
-installed-user update rollout gates.
+notarization, platform architecture, first-run dependency, and
+installed-user update rollout gates. Platform details live in
+[UBUNTU_PLAN.md](UBUNTU_PLAN.md) (the legacy filename now covers all supported
+Linux distributions) and [WINDOWS_PLAN.md](WINDOWS_PLAN.md).
 
 The `desktop/` directory contains source only. Generated packages are written
 to `artifacts/desktop/`, and an installed build belongs at
@@ -33,9 +37,10 @@ bundle.
   LiteLLM Keychain item. Both modes unregister GLaDOS from Launch Services and
   refresh Spotlight metadata after moving the application to Trash.
 - Settings includes a four-step Setup Assistant for first install and
-  credential rotation. It stores the LiteLLM key directly in macOS Keychain,
-  supports optional allowlisted local credential profiles, manages the unique
-  workstation proxy CA, and performs live LiteLLM and proxy verification.
+  credential rotation. It stores the LiteLLM key directly in macOS Keychain
+  or a private per-user file on Linux/Windows, supports optional allowlisted
+  local credential profiles, manages the unique workstation proxy CA in the
+  native trust store, and performs live LiteLLM and proxy verification.
   Secret values are never returned to the dashboard after saving.
 - Source checkouts use the SSE git updater and restart the supervised dashboard
   child. Packaged apps automatically use the Red Team VPN-only HTTPS feed
@@ -61,3 +66,18 @@ npm run verify:native:mac --prefix desktop
 npm run verify:pack --prefix desktop
 scripts/install-desktop-app.sh
 ```
+
+Cross-platform packaging and smoke checks:
+
+```bash
+npm run dist:linux:docker --prefix desktop
+npm run smoke:debian:gui:docker --prefix desktop
+npm run smoke:kali:docker --prefix desktop
+npm run smoke:fedora:docker --prefix desktop
+# Run on a Windows x64 release host:
+npm run pack:windows --prefix desktop
+npm run smoke:windows --prefix desktop
+```
+
+`release:windows` additionally requires `CSC_LINK` and `CSC_KEY_PASSWORD` and
+fails unless the final installer has a valid Authenticode signature.

@@ -7,6 +7,7 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..', '..');
 const uninstaller = path.join(root, 'scripts', 'uninstall-desktop-app.sh');
+const macOnly = { skip: process.platform !== 'darwin' ? 'macOS-only uninstaller behavior' : false };
 
 function fixture() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-uninstall-test-'));
@@ -43,7 +44,7 @@ function runUninstaller(paths, args) {
   });
 }
 
-test('default macOS uninstall trashes only the app and preserves operator data', t => {
+test('default macOS uninstall trashes only the app and preserves operator data', macOnly, t => {
   const paths = fixture();
   t.after(() => fs.rmSync(paths.base, { recursive: true, force: true }));
   const result = runUninstaller(paths, ['--yes']);
@@ -61,7 +62,7 @@ test('default macOS uninstall trashes only the app and preserves operator data',
   assert.match(metadata, new RegExp(`-i ${paths.installRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
 });
 
-test('purge mode trashes app and operator data without targeting toolchains', t => {
+test('purge mode trashes app and operator data without targeting toolchains', macOnly, t => {
   const paths = fixture();
   t.after(() => fs.rmSync(paths.base, { recursive: true, force: true }));
   const preferences = path.join(paths.home, 'Library', 'Preferences', 'com.glados.ops.plist');
@@ -78,7 +79,7 @@ test('purge mode trashes app and operator data without targeting toolchains', t 
   assert.match(result.stdout, /preserve Homebrew, Node, mitmproxy, and red-team tools/);
 });
 
-test('dry run reports purge scope without changing files', t => {
+test('dry run reports purge scope without changing files', macOnly, t => {
   const paths = fixture();
   t.after(() => fs.rmSync(paths.base, { recursive: true, force: true }));
   const result = runUninstaller(paths, ['--purge-data', '--dry-run']);
@@ -88,7 +89,7 @@ test('dry run reports purge scope without changing files', t => {
   assert.match(result.stdout, /Dry run only; nothing was changed/);
 });
 
-test('uninstaller refuses broad installation and runtime targets', t => {
+test('uninstaller refuses broad installation and runtime targets', macOnly, t => {
   const paths = fixture();
   t.after(() => fs.rmSync(paths.base, { recursive: true, force: true }));
   const unsafeInstall = runUninstaller({ ...paths, installRoot: '/' }, ['--yes']);
