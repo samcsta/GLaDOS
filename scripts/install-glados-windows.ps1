@@ -1,8 +1,5 @@
 [CmdletBinding()]
-param(
-  [string]$UpdateBase = $(if ($env:GLADOS_UPDATE_BASE_URL) { $env:GLADOS_UPDATE_BASE_URL } else { 'https://updates.r3dt34m.net/glados/windows/x64' }),
-  [switch]$PrerequisitesOnly
-)
+param([switch]$PrerequisitesOnly)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -93,45 +90,25 @@ if ($semgrepCommand) {
 }
 if (-not $semgrepUsable) { Write-Warning 'Semgrep is optional, but neither installed CLI entry point is usable.' }
 
-if ($PrerequisitesOnly) {
-  Write-Host 'GLaDOS Windows runtime prerequisites are installed.'
-  Write-Host 'Open a new PowerShell session before running the native compatibility build.'
-  return
-}
+Write-Host 'GLaDOS Windows runtime prerequisites are installed.'
+Write-Host 'Open a new PowerShell session before running the native compatibility build.'
+if ($PrerequisitesOnly) { return }
 
-$temporary = Join-Path ([IO.Path]::GetTempPath()) ("glados-install-" + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $temporary | Out-Null
-try {
-  $metadataPath = Join-Path $temporary 'latest.yml'
-  Write-Host 'Reading the private GLaDOS release channel...'
-  Invoke-WebRequest -UseBasicParsing -Uri "$UpdateBase/latest.yml" -OutFile $metadataPath
-  $metadata = Get-Content -Raw -LiteralPath $metadataPath
-  $versionMatch = [regex]::Match($metadata, '(?m)^version:\s*([0-9]+\.[0-9]+\.[0-9]+)\s*$')
-  $artifactMatch = [regex]::Match($metadata, '(?m)^\s*-\s*url:\s*(GLaDOS-[0-9]+\.[0-9]+\.[0-9]+-x64\.exe)\s*$')
-  $shaMatch = [regex]::Match($metadata, '(?m)^\s*sha512:\s*(\S+)\s*$')
-  if (-not $versionMatch.Success -or -not $artifactMatch.Success -or -not $shaMatch.Success) {
-    throw 'The GLaDOS Windows release metadata is invalid.'
-  }
-
-  $artifact = $artifactMatch.Groups[1].Value
-  $installer = Join-Path $temporary $artifact
-  Write-Host "Downloading GLaDOS $($versionMatch.Groups[1].Value)..."
-  Invoke-WebRequest -UseBasicParsing -Uri "$UpdateBase/$artifact" -OutFile $installer
-  $sha512 = [Security.Cryptography.SHA512]::Create()
-  try { $actualHash = [Convert]::ToBase64String($sha512.ComputeHash([IO.File]::ReadAllBytes($installer))) }
-  finally { $sha512.Dispose() }
-  if ($actualHash -cne $shaMatch.Groups[1].Value) { throw 'The downloaded installer did not match the release metadata hash.' }
-
-  $signature = Get-AuthenticodeSignature -LiteralPath $installer
-  if ($signature.Status -ne 'Valid') {
-    throw "The GLaDOS installer has an invalid Authenticode signature: $($signature.Status) $($signature.StatusMessage)"
-  }
-  Write-Host 'Launching the signed GLaDOS installer...'
-  $process = Start-Process -FilePath $installer -Wait -PassThru
-  if ($process.ExitCode -ne 0) { throw "The GLaDOS installer exited with $($process.ExitCode)." }
-} finally {
-  Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
-}
-
-Write-Host 'GLaDOS and its Windows runtime prerequisites are installed.'
-Write-Host 'Future releases will appear as an Update GLaDOS button inside the app.'
+Write-Host ''
+Write-Host 'Windows binaries are not distributed by GLaDOS. Build a tagged release from source:'
+Write-Host '  https://github.com/samcsta/GLaDOS'
+Write-Host ''
+Write-Host 'From the cloned release directory, run:'
+Write-Host '  npm ci --prefix desktop'
+Write-Host '  npm ci --prefix watchdog'
+Write-Host '  npm ci --prefix dashboard'
+Write-Host '  npm ci --prefix blackboard/blackboard-mcp'
+Write-Host '  npm ci --prefix watchdog/watchdog-mcp'
+Write-Host '  npm ci --prefix tools/glados-ops-mcp'
+Write-Host '  npm test --prefix desktop'
+Write-Host '  npm test --prefix dashboard'
+Write-Host '  npm run pack:windows --prefix desktop'
+Write-Host '  npm run smoke:windows --prefix desktop'
+Write-Host ''
+Write-Host 'Then launch artifacts\desktop\win-unpacked\GLaDOS.exe.'
+Write-Warning 'The locally built application is unsigned. Only run a build made from source you verified.'

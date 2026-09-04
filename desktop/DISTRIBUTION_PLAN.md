@@ -1,160 +1,95 @@
 # GLaDOS Desktop Distribution Plan
 
-## Recommended channel
+## Supported channels
 
-Ship GLaDOS directly as a Developer ID-signed and Apple-notarized DMG. Use the
-DMG for first installation and the signed ZIP plus `latest-mac.yml` for
-`electron-updater` updates. This stays outside the Mac App Store while giving
-Gatekeeper a verifiable developer identity and notarization ticket.
+GLaDOS regularly publishes maintained binaries for:
 
-Use a dedicated HTTPS update origin as the production feed. A public GitHub
-Release is acceptable if the binaries are not sensitive. Do not embed a GitHub
-token in the app to access a private repository; use an authenticated update
-service or CDN with short-lived operator credentials instead.
+- macOS Apple Silicon (`arm64`): Developer ID-signed and Apple-notarized DMG,
+  with signed ZIP updates through `/macos/arm64`.
+- Debian-family Linux (Debian, Kali, and Ubuntu) and Fedora (`x86_64`): the
+  same AppImage through `/linux/x64`.
 
-References:
+Windows 11 x64 remains compatibility-tested but source-build only. Major
+release source is published to GitHub and Gitea; no official Windows binary,
+NSIS installer, or `/windows/x64` update channel is published. Windows
+operators build a verified tag or release commit locally. See
+`WINDOWS_PLAN.md`.
 
-- [Apple Developer ID](https://developer.apple.com/developer-id/)
-- [Apple notarization workflow](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
-- [electron-builder macOS auto-update](https://www.electron.build/docs/features/auto-update/)
+Use the dedicated HTTPS origin as the macOS/Linux production feed. Never embed
+a reusable repository or feed credential in the application.
 
 ## Release-readiness gates
 
 1. **Apple identity**
-   - Enroll the release owner in the Apple Developer Program.
-   - Create a `Developer ID Application` certificate.
-   - Create an App Store Connect API key for CI notarization.
-   - Keep `com.glados.ops` stable; changing the bundle ID after release breaks
-     upgrade and data-path continuity.
+   - Keep `com.glados.ops` stable.
+   - Sign with a Developer ID Application certificate.
+   - Notarize through a protected App Store Connect credential and staple the ticket.
+2. **Architecture and native payloads**
+   - Audit Electron, `better-sqlite3`, `node-pty`, and packaged helpers
+     recursively for each target architecture.
+   - Build Linux from the Debian 12 baseline and run the unchanged AppImage on
+     Debian, Kali, and Fedora.
+   - Run Windows x64 source/package compatibility QA for major releases, but do
+     not upload its unsigned output.
+3. **First-run dependencies**
+   - macOS bundles the pinned official mitmproxy arm64 application.
+   - The Linux easy installer provisions mitmproxy and core CLI tools.
+   - The Windows prerequisite script prepares a local source-build host.
+4. **Fail closed**
+   - macOS production builds fail if signing or notarization is unavailable.
+   - Linux production publication requires its configured integrity checks.
+   - Windows artifacts are never treated as a production distribution output.
 
-2. **Supported architecture matrix**
-   - macOS: Apple Silicon (`arm64`) only.
-   - Debian-family Linux (Debian, Kali, and Ubuntu): Intel/AMD (`x86_64`) only,
-     using AppImage for installation and in-app self-update.
-   - Fedora Linux: Intel/AMD (`x86_64`) only, using the same AppImage.
-   - Windows: Intel/AMD (`x64`) only, using a per-user NSIS installer and
-     in-app self-update.
-   - Publish separate `/macos/arm64`, `/linux/x64`, and `/windows/x64` feeds.
-     Recursively audit `better-sqlite3`, `node-pty`, Electron, and every
-     packaged helper for the target architecture before publishing.
+## Release pipeline
 
-3. **First-run prerequisites**
-   - The macOS package bundles the official signed mitmproxy arm64 app and
-     launches its `mitmdump`, so proxy startup does not depend on Homebrew.
-     Broader assessment tools remain machine-level prerequisites and should be
-     handled by the existing doctor/bootstrap flow with explicit operator
-     consent.
-   - First launch must stop with a clear actionable diagnostic when a required
-     dependency is missing. It must not present a healthy proxy or assessment
-     state when the dependency failed.
-   - Linux and Windows first-time installers provision mitmproxy and the core
-     command-line tools. The Setup Assistant installs the per-workstation CA
-     in the Debian/Fedora trust store or the Windows current-user Root store.
+Trigger production publication only from a protected semantic-version release
+revision with manual approval.
 
-4. **Release build must fail closed**
-   - Add `forceCodeSigning: true`; never publish when signing credentials are
-     missing.
-   - Use hardened runtime and only the entitlements that are required.
-   - Notarize with `notarytool`, staple the ticket, and inspect the notary log.
-   - Keep signing and notarization credentials only in the protected CI release
-     environment.
-   - Windows release builds require Authenticode credentials and must reject an
-     installer whose `Get-AuthenticodeSignature` status is not `Valid`.
-
-## CI release pipeline
-
-Trigger the production job only from a protected semantic-version tag such as
-`v4.0.1`, with a manual production-environment approval.
-
-1. Check that `VERSION` and `desktop/package.json` match the tag.
-2. Install locked dependencies and run the complete dashboard test suite.
-3. Build macOS arm64 on an Apple-silicon macOS runner, the Linux x64 AppImage
-   from a Debian 12 baseline, and Windows x64 on a native Windows runner.
-4. Sign every executable/native module with Developer ID and hardened runtime.
-5. Notarize and staple the application/distribution artifact.
-6. Run all release verification gates:
-   - `codesign --verify --deep --strict --verbose=2 GLaDOS.app`
-   - `spctl --assess --verbose --type exec GLaDOS.app`
-   - `xcrun stapler validate GLaDOS.app`
-   - packaged dashboard/proxy smoke test
-   - clean-Mac first-install test
-   - upgrade test from the previous stable release while preserving
-     `~/.glados`
-   - Debian, Kali, and Fedora packaged GUI smoke tests
-   - Windows PE architecture audit, packaged dashboard smoke test, and
-     Authenticode verification
-7. Generate the DMG, update ZIP, AppImage, NSIS installer, blockmaps, platform channel
-   metadata, SHA-256 manifests, and release notes.
-8. Upload artifacts first and publish the channel metadata last. This prevents
-   clients from seeing an update whose payload is not available yet.
+1. Verify `VERSION`, `desktop/package.json`, and the release revision agree.
+2. Install locked dependencies and run the complete desktop, dashboard, and
+   private-feed test suites.
+3. Build/sign/notarize macOS arm64 and build Linux x64 from Debian 12.
+4. Run native audits, packaged smokes, distro GUI smokes, and clean-host/upgrade
+   preservation checks.
+5. Generate the macOS DMG/update ZIP and Linux AppImage, blockmaps, channel
+   metadata, checksums, and release notes.
+6. Upload immutable payloads first and publish `latest-mac.yml` and
+   `latest-linux.yml` last.
+7. Separately run the Windows compatibility workflow against the same release
+   revision. Publish source and QA status, never its unsigned package.
 
 ## Installed-user update flow
 
-The `electron-updater` integration uses a generic HTTPS feed reachable only
-through the Red Team VPN. The platform-specific URL is built into GLaDOS, so
-operators do not configure a feed or token. An optional bearer token can still
-be supplied through the process environment for deployments outside the VPN
-boundary; it is never compiled into the app.
+The packaged binary updater is enabled only on macOS arm64 and Linux x64. It
+uses the generic HTTPS feed reachable through the Red Team VPN, checks shortly
+after launch and every six hours, and provides one guarded **Update GLaDOS**
+action. Installation is blocked while agents are active, and a runtime snapshot
+is written under `~/.glados/backups/updates/` first.
 
-- Check the stable feed 15 seconds after launch and every six hours, with a
-  manual **Check for updates** action retained.
-- Show a compact banner when a newer release exists. One **Update GLaDOS**
-  action downloads, verifies, snapshots, installs, and restarts. Never install
-  while an assessment agent is active.
-- Persist the downloaded-update state, then ask the operator to restart and
-  install at a safe point.
-- Back up the SQLite runtime and model/config state before installation. The
-  implemented preservation snapshot lives under `~/.glados/backups/updates/`.
-  Migrations must remain forward-only, transactional, and tested from the
-  oldest supported release.
-- Preserve `~/.glados`, reports, evidence, credentials, proxy history, and
-  operator-edited agent workspaces. They are runtime data, never update
-  payload.
-- Support `beta` and `latest` channels. Promote an identical signed artifact
-  from beta to stable instead of rebuilding it.
-- Use staged rollout metadata: internal pilot, 10%, 50%, then 100% after health
-  review. A rollback is a new higher patch version containing the prior known-
-  good code; never replace an already published version in place.
+Runtime data—including reports, evidence, credentials, proxy history, model
+assignments, and workspaces—never belongs in an application payload. Rollbacks
+are new higher versions containing known-good code; published artifacts are
+never overwritten.
 
-## Update-origin choice
-
-### Preferred for an internal/private app
-
-Use a generic HTTPS feed restricted to the Red Team VPN and publish channel
-metadata only after every referenced artifact is available. Platform signing
-remains the artifact trust boundary. If the feed ever becomes reachable beyond
-the VPN, add organizational authentication or short-lived download credentials
-without placing a reusable credential in every installed app.
-
-### Acceptable for non-sensitive public binaries
-
-Keep the existing GitHub provider and publish signed release assets from CI.
-GitHub is simple, but the electron-builder private-GitHub client mode expects a
-token on each user machine and is explicitly not intended for general users.
+On Windows, the Settings update view states that binary updates are unsupported
+and links to the source repository. Operators pull a newer tagged source
+release and rebuild locally. `%USERPROFILE%\.glados` remains external to the
+checkout and packaged application.
 
 ## Rollout and support
 
-1. Test on a clean Apple-silicon Mac, Debian/Kali x64, Fedora x64, and Windows
-   x64 workstations, including first launch, proxy startup, browser MCP, one
-   harmless assessment fixture, update, rollback release, and
-   uninstall/reinstall with data preservation.
-2. Pilot with two or three internal operators for at least one complete
-   investigation each.
-3. Review crash logs, dashboard health latency, first-activity timeouts, update
-   failures, and migration failures before each rollout increase.
-4. Publish a support bundle action that exports version, architecture, signing
-   status, sanitized health data, dependency doctor results, and recent app
-   errors without credentials or target evidence.
+Pilot macOS and Linux binaries on clean hosts before broad rollout. Exercise
+first launch, proxy startup, a harmless assessment fixture, update, rollback,
+and uninstall/reinstall preservation. For every major release advertised as
+Windows-compatible, separately repeat the clean Windows source build, tests,
+native PE audit, packaged smoke, and manual runtime acceptance.
 
 ## Remaining rollout gates
 
-- The compatibility workflow is intentionally unsigned; production signing
-  belongs in a protected, manually approved release environment.
-- Linux packaging, dependency-provisioning smokes, and native-module audits are
-  configured. The channel still relies on the SHA-512 value in HTTPS metadata;
-  add independent Ed25519/minisign verification before a hardened broad rollout.
-- Windows packaging, native PE auditing, packaged smoke testing, and fail-closed
-  Authenticode checks are configured. A protected Windows signing identity and
-  clean Windows release/pilot machines remain owner infrastructure.
-- Complete clean physical/VM first-install and previous-version update pilots on
-  Debian/Kali, Fedora, and Windows before enabling those production channels.
+- The private HTTPS hostname/feed host and VPN-only DNS/routing remain owner
+  infrastructure.
+- Linux currently relies on HTTPS channel metadata hashes; add independent
+  Ed25519/minisign verification before treating it as hardened against update-
+  host compromise.
+- Keep clean Apple-silicon, Debian/Kali, Fedora, and Windows x64 pilot hosts
+  available for release acceptance.

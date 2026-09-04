@@ -2,7 +2,7 @@
 
 GLaDOS v4.5.8 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
 
-The application has no OpenClaw or Burp Suite runtime dependency. HTTP capture, replay, history, metrics, and per-agent attribution are provided by a supervised local mitmproxy process behind `/api/proxy/*`. Signed macOS packages include the pinned official Apple-silicon mitmproxy runtime; Linux and Windows first-time installers provision the pinned command-line runtime.
+The application has no OpenClaw or Burp Suite runtime dependency. HTTP capture, replay, history, metrics, and per-agent attribution are provided by a supervised local mitmproxy process behind `/api/proxy/*`. Signed macOS packages include the pinned official Apple-silicon mitmproxy runtime; the Linux installer and Windows source-build prerequisite script provision the pinned command-line runtime.
 
 ## Operator Data
 
@@ -45,8 +45,9 @@ overwriting operator edits.
 Internal macOS operators should follow the full
 [Gitea macOS installation guide](docs/install-macos-from-gitea.md). The
 desktop target matrix is Apple Silicon macOS, Debian-family Linux (including
-Kali and Ubuntu) x86-64, Fedora x86-64, and Windows x64. Windows appears on the
-production download page only after its signed native release gates pass.
+Kali and Ubuntu) x86-64, Fedora x86-64, and Windows 11 x64. macOS and Linux have
+maintained binary channels. Windows is compatibility-tested source-build only;
+no official Windows binary or update feed is published.
 macOS prerequisites are Apple Command Line Tools, Homebrew, and Node 20 or 22.
 
 ```bash
@@ -110,11 +111,12 @@ scripts/install-desktop-app-linux.sh
 ~/.local/opt/glados/GLaDOS.AppImage
 ```
 
-Windows x64 users should download `install-glados-windows.ps1` from the VPN
-landing page and run it in PowerShell. The script provisions the required CLI
-runtime, verifies both the update metadata hash and the installer's
-Authenticode signature, and launches the per-user NSIS installer. Complete CA
-trust and LiteLLM setup in **Settings → Setup Assistant** after first launch.
+Windows x64 users should clone a documented release revision from
+`https://github.com/samcsta/GLaDOS`, verify the commit and clean Git status, and
+follow `desktop/WINDOWS_PLAN.md`. The PowerShell prerequisite script provisions
+the CLI runtime, after which the operator runs the locked installs, tests,
+native package audit, and packaged smoke locally. The resulting unsigned
+`win-unpacked` application must not be redistributed as an official binary.
 
 Bootstrap installs the app/MCP dependencies, the required core CLI set, seeds missing agent workspaces without overwriting operator edits, creates the runtime databases, and generates a unique local MITM CA. `scripts/setup-redteam-tools.sh --all --install` installs the wider specialist tool set.
 
@@ -152,7 +154,7 @@ scripts/glados-ca.sh rotate
 
 Source checkouts use the operator-initiated Settings update button or `scripts/update.sh`. The app blocks normal updates while agents are active or the tree is dirty, streams progress over SSE, then asks the Electron supervisor to restart the dashboard child.
 
-Packaged instances use the Red Team VPN-only HTTPS feed through `electron-updater`. GLaDOS derives the correct platform feed automatically, checks after startup and every six hours, and shows a compact banner only when a newer release is available. **Update GLaDOS** downloads and verifies the release, snapshots runtime state, installs it, and restarts the app in one action; installation remains blocked while agents are active. Developer ID/Authenticode signing and Linux artifact verification are release-time requirements. Updates replace the application only; per-user runtime state remains outside the payload and is snapshotted before installation.
+Packaged macOS and Linux instances use the Red Team VPN-only HTTPS feed through `electron-updater`. GLaDOS derives the correct platform feed automatically, checks after startup and every six hours, and shows a compact banner only when a newer release is available. **Update GLaDOS** downloads and verifies the release, snapshots runtime state, installs it, and restarts the app in one action; installation remains blocked while agents are active. Developer ID signing and Linux artifact verification are release-time requirements. Windows binary updates are disabled: operators pull a newer tagged source release and rebuild locally. Updates replace the application only; per-user runtime state remains outside the payload and is snapshotted before installation.
 
 ## Models And Agents
 

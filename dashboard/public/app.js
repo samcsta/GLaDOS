@@ -4308,6 +4308,15 @@ async function refreshUpdateStatus() {
     if (window.gladosDesktop?.isPackaged) {
       const status = await window.gladosDesktop.getUpdateStatus();
       const run = document.getElementById('update-run');
+      if (status.supported === false) {
+        if (run) {
+          run.disabled = false;
+          run.textContent = 'View source releases';
+        }
+        el.textContent = `GLaDOS ${status.currentVersion} · Windows builds update from tagged source releases`;
+        el.className = 'update-status ok';
+        return;
+      }
       if (run) {
         run.disabled = status.applying;
         run.textContent = status.available ? 'Update GLaDOS' : 'Check for updates';
@@ -4336,6 +4345,12 @@ async function startInAppUpdate(force = false) {
     state.update.running = true;
     appendUpdateLine('[desktop] checking signed release feed\n', 'cmd');
     try {
+      const status = await window.gladosDesktop.getUpdateStatus();
+      if (status.supported === false) {
+        appendUpdateLine(`[desktop] ${status.reason}. ${status.sourceUrl || ''}\n`, 'info');
+        if (status.sourceUrl) window.open(status.sourceUrl, '_blank', 'noopener');
+        return;
+      }
       const result = await window.gladosDesktop.checkForUpdate();
       appendUpdateLine(`[desktop] current ${result.currentVersion || 'unknown'} · feed ${result.version || 'unknown'}\n`, 'info');
       if (!result.available) {

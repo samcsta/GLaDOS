@@ -3,8 +3,8 @@ const path = require('node:path');
 const os = require('node:os');
 const { fork, spawnSync } = require('node:child_process');
 const { app, BrowserWindow, dialog, ipcMain, net, session, shell } = require('electron');
-const { AppImageUpdater, DebUpdater, MacUpdater, NsisUpdater } = require('electron-updater');
-const { resolveUpdateAccess } = require('./lib/update-channel.cjs');
+const { AppImageUpdater, DebUpdater, MacUpdater } = require('electron-updater');
+const { WINDOWS_SOURCE_URL, binaryUpdatesSupported, resolveUpdateAccess } = require('./lib/update-channel.cjs');
 const { SetupAssistant } = require('./lib/setup-assistant.cjs');
 const { systemNetworkEnvironment } = require('./lib/network-environment.cjs');
 const { loadCompletedSecurityReview, resolveCompletedSecurityReview, safeEngagementId } = require('./lib/security-review-report.cjs');
@@ -352,7 +352,6 @@ function updaterForPlatform(access) {
   if (process.platform === 'darwin') next = new MacUpdater(options);
   else if (process.platform === 'linux' && process.env.APPIMAGE) next = new AppImageUpdater(options);
   else if (process.platform === 'linux') next = new DebUpdater(options);
-  else if (process.platform === 'win32') next = new NsisUpdater(options);
   else throw new Error(`private updater is not configured for ${process.platform}/${process.arch}`);
   next.autoDownload = false;
   next.autoInstallOnAppQuit = false;
@@ -377,10 +376,25 @@ function updaterForPlatform(access) {
 }
 
 function desktopUpdateStatus() {
+  if (!binaryUpdatesSupported()) {
+    return {
+      packaged: app.isPackaged,
+      currentVersion: app.getVersion(),
+      supported: false,
+      sourceUrl: WINDOWS_SOURCE_URL,
+      reason: 'Windows binary updates are not published; build tagged releases from source',
+      available: false,
+      version: null,
+      downloaded: null,
+      checking: false,
+      applying: false,
+    };
+  }
   const access = resolveUpdateAccess();
   return {
     packaged: app.isPackaged,
     currentVersion: app.getVersion(),
+    supported: true,
     feedUrl: access.feedUrl,
     source: access.source,
     available: Boolean(lastUpdateCheck?.isUpdateAvailable),
@@ -393,6 +407,7 @@ function desktopUpdateStatus() {
 
 async function checkForDesktopUpdate({ automatic = false } = {}) {
   if (!app.isPackaged) return { packaged: false, reason: 'development builds use the source updater' };
+  if (!binaryUpdatesSupported()) return desktopUpdateStatus();
   if (updateCheckPromise) return updateCheckPromise;
   updateCheckPromise = (async () => {
     try {
@@ -413,6 +428,7 @@ async function checkForDesktopUpdate({ automatic = false } = {}) {
 
 async function applyAvailableDesktopUpdate() {
   if (!app.isPackaged) return { ok: false, reason: 'development builds use the source updater' };
+  if (!binaryUpdatesSupported()) return { ok: false, reason: desktopUpdateStatus().reason, sourceUrl: WINDOWS_SOURCE_URL };
   if (updateApplyPromise) return updateApplyPromise;
   updateApplyPromise = (async () => {
     try {
@@ -453,7 +469,7 @@ async function applyAvailableDesktopUpdate() {
 }
 
 function scheduleAutomaticUpdateChecks() {
-  if (!app.isPackaged || process.env.GLADOS_DISABLE_AUTOMATIC_UPDATE_CHECKS === '1') return;
+  if (!app.isPackaged || !binaryUpdatesSupported() || process.env.GLADOS_DISABLE_AUTOMATIC_UPDATE_CHECKS === '1') return;
   clearTimeout(automaticUpdateStartTimer);
   clearInterval(automaticUpdateInterval);
   const run = () => checkForDesktopUpdate({ automatic: true }).catch(() => {});

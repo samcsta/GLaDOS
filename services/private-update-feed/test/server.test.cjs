@@ -61,9 +61,10 @@ test('VPN-only mode serves updates without per-user application credentials', as
   fs.mkdirSync(path.join(installerRoot, 'linux'), { recursive: true });
   fs.writeFileSync(path.join(installerRoot, 'linux', 'GLaDOS-1.2.4-x86_64.AppImage'), 'appimage');
   fs.writeFileSync(path.join(installerRoot, 'linux', 'install-glados-linux.sh'), '#!/bin/sh\n');
+  fs.mkdirSync(path.join(root, 'windows', 'x64'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'windows', 'x64', 'latest.yml'), 'version: 9.9.9\n');
   fs.mkdirSync(path.join(installerRoot, 'windows'), { recursive: true });
-  fs.writeFileSync(path.join(installerRoot, 'windows', 'GLaDOS-1.2.5-x64.exe'), 'signed-windows-installer');
-  fs.writeFileSync(path.join(installerRoot, 'windows', 'install-glados-windows.ps1'), 'Write-Host GLaDOS\n');
+  fs.writeFileSync(path.join(installerRoot, 'windows', 'GLaDOS-9.9.9-x64.exe'), 'must-not-serve');
   const server = http.createServer(createHandler({
     root,
     installerRoot,
@@ -87,16 +88,19 @@ test('VPN-only mode serves updates without per-user application credentials', as
     assert.match(landing.body.toString(), /\/installers\/linux\/GLaDOS-1\.2\.4-x86_64\.AppImage/);
     assert.match(landing.body.toString(), /\/installers\/linux\/install-glados-linux\.sh/);
     assert.match(landing.body.toString(), /Download easy installer/);
-    assert.match(landing.body.toString(), /\/installers\/windows\/GLaDOS-1\.2\.5-x64\.exe/);
-    assert.match(landing.body.toString(), /\/installers\/windows\/install-glados-windows\.ps1/);
+    assert.match(landing.body.toString(), /https:\/\/github\.com\/samcsta\/GLaDOS/);
+    assert.match(landing.body.toString(), /Build from source/);
+    assert.match(landing.body.toString(), /No official Windows binaries are published/);
+    assert.doesNotMatch(landing.body.toString(), /GLaDOS-9\.9\.9-x64\.exe/);
+    const blockedWindowsFeed = await request(server.address().port, '/glados/windows/x64/latest.yml');
+    assert.equal(blockedWindowsFeed.status, 404);
+    assert.match(blockedWindowsFeed.body.toString(), /Windows binaries are not published/);
+    const blockedWindowsInstaller = await request(server.address().port, '/installers/windows/GLaDOS-9.9.9-x64.exe');
+    assert.equal(blockedWindowsInstaller.status, 404);
     const setup = await request(server.address().port, '/installers/linux/install-glados-linux.sh');
     assert.equal(setup.status, 200);
     assert.equal(setup.headers['content-type'], 'text/x-shellscript; charset=utf-8');
     assert.equal(setup.headers['cache-control'], 'private, no-cache');
-    const windowsSetup = await request(server.address().port, '/installers/windows/install-glados-windows.ps1');
-    assert.equal(windowsSetup.status, 200);
-    assert.equal(windowsSetup.headers['content-type'], 'text/plain; charset=utf-8');
-    assert.equal(windowsSetup.headers['cache-control'], 'private, no-cache');
     const traversal = await request(server.address().port, '/installers/%2e%2e/server.cjs');
     assert.equal(traversal.status, 404);
   } finally {

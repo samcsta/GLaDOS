@@ -4,7 +4,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { validateFeedUrl } = require('../lib/private-update.cjs');
-const { DEFAULT_UPDATE_ORIGIN, platformFeedPath, resolveUpdateAccess } = require('../lib/update-channel.cjs');
+const {
+  DEFAULT_UPDATE_ORIGIN, WINDOWS_SOURCE_URL, binaryUpdatesSupported, platformFeedPath, resolveUpdateAccess,
+} = require('../lib/update-channel.cjs');
 const {
   captureRuntimePayload, installRuntimePayload, nativeModuleKey,
   pruneNodePtyWindowsArchitectures, targetArch,
@@ -17,10 +19,14 @@ test('private update configuration requires HTTPS and strips a trailing slash', 
   assert.throws(() => validateFeedUrl('https://updates.example.test/glados?token=nope'), /query string/);
 });
 
-test('packaged clients derive the VPN update feed without user configuration', () => {
+test('maintained binary platforms derive the VPN update feed without user configuration', () => {
   assert.equal(platformFeedPath('darwin', 'arm64'), 'macos/arm64');
   assert.equal(platformFeedPath('linux', 'x64'), 'linux/x64');
-  assert.equal(platformFeedPath('win32', 'x64'), 'windows/x64');
+  assert.equal(binaryUpdatesSupported('darwin', 'arm64'), true);
+  assert.equal(binaryUpdatesSupported('linux', 'x64'), true);
+  assert.equal(binaryUpdatesSupported('win32', 'x64'), false);
+  assert.equal(WINDOWS_SOURCE_URL, 'https://github.com/samcsta/GLaDOS');
+  assert.throws(() => platformFeedPath('win32', 'x64'), /built from source/);
   assert.throws(() => platformFeedPath('darwin', 'x64'), /does not support/);
   assert.deepEqual(resolveUpdateAccess({ env: {}, platform: 'darwin', arch: 'arm64' }), {
     feedUrl: `${DEFAULT_UPDATE_ORIGIN}/macos/arm64`,
@@ -53,6 +59,8 @@ test('packaged update bridge exposes one guarded apply action and a notification
   const windowsInstaller = fs.readFileSync(path.join(desktopDir, '..', 'scripts', 'install-glados-windows.ps1'), 'utf8');
   const pkg = JSON.parse(fs.readFileSync(path.join(desktopDir, 'package.json'), 'utf8'));
   assert.match(main, /ipcMain\.handle\('desktop:update:apply'/);
+  assert.doesNotMatch(main, /NsisUpdater/);
+  assert.match(main, /!binaryUpdatesSupported\(\)/);
   assert.doesNotMatch(main, /ipcMain\.handle\('desktop:update:(?:download|install)'/);
   assert.match(main, /beforeDownload\.activeAgents/);
   assert.match(main, /beforeInstall\.activeAgents/);
@@ -60,12 +68,17 @@ test('packaged update bridge exposes one guarded apply action and a notification
   assert.doesNotMatch(preload, /downloadUpdate\(|installUpdate\(/);
   assert.match(dashboard, /id="update-banner"/);
   assert.match(dashboard, />Update GLaDOS</);
+  const dashboardApp = fs.readFileSync(path.join(desktopDir, '..', 'dashboard', 'public', 'app.js'), 'utf8');
+  assert.match(dashboardApp, /View source releases/);
+  assert.match(dashboardApp, /window\.open\(status\.sourceUrl/);
   assert.match(ubuntuInstaller, /stat -Lc '%d:%i:%s:%Y'/);
   assert.match(ubuntuInstaller, /restarted_after_update/);
   assert.match(linuxInstaller, /debian|ubuntu|kali/i);
   assert.match(linuxInstaller, /fedora/i);
   assert.match(linuxInstaller, /sha512/i);
-  assert.match(windowsInstaller, /Get-AuthenticodeSignature/);
+  assert.match(windowsInstaller, /Windows binaries are not distributed/);
+  assert.match(windowsInstaller, /github\.com\/samcsta\/GLaDOS/);
+  assert.match(windowsInstaller, /pack:windows/);
   assert.match(windowsInstaller, /PIPX_BIN_DIR/);
   assert.match(windowsInstaller, /mitmdump\.exe was not found after installation/);
   const windowsRelease = fs.readFileSync(path.join(desktopDir, 'scripts', 'release-windows.cjs'), 'utf8');

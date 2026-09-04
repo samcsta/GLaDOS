@@ -1,9 +1,8 @@
 # GLaDOS Desktop
 
 Electron shell for GLaDOS v4.5.8. The macOS bundle is named `GLaDOS.app`; the
-Linux package is `GLaDOS-<version>-x86_64.AppImage`; the Windows production
-package format is an Authenticode-signed `GLaDOS-<version>-x64.exe` NSIS
-installer.
+Linux package is `GLaDOS-<version>-x86_64.AppImage`. Windows 11 x64 is tested
+as an unsigned local source build; GLaDOS does not distribute Windows binaries.
 
 See [DISTRIBUTION_PLAN.md](DISTRIBUTION_PLAN.md) for the Developer ID,
 notarization, platform architecture, first-run dependency, and
@@ -43,10 +42,10 @@ bundle.
   native trust store, and performs live LiteLLM and proxy verification.
   Secret values are never returned to the dashboard after saving.
 - Source checkouts use the SSE git updater and restart the supervised dashboard
-  child. Packaged apps automatically use the Red Team VPN-only HTTPS feed
-  documented in `services/private-update-feed/README.md`; users do not enter a
-  feed URL or credential.
-- Packaged GLaDOS checks after startup and every six hours. A compact update
+  child. Packaged macOS and Linux apps use the Red Team VPN-only HTTPS feed
+  documented in `services/private-update-feed/README.md`; Windows source builds
+  link to the public repository instead.
+- Packaged macOS and Linux GLaDOS checks after startup and every six hours. A compact update
   banner provides one action that downloads, verifies, snapshots, installs,
   and restarts the app.
 - Before installation, the main process checks that no agents are active and
@@ -74,10 +73,10 @@ npm run dist:linux:docker --prefix desktop
 npm run smoke:debian:gui:docker --prefix desktop
 npm run smoke:kali:docker --prefix desktop
 npm run smoke:fedora:docker --prefix desktop
-# Run on a Windows x64 release host:
+# Run on a Windows x64 source-compatibility host; do not publish the output:
 npm run pack:windows --prefix desktop
 npm run smoke:windows --prefix desktop
 ```
 
-`release:windows` additionally requires `CSC_LINK` and `CSC_KEY_PASSWORD` and
-fails unless the final installer has a valid Authenticode signature.
+`release:windows` is dormant future-channel tooling. Current Windows operators
+build `win-unpacked` locally from a verified release revision.

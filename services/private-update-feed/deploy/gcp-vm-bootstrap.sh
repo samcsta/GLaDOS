@@ -35,10 +35,8 @@ mountpoint -q /srv/glados || mount /srv/glados
 mkdir -p \
   /srv/glados/releases/macos/arm64 \
   /srv/glados/releases/linux/x64 \
-  /srv/glados/releases/windows/x64 \
   /srv/glados/installers/macos \
-  /srv/glados/installers/linux \
-  /srv/glados/installers/windows
+  /srv/glados/installers/linux
 chown root:root /srv/glados
 chmod 0755 /srv/glados /srv/glados/releases /srv/glados/installers
 

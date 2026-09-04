@@ -24,7 +24,7 @@ jobs:
         run: npm run smoke:fedora:docker --prefix desktop
 
   windows-x64:
-    name: Windows x64
+    name: Windows x64 source-build compatibility
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -44,9 +44,9 @@ jobs:
         shell: pwsh
         run: |
           npm ci --prefix desktop
+          npm ci --prefix watchdog
           npm ci --prefix dashboard
           npm ci --prefix blackboard/blackboard-mcp
-          npm ci --prefix watchdog
           npm ci --prefix watchdog/watchdog-mcp
           npm ci --prefix tools/glados-ops-mcp
       - name: Run source tests
