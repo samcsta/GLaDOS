@@ -57,5 +57,13 @@ jobs:
           npm test --prefix services/private-update-feed
       - name: Package and audit Windows x64
         run: npm run pack:windows --prefix desktop
+      - name: Install packaged runtime prerequisites
+        shell: pwsh
+        run: |
+          choco install sqlite --yes --no-progress
+          if ($LASTEXITCODE -notin @(0, 3010)) {
+            throw "Chocolatey could not install SQLite (exit $LASTEXITCODE)."
+          }
+          sqlite3.exe --version
       - name: Smoke-test packaged dashboard
         run: npm run smoke:windows --prefix desktop
