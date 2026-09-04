@@ -1,0 +1,8 @@
+# Human-facing GLaDOS download portal. Keep updates.r3dt34m.net configured
+# separately because released applications use it as their update origin.
+glados.r3dt34m.net {
+	import dns-01.r3dt34m.net glados
+	reverse_proxy [::1]:4000 {
+		header_up X-Real-IP {remote_host}
+	}
+}

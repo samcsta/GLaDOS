@@ -25,7 +25,7 @@ test('maintained binary platforms derive the VPN update feed without user config
   assert.equal(binaryUpdatesSupported('darwin', 'arm64'), true);
   assert.equal(binaryUpdatesSupported('linux', 'x64'), true);
   assert.equal(binaryUpdatesSupported('win32', 'x64'), false);
-  assert.equal(WINDOWS_SOURCE_URL, 'https://github.com/samcsta/GLaDOS');
+  assert.equal(WINDOWS_SOURCE_URL, 'https://git.r3dt34m.net/scosta44/glados');
   assert.throws(() => platformFeedPath('win32', 'x64'), /built from source/);
   assert.throws(() => platformFeedPath('darwin', 'x64'), /does not support/);
   assert.deepEqual(resolveUpdateAccess({ env: {}, platform: 'darwin', arch: 'arm64' }), {
@@ -77,7 +77,7 @@ test('packaged update bridge exposes one guarded apply action and a notification
   assert.match(linuxInstaller, /fedora/i);
   assert.match(linuxInstaller, /sha512/i);
   assert.match(windowsInstaller, /Windows binaries are not distributed/);
-  assert.match(windowsInstaller, /github\.com\/samcsta\/GLaDOS/);
+  assert.match(windowsInstaller, /git\.r3dt34m\.net\/scosta44\/glados/);
   assert.match(windowsInstaller, /pack:windows/);
   assert.match(windowsInstaller, /PIPX_BIN_DIR/);
   assert.match(windowsInstaller, /mitmdump\.exe was not found after installation/);

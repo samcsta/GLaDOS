@@ -1,7 +1,7 @@
 const { validateFeedUrl, validateToken } = require('./private-update.cjs');
 
 const DEFAULT_UPDATE_ORIGIN = 'https://updates.r3dt34m.net/glados';
-const WINDOWS_SOURCE_URL = 'https://github.com/samcsta/GLaDOS';
+const WINDOWS_SOURCE_URL = 'https://git.r3dt34m.net/scosta44/glados';
 
 function binaryUpdatesSupported(platform = process.platform, arch = process.arch) {
   return (platform === 'darwin' && arch === 'arm64') || (platform === 'linux' && arch === 'x64');

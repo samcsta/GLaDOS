@@ -96,7 +96,7 @@ if ($PrerequisitesOnly) { return }
 
 Write-Host ''
 Write-Host 'Windows binaries are not distributed by GLaDOS. Build a tagged release from source:'
-Write-Host '  https://github.com/samcsta/GLaDOS'
+Write-Host '  https://git.r3dt34m.net/scosta44/glados'
 Write-Host ''
 Write-Host 'From the cloned release directory, run:'
 Write-Host '  npm ci --prefix desktop'

@@ -89,9 +89,10 @@ refreshes Spotlight metadata for `/Applications` so GLaDOS no longer appears
 as an installed application in Spotlight.
 
 For a first installation, connect to the Red Team VPN and open
-`https://updates.r3dt34m.net/`. The download page offers only installers that
+`https://glados.r3dt34m.net/`. The download page offers only installers that
 have passed their platform release gates and are currently published. After
-installation, GLaDOS uses the same private origin for in-app updates.
+installation, GLaDOS uses the private `updates.r3dt34m.net` origin for in-app
+updates.
 
 Linux users should choose **Download easy installer** and run the downloaded
 script with `bash ~/Downloads/install-glados-linux.sh`. It detects
@@ -112,7 +113,7 @@ scripts/install-desktop-app-linux.sh
 ```
 
 Windows x64 users should clone a documented release revision from
-`https://github.com/samcsta/GLaDOS`, verify the commit and clean Git status, and
+`https://git.r3dt34m.net/scosta44/glados`, verify the commit and clean Git status, and
 follow `desktop/WINDOWS_PLAN.md`. The PowerShell prerequisite script provisions
 the CLI runtime, after which the operator runs the locked installs, tests,
 native package audit, and packaged smoke locally. The resulting unsigned

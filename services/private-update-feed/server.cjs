@@ -77,27 +77,33 @@ function escapeHtml(value) {
 }
 
 function renderDownloadPage(installerRoot, installerBasePath = '/installers') {
+  const wikiUrl = 'https://wiki.r3dt34m.net/rt/glados';
+  const logoPath = `${installerBasePath.replace(/\/$/, '')}/linux/glados.png`;
   const platforms = [
     {
-      directory: 'macos', title: 'macOS', detail: 'Apple silicon · macOS 13 or newer',
+      directory: 'macos', title: 'macOS', mark: 'M', status: 'Maintained',
+      detail: 'Apple silicon · macOS 13 or newer', note: 'Developer ID signed and Apple notarized',
       pattern: /^GLaDOS-.*-arm64\.dmg$/i, action: 'Download DMG',
     },
     {
-      directory: 'linux', title: 'Linux', detail: 'Fedora, Kali/Debian, or Ubuntu · x86-64',
+      directory: 'linux', title: 'Linux', mark: 'L', status: 'Maintained',
+      detail: 'Fedora, Kali/Debian, or Ubuntu · x86-64', note: 'One tested AppImage for every supported distro',
       pattern: /^GLaDOS-.*-(?:x86_64|x64)\.AppImage$/i, action: 'Download AppImage',
       setupPath: `${installerBasePath}/linux/install-glados-linux.sh`,
       setupLabel: 'Download easy installer',
       setupHint: '<code>bash ~/Downloads/install-glados-linux.sh</code>',
     },
     {
-      directory: 'windows', title: 'Windows', detail: 'Windows 11 x64 · build releases from source',
-      sourceUrl: 'https://github.com/samcsta/GLaDOS',
+      directory: 'windows', title: 'Windows', mark: 'W', status: 'Source build',
+      detail: 'Windows 11 x64 · build releases from source', note: 'Native compatibility tested on each major release',
+      sourceUrl: 'https://git.r3dt34m.net/scosta44/glados',
     },
   ];
   const cards = platforms.map(platform => {
+    const heading = `<div class="platform-row"><span class="platform-mark">${platform.mark}</span><div><h3>${platform.title}</h3><span class="status">${platform.status}</span></div></div><p>${platform.detail}</p><span class="note">${platform.note}</span>`;
     if (platform.sourceUrl) {
       const source = escapeHtml(platform.sourceUrl);
-      return `<section class="card"><h2>${platform.title}</h2><p>${platform.detail}</p><a class="download" href="${source}" rel="noreferrer">Build from source</a><span class="hint">No official Windows binaries are published.</span></section>`;
+      return `<article class="card">${heading}<div class="card-actions"><a class="download" href="${source}" rel="noreferrer">Open Gitea source</a><span class="hint">No official Windows binaries are published.</span></div></article>`;
     }
     const installer = latestInstaller(installerRoot, platform.directory, platform.pattern);
     const setup = installer && platform.setupPath
@@ -106,13 +112,13 @@ function renderDownloadPage(installerRoot, installerBasePath = '/installers') {
     const download = installer
       ? `${setup}<a class="${setup ? 'secondary' : 'download'}" href="${installerBasePath}/${platform.directory}/${encodeURIComponent(installer.name)}" download>${platform.action}</a><span class="version">Version ${installer.version.join('.')}</span>`
       : '<span class="unavailable">Coming soon</span>';
-    return `<section class="card"><h2>${platform.title}</h2><p>${platform.detail}</p>${download}</section>`;
+    return `<article class="card">${heading}<div class="card-actions">${download}</div></article>`;
   }).join('');
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Download GLaDOS</title><style>
-:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;background:#090d0f;color:#f5f7f8}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 50% 0,#24343a 0,#0d1417 42%,#090d0f 75%)}main{width:min(1040px,calc(100% - 40px));margin:0 auto;padding:80px 0}header{max-width:700px;margin-bottom:42px}.eyebrow{color:#8ae6c1;font-size:.78rem;font-weight:800;letter-spacing:.18em;text-transform:uppercase}h1{font-size:clamp(2.5rem,7vw,5.5rem);line-height:.95;margin:.35em 0 .25em;letter-spacing:-.06em}header p{color:#aebbc0;font-size:1.08rem;line-height:1.65}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.card{min-height:230px;padding:25px;border:1px solid #2a3a3f;border-radius:18px;background:rgba(17,25,28,.88);display:flex;flex-direction:column}.card h2{margin:0 0 8px;font-size:1.2rem}.card p{margin:0;color:#94a4aa;line-height:1.5}.download,.unavailable{margin-top:auto;border-radius:10px;padding:12px 14px;text-align:center;font-weight:750}.download{background:#75e0b5;color:#07120e;text-decoration:none}.download:hover{background:#98edca}.secondary{color:#8ae6c1;text-align:center;margin-top:12px;font-size:.84rem}.hint{color:#89999f;text-align:center;font-size:.76rem;line-height:1.45;margin-top:10px}.hint code{color:#bac8cc}.unavailable{border:1px solid #33454b;color:#76868c}.version{margin-top:10px;color:#7d8d92;text-align:center;font-size:.8rem}footer{margin-top:38px;color:#718086;font-size:.85rem}@media(max-width:760px){main{padding:50px 0}.grid{grid-template-columns:1fr}.card{min-height:190px}}
-</style></head><body><main><header><div class="eyebrow">Red Team software</div><h1>Download GLaDOS</h1><p>Connect to the Red Team VPN to install maintained macOS or Linux binaries. Linux supports Fedora, Kali/Debian, and Ubuntu on x86-64. Windows is compatibility-tested and built locally from published source.</p></header><div class="grid">${cards}</div><footer>Private binary distribution · Red Team VPN required</footer></main></body></html>`;
+<meta name="theme-color" content="#090b0f"><title>Download GLaDOS · Red Team</title><style>
+:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#080a0d;color:#f7f8fa}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#080a0d;overflow-x:hidden}body:before{content:"";position:fixed;inset:0;pointer-events:none;background:radial-gradient(circle at 16% 0,rgba(216,55,58,.2),transparent 34%),radial-gradient(circle at 82% 9%,rgba(255,174,41,.09),transparent 26%),linear-gradient(155deg,#11151b 0,#090b0f 48%,#060709 100%)}main{position:relative;width:min(1120px,calc(100% - 40px));margin:0 auto;padding:64px 0 38px}.hero{display:grid;grid-template-columns:210px 1fr;gap:48px;align-items:center;padding:34px;border:1px solid rgba(255,255,255,.1);border-radius:28px;background:linear-gradient(145deg,rgba(25,29,36,.94),rgba(12,14,18,.88));box-shadow:0 28px 90px rgba(0,0,0,.38);overflow:hidden}.logo-shell{position:relative;display:grid;place-items:center}.logo-shell:before{content:"";position:absolute;width:86%;height:86%;border-radius:50%;background:#d63338;filter:blur(34px);opacity:.22}.logo{position:relative;display:block;width:min(100%,190px);height:auto;filter:drop-shadow(0 20px 24px rgba(0,0,0,.48))}.eyebrow{display:flex;align-items:center;gap:9px;color:#ffb34d;font-size:.76rem;font-weight:800;letter-spacing:.17em;text-transform:uppercase}.eyebrow:before{content:"";width:8px;height:8px;border-radius:50%;background:#e7474b;box-shadow:0 0 18px #e7474b}h1{font-size:clamp(3.4rem,8vw,6.6rem);line-height:.86;margin:.2em 0 .22em;letter-spacing:-.065em}.hero p{max-width:720px;margin:0;color:#aeb5c0;font-size:1.05rem;line-height:1.65}.hero-actions{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-top:25px}.wiki{display:inline-flex;align-items:center;gap:9px;padding:11px 15px;border:1px solid rgba(255,255,255,.14);border-radius:11px;color:#f5f7fa;background:rgba(255,255,255,.05);text-decoration:none;font-weight:720}.wiki:hover{border-color:#e64d51;background:rgba(230,77,81,.12)}.release-note{color:#777f8b;font-size:.82rem}.download-section{margin-top:50px}.section-heading{display:flex;align-items:end;justify-content:space-between;gap:24px;margin:0 4px 18px}.section-heading h2{font-size:1.45rem;margin:0}.section-heading p{margin:0;color:#777f8b;font-size:.87rem}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.card{position:relative;min-height:330px;padding:24px;border:1px solid rgba(255,255,255,.1);border-radius:20px;background:linear-gradient(160deg,rgba(24,28,34,.96),rgba(12,14,18,.96));display:flex;flex-direction:column;box-shadow:0 18px 50px rgba(0,0,0,.2);overflow:hidden}.card:before{content:"";position:absolute;inset:0 0 auto;height:2px;background:linear-gradient(90deg,#e3484c,#f0a139,transparent)}.platform-row{display:flex;align-items:center;gap:13px}.platform-mark{display:grid;place-items:center;width:42px;height:42px;border:1px solid rgba(255,255,255,.13);border-radius:12px;color:#fff;background:#20252d;font-weight:850}.platform-row h3{margin:0 0 3px;font-size:1.17rem}.status{color:#f1a74a;font-size:.7rem;font-weight:780;letter-spacing:.08em;text-transform:uppercase}.card>p{margin:22px 0 0;color:#abb2bd;line-height:1.5}.note{display:block;margin-top:9px;color:#717a86;font-size:.78rem;line-height:1.4}.card-actions{display:flex;flex-direction:column;margin-top:auto;padding-top:26px}.download,.unavailable{border-radius:11px;padding:12px 14px;text-align:center;font-weight:780}.download{background:linear-gradient(135deg,#e94b50,#c83237);color:#fff;text-decoration:none;box-shadow:0 10px 24px rgba(203,48,54,.2)}.download:hover{background:linear-gradient(135deg,#f15b60,#da3b41)}.secondary{color:#f0aa51;text-align:center;margin-top:13px;font-size:.84rem;text-decoration:none}.secondary:hover{color:#ffc274}.hint{color:#777f8b;text-align:center;font-size:.74rem;line-height:1.45;margin-top:9px}.hint code{color:#b9c0c9}.unavailable{border:1px solid #343a43;color:#7d8590}.version{margin-top:10px;color:#777f8b;text-align:center;font-size:.78rem}footer{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;margin:34px 4px 0;color:#666f7b;font-size:.8rem}footer a{color:#aeb5c0;text-decoration:none}footer a:hover{color:#fff}@media(max-width:820px){main{padding-top:28px}.hero{grid-template-columns:1fr;text-align:center;gap:18px;padding:30px 24px}.logo{width:150px}.eyebrow,.hero-actions{justify-content:center}.hero p{margin-inline:auto}.grid{grid-template-columns:1fr}.card{min-height:290px}.section-heading{align-items:start;flex-direction:column;gap:5px}}@media(max-width:460px){main{width:min(100% - 24px,1120px)}h1{font-size:3.4rem}.hero{border-radius:20px}.section-heading p{line-height:1.45}}
+</style></head><body><main><header class="hero"><div class="logo-shell"><img class="logo" src="${escapeHtml(logoPath)}" alt="GLaDOS logo" width="190" height="190"></div><div><div class="eyebrow">Red Team operator platform</div><h1>GLaDOS</h1><p>Install the maintained desktop application for macOS or Linux, or build the compatibility-tested Windows release from source. Connect to the Red Team VPN before downloading.</p><div class="hero-actions"><a class="wiki" href="${wikiUrl}" rel="noreferrer">Read the GLaDOS wiki <span aria-hidden="true">↗</span></a><span class="release-note">Private distribution · current release shown below</span></div></div></header><section class="download-section"><div class="section-heading"><h2>Choose your platform</h2><p>Signed releases and verified source from Red Team infrastructure</p></div><div class="grid">${cards}</div></section><footer><span>GLaDOS desktop distribution · Red Team VPN required</span><a href="${wikiUrl}" rel="noreferrer">Documentation and installation guide</a></footer></main></body></html>`;
 }
 
 function resolveUpdateFile(root, basePath, requestUrl) {
@@ -191,7 +197,7 @@ function createHandler({
         'content-type': 'text/html; charset=utf-8',
         'content-length': String(Buffer.byteLength(body)),
         'cache-control': 'private, no-cache',
-        'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+        'content-security-policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
         'x-frame-options': 'DENY',
       });
       if (request.method === 'HEAD') return response.end();

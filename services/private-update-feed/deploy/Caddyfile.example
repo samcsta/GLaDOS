@@ -1,4 +1,4 @@
-updates.r3dt34m.net {
+updates.r3dt34m.net, glados.r3dt34m.net {
 	encode zstd gzip
 
 	tls {
