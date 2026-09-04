@@ -1,6 +1,8 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
+const { spawn } = require('node:child_process');
 const { GLADOS_RUNTIME_DIR, GLADOS_AGENT_WORKSPACES, BLACKBOARD_DB, WATCHDOG_DB, MODEL_OVERRIDES_JSON } = require('../config');
 const { DashboardTranscriptStore } = require('../transcript-store');
 const { loadLlmAuthToken } = require('../secrets/llm-secrets');
@@ -866,11 +868,30 @@ function buildCanUseTool(agentId, policy = loadPolicy(), hookOptions = {}) {
   };
 }
 
+// The SDK serializes stdio MCP definitions into one --mcp-config argument.
+// Copying the complete host environment into every server both exposes
+// unrelated secrets and exceeds Windows' CreateProcess command-line limit
+// when the per-agent browser servers are enabled.
+const MCP_ENV_PASSTHROUGH = [
+  'PATH', 'PATHEXT', 'SystemRoot', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR',
+  'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH',
+  'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432',
+  'LANG', 'LC_ALL', 'LC_CTYPE', 'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+  'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE',
+  'GLADOS_SESSION_ID', 'GLADOS_OPERATOR_CONTEXT', 'GLADOS_LOCAL_AUTH', 'GLADOS_HEALTH_STALE_MS',
+  'GLADOS_FETCH_ACL', 'GLADOS_FULL_ACCESS_FILE', 'GLADOS_PROXY_URL', 'GLADOS_REPLAY_PROXY',
+  'GLADOS_MITM_LISTEN_HOST', 'GLADOS_MITM_LISTEN_PORT',
+];
+
 function buildMcpEnv(env = process.env) {
   const runtimeDir = path.resolve(env.GLADOS_RUNTIME_DIR || GLADOS_RUNTIME_DIR);
   const workspaces = path.resolve(env.GLADOS_AGENT_WORKSPACES || path.join(runtimeDir, 'workspaces', 'agents'));
+  const inherited = Object.fromEntries(MCP_ENV_PASSTHROUGH
+    .filter(key => env[key] !== undefined)
+    .map(key => [key, env[key]]));
   return {
-    ...env,
+    ...inherited,
     GLADOS_RUNTIME_DIR: runtimeDir,
     GLADOS_REPO_ROOT: REPO_ROOT,
     GLADOS_AGENT_WORKSPACES: workspaces,
@@ -878,7 +899,58 @@ function buildMcpEnv(env = process.env) {
     GLADOS_INVESTIGATIONS_DIR: env.GLADOS_INVESTIGATIONS_DIR || path.join(runtimeDir, 'investigations'),
     BLACKBOARD_DB: env.BLACKBOARD_DB || path.join(runtimeDir, 'blackboard', 'blackboard.db'),
     WATCHDOG_DB: env.WATCHDOG_DB || path.join(runtimeDir, 'watchdog', 'watchdog.db'),
+    GLADOS_PROXY_URL: proxyUrlFromEnv(env),
     PATH: env.PATH,
+  };
+}
+
+// Claude accepts either inline JSON or a JSON file for --mcp-config. Windows
+// cannot reliably spawn the CLI with the inline multi-server configuration,
+// so keep the exact payload private on disk for the lifetime of the child.
+function createWindowsSdkProcessSpawner({ runtimeDir = GLADOS_RUNTIME_DIR, spawnImpl = spawn } = {}) {
+  const launchDir = path.join(path.resolve(runtimeDir), 'sdk-launch');
+  return ({ command, args, cwd, env, signal }) => {
+    const launchArgs = [...args];
+    const temporaryFiles = [];
+    for (let index = 0; index < launchArgs.length - 1; index += 1) {
+      if (launchArgs[index] !== '--mcp-config') continue;
+      const inlineConfig = String(launchArgs[index + 1] || '');
+      if (!inlineConfig.trimStart().startsWith('{')) continue;
+      JSON.parse(inlineConfig);
+      fs.mkdirSync(launchDir, { recursive: true, mode: 0o700 });
+      fs.chmodSync(launchDir, 0o700);
+      const configFile = path.join(launchDir, `mcp-${process.pid}-${randomUUID()}.json`);
+      fs.writeFileSync(configFile, `${inlineConfig}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      fs.chmodSync(configFile, 0o600);
+      launchArgs[index + 1] = configFile;
+      temporaryFiles.push(configFile);
+    }
+
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      for (const file of temporaryFiles) {
+        try { fs.unlinkSync(file); } catch {}
+      }
+    };
+    try {
+      const debug = env?.DEBUG_CLAUDE_AGENT_SDK === '1';
+      const child = spawnImpl(command, launchArgs, {
+        cwd,
+        env,
+        signal,
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', debug ? 'pipe' : 'ignore'],
+      });
+      if (debug && child.stderr) child.stderr.on('data', chunk => process.stderr.write(chunk));
+      child.once('error', cleanup);
+      child.once('exit', cleanup);
+      return child;
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
   };
 }
 
@@ -1415,6 +1487,11 @@ function buildAgentSdkOptions(agentId, options = {}) {
   if (effort) sdkOptions.effort = effort;
   if (options.resumeSessionId) sdkOptions.resume = options.resumeSessionId;
   if (reviewReservations) sdkOptions.gladosReviewReservations = reviewReservations;
+  if ((options.platform || process.platform) === 'win32') {
+    sdkOptions.spawnClaudeCodeProcess = createWindowsSdkProcessSpawner({
+      runtimeDir: (options.env || process.env).GLADOS_RUNTIME_DIR || GLADOS_RUNTIME_DIR,
+    });
+  }
   return sdkOptions;
 }
 
@@ -2176,6 +2253,7 @@ module.exports = {
   buildCanUseTool,
   buildMcpEnv,
   buildMcpServers,
+  createWindowsSdkProcessSpawner,
   browserServerName,
   browserMountForAgent,
   writeBrowserMcpConfig,

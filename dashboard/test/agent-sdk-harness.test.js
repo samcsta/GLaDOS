@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { EventEmitter } = require('node:events');
 
 const {
   PROMPT_FILE_ORDER,
@@ -13,6 +14,7 @@ const {
   agentEnabled,
   buildSdkEnv,
   buildAgentSdkOptions,
+  createWindowsSdkProcessSpawner,
   buildAgentDefinitions,
   decideToolUse,
   mountedToolsForAgent,
@@ -547,6 +549,58 @@ test('optional browser MCP mounts only when enabled and uses the active GLaDOS p
       value: 'mustang',
     }]);
   });
+});
+
+test('Windows SDK launch externalizes MCP configuration and excludes unrelated host environment', () => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-windows-sdk-launch-'));
+  const oversized = 'x'.repeat(40_000);
+  const env = baseTestEnv({
+    GLADOS_BROWSER_MCP: '1',
+    GLADOS_RUNTIME_DIR: runtimeDir,
+    UNRELATED_OVERSIZED_VALUE: oversized,
+  });
+  const opts = buildAgentSdkOptions('glados', { env, platform: 'win32' });
+  const servers = Object.values(opts.mcpServers);
+  assert.equal(typeof opts.spawnClaudeCodeProcess, 'function');
+  assert.equal(servers.some(server => server.env?.ANTHROPIC_AUTH_TOKEN), false);
+  assert.equal(servers.some(server => server.env?.UNRELATED_OVERSIZED_VALUE), false);
+  assert.equal(servers.every(server => server.env?.GLADOS_RUNTIME_DIR === runtimeDir), true);
+
+  const inlineConfig = JSON.stringify({ mcpServers: opts.mcpServers });
+  assert.ok(inlineConfig.length > 10_000, 'fixture must remain large enough to exercise file-backed launch');
+  let captured = null;
+  const child = new EventEmitter();
+  child.stdin = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = null;
+  child.killed = false;
+  child.exitCode = null;
+  child.kill = () => {};
+  const spawner = createWindowsSdkProcessSpawner({
+    runtimeDir,
+    spawnImpl(command, args, spawnOptions) {
+      captured = { command, args, spawnOptions };
+      return child;
+    },
+  });
+  const signal = new AbortController().signal;
+  assert.equal(spawner({
+    command: 'claude.exe',
+    args: ['--output-format', 'stream-json', '--mcp-config', inlineConfig, '--strict-mcp-config'],
+    cwd: runtimeDir,
+    env,
+    signal,
+  }), child);
+  assert.equal(captured.command, 'claude.exe');
+  assert.equal(captured.spawnOptions.windowsHide, true);
+  assert.equal(captured.spawnOptions.signal, signal);
+  const configIndex = captured.args.indexOf('--mcp-config');
+  const configFile = captured.args[configIndex + 1];
+  assert.ok(configFile.startsWith(path.join(runtimeDir, 'sdk-launch')));
+  assert.ok(configFile.length < inlineConfig.length);
+  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), JSON.parse(inlineConfig));
+  child.emit('exit', 0, null);
+  assert.equal(fs.existsSync(configFile), false);
 });
 
 test('subagent dispatch prompt seeds current-page browser authorization targets', () => {
