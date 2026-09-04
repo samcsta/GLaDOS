@@ -1278,9 +1278,12 @@ test('source review gate rejects noncanonical worker receipt and location schema
 
 test('blackboard task update exposes engagement id required by its handler', () => {
   const source = fs.readFileSync(path.resolve(__dirname, '..', '..', 'blackboard', 'blackboard-mcp', 'index.js'), 'utf8');
-  const tool = source.match(/name: "blackboard_task_update",([\s\S]*?)\n  \},\n  \{/i)?.[1] || '';
-  assert.match(tool, /engagement_id/);
-  assert.match(tool, /required: \["task_id", "engagement_id"\]/);
+  const toolPattern = /name: "blackboard_task_update",([\s\S]*?)\r?\n  \},\r?\n  \{/i;
+  for (const sourceVariant of [source, source.replace(/\r?\n/g, '\r\n')]) {
+    const tool = sourceVariant.match(toolPattern)?.[1] || '';
+    assert.match(tool, /engagement_id/);
+    assert.match(tool, /required: \["task_id", "engagement_id"\]/);
+  }
 });
 
 test('security review inventory deterministically enumerates files, suppressions, routes, and scan receipts', () => {
