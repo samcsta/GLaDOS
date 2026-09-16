@@ -9,6 +9,7 @@ const {
   markdownFiles,
   normalizeDradisHeadings,
   rewriteLocalLinks,
+  stripRedundantWorkflowLabels,
 } = require('../lib/engagement-deliverables');
 
 function fixture() {
@@ -22,7 +23,7 @@ function fixture() {
   fs.writeFileSync(path.join(reportRoot, 'RT', 'ExecSummary.md'), '# Executive Summary\nSafe summary.\n');
   fs.writeFileSync(path.join(reportRoot, 'RT', 'Writeup.md'), '# Writeup\n<script>bad()</script>\n');
   fs.writeFileSync(path.join(reportRoot, 'RT', 'Timeline.md'), '# Timeline\nDone.\n');
-  fs.writeFileSync(path.join(reportRoot, 'CWEs', 'High', 'CWE-639.md'), '#CWE-639: Finding#\n#Summary#\nSafe.\n#Evidence 1: Proof#\n![proof](../../../evidence/proof.png)\n');
+  fs.writeFileSync(path.join(reportRoot, 'CWEs', 'High', 'CWE-639.md'), '#CWE-639: Finding#\n#Summary#\n[Action 1]\nSafe.\n#Evidence 1: Proof#\n![proof](../../../evidence/proof.png)\n[Final Result]\nDone.\n');
   const dbPath = path.join(root, 'blackboard.db');
   const db = new Database(dbPath);
   db.exec(`
@@ -71,6 +72,7 @@ test('generic engagement deliverables order reports and publish HTML, PDF, and m
   assert.doesNotMatch(html, /GLaDOS handoff/);
   assert.doesNotMatch(html, /glados-logo/);
   assert.doesNotMatch(html, /finding-source/);
+  assert.doesNotMatch(html, /\[(?:Action 1|Final Result)\]/);
   assert.match(html, /file:\/\//);
   assert.match(html, /<h1>CWE-639: Finding<\/h1>/);
   assert.match(html, /<h2>Summary<\/h2>/);
@@ -86,6 +88,11 @@ test('generic engagement deliverables order reports and publish HTML, PDF, and m
 test('Dradis heading normalization does not rewrite fenced command comments', () => {
   const markdown = '#Summary#\n```sh\n#leave this#\n```\n#Evidence 1: Proof#\n';
   assert.equal(normalizeDradisHeadings(markdown), '## Summary\n```sh\n#leave this#\n```\n### Evidence 1: Proof\n');
+});
+
+test('redundant workflow labels are removed without changing evidence or prose', () => {
+  const markdown = '[Action 1]\n\n```text\n[Action 2]\n```\n\nSentence with [Action 3] inline.\n\n[Final Result]\n';
+  assert.equal(stripRedundantWorkflowLabels(markdown), '\n```text\n[Action 2]\n```\n\nSentence with [Action 3] inline.\n\n');
 });
 
 test('generic engagement link rewriting blocks paths outside the engagement root', () => {

@@ -109,11 +109,25 @@ function normalizeDradisHeadings(markdown) {
   }).join('\n');
 }
 
+function stripRedundantWorkflowLabels(markdown) {
+  let fence = null;
+  return String(markdown ?? '').split('\n').filter(line => {
+    const fenceMatch = line.match(/^\s*(```|~~~)/);
+    if (fenceMatch) {
+      fence = fence === fenceMatch[1] ? null : (fence || fenceMatch[1]);
+      return true;
+    }
+    if (fence) return true;
+    return !/^\s*\[(?:Action\s+\d+|Final\s+Result)\]\s*$/i.test(line);
+  }).join('\n');
+}
+
 function renderMarkdown(markdown) {
   const renderer = new Renderer();
   renderer.html = html => `<pre class="raw-html">${escapeHtml(html)}</pre>`;
   const marked = new Marked({ renderer, gfm: true, breaks: false });
-  return marked.parse(redactReportText(normalizeDradisHeadings(markdown)));
+  const normalized = normalizeDradisHeadings(markdown);
+  return marked.parse(redactReportText(stripRedundantWorkflowLabels(normalized)));
 }
 
 function engagementMetadata(engagementId, dbPath = BLACKBOARD_DB) {
@@ -408,4 +422,5 @@ module.exports = {
   normalizeDradisHeadings,
   reportHtml,
   rewriteLocalLinks,
+  stripRedundantWorkflowLabels,
 };
