@@ -13,7 +13,7 @@ const OUTPUT_NAMES = new Set([
   'DELIVERABLES-MANIFEST.json',
 ]);
 
-const REPORT_STYLE = 'glados-webapp-red-team-v1';
+const REPORT_STYLE = 'red-team-report-standard-v2';
 const SEVERITY_ORDER = new Map([
   ['critical', 0],
   ['high', 1],
@@ -216,7 +216,7 @@ function riskMatrixHtml() {
 }
 
 function remediationSlaHtml() {
-  return `<section class="document-page appendix-page"><h1>Vulnerability Remediation SLA</h1><p class="policy-note">Use the organization-approved vulnerability management policy for binding deadlines. The workflow below is the standard GLaDOS handoff structure and does not replace local policy.</p>
+  return `<section class="document-page appendix-page"><h1>Vulnerability Remediation SLA</h1><p class="policy-note">Use the organization-approved vulnerability management policy for binding deadlines. The workflow below is the standard remediation handoff structure and does not replace local policy.</p>
   <table class="sla-table"><thead><tr><th>Severity</th><th>Required handling</th><th>Completion evidence</th></tr></thead><tbody>
   <tr><th class="risk-critical">Critical</th><td>Immediate owner assignment, containment review, and expedited remediation under the applicable emergency process.</td><td>Fix, regression test, and independent validation.</td></tr>
   <tr><th class="risk-high">High</th><td>Prioritized remediation in the nearest approved release window, with compensating controls documented when delayed.</td><td>Fix and independent validation.</td></tr>
@@ -240,8 +240,6 @@ function reportHtml({ engagementId, reportRoot, files, metadata, generatedAt }) 
   const findings = entries.filter(entry => entry.severity)
     .sort((left, right) => (SEVERITY_ORDER.get(left.severity) ?? 99) - (SEVERITY_ORDER.get(right.severity) ?? 99) || left.title.localeCompare(right.title));
   const supporting = entries.filter(entry => entry !== execEntry && !entry.severity);
-  const logoPath = path.join(__dirname, '..', 'public', 'assets', 'glados-logo.png');
-  const logo = fs.existsSync(logoPath) ? `data:image/png;base64,${fs.readFileSync(logoPath).toString('base64')}` : '';
   const execSection = execEntry
     ? `<section class="document-page executive-page" id="executive-summary" data-source="${escapeHtml(execEntry.relative)}">${renderMarkdown(execEntry.markdown)}</section>`
     : '<section class="document-page executive-page"><h1>Executive Summary</h1><p>No executive summary was provided.</p></section>';
@@ -252,28 +250,44 @@ function reportHtml({ engagementId, reportRoot, files, metadata, generatedAt }) 
   const completedTasks = Number(metadata.tasks.find(row => row.status === 'completed')?.count || 0);
   const approvedPlans = metadata.plans.filter(row => row.approved_at).length;
   const completedDate = displayDate(metadata.engagement.completed_at || generatedAt);
+  const pageEngagementId = JSON.stringify(engagementId);
+  const pageIssueLine = JSON.stringify(`Issued ${completedDate} · Secrets redacted`);
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${escapeHtml(target)} — GLaDOS Engagement Report</title>
+<title>${escapeHtml(target)} — Red Team Report</title>
 <style>
-@page { size: Letter; margin: .72in .66in .62in; }
-:root { color-scheme: light; --ink:#121722; --muted:#657184; --line:#c7ceda; --accent:#222f84; --navy:#07135f; --violet:#3517ff; --red:#e1262f; --critical:#111827; --high:#dc2f2f; --medium:#f2b824; --low:#16a85a; }
+@page {
+  size: Letter;
+  margin: .82in .66in .82in;
+  @top-left { content:"Red Team Report"; vertical-align:bottom; padding-bottom:.05in; border-bottom:1px solid #e4e7ed; color:#202633; font:700 7.5pt Arial,Helvetica,sans-serif; letter-spacing:.02em; text-transform:uppercase; }
+  @top-center { content:""; border-bottom:1px solid #e4e7ed; }
+  @top-right { content:${pageEngagementId}; vertical-align:bottom; padding-bottom:.05in; border-bottom:1px solid #e4e7ed; color:#202633; font:700 7.5pt Arial,Helvetica,sans-serif; letter-spacing:.02em; text-transform:uppercase; }
+  @bottom-left { content:"Security Engagement Report"; vertical-align:top; padding-top:.05in; border-top:1px solid #eef0f4; color:#586174; font:6.4pt/1.15 Arial,Helvetica,sans-serif; }
+  @bottom-center { content:""; border-top:1px solid #eef0f4; }
+  @bottom-right { content:${pageIssueLine}; vertical-align:top; padding-top:.05in; border-top:1px solid #eef0f4; color:#586174; font:6.4pt/1.15 Arial,Helvetica,sans-serif; }
+}
+@page cover {
+  size: Letter;
+  margin:0;
+  @top-left { content:none; border:0; }
+  @top-center { content:none; border:0; }
+  @top-right { content:none; border:0; }
+  @bottom-left { content:none; border:0; }
+  @bottom-center { content:none; border:0; }
+  @bottom-right { content:none; border:0; }
+}
+:root { color-scheme: light; --ink:#121722; --muted:#657184; --line:#c7ceda; --accent:#222f84; --navy:#07135f; --red:#9f2738; --cover-ink:#24272d; --cover-charcoal:#1c2028; --cover-crimson:#9f2738; --cover-copper:#d16b3f; --critical:#111827; --high:#dc2f2f; --medium:#f2b824; --low:#16a85a; }
 * { box-sizing:border-box; }
 body { margin:0; color:var(--ink); background:#fff; font:9.5pt/1.34 Arial,Helvetica,sans-serif; }
-.cover { position:relative; z-index:5; min-height:9.66in; margin:-.72in -.66in -.62in; padding:2.25in .86in 2.55in; overflow:hidden; background:#fff; page-break-after:always; }
+.cover { page:cover; position:relative; z-index:5; min-height:11in; margin:0; padding:2.25in .86in 2.55in; overflow:hidden; background:#fff; page-break-after:always; }
 .cover-copy { position:relative; z-index:4; max-width:5.5in; }
-.cover h1 { margin:0 0 .08in; color:#0b145c; font-size:29pt; line-height:1.05; }
+.cover h1 { margin:0 0 .08in; color:var(--cover-ink); font-size:29pt; line-height:1.05; }
 .cover .subtitle { color:var(--red); font-size:14pt; font-weight:700; font-style:italic; }
 .cover .engagement-id,.cover .date { margin-top:.07in; font-size:12pt; font-weight:700; }
-.cover-wave { position:absolute; z-index:2; left:-.35in; right:-.35in; bottom:-.78in; height:2.75in; border-radius:55% 48% 0 0 / 28% 24% 0 0; background:var(--navy); transform:rotate(1deg); }
-.cover-wave::before { content:""; position:absolute; left:35%; right:-8%; top:.22in; height:.62in; border-radius:55% 10% 0 0; background:var(--violet); transform:rotate(7deg); }
-.cover-wave::after { content:""; position:absolute; left:50%; right:-7%; top:.04in; height:.48in; border-radius:55% 10% 0 0; background:#060b18; transform:rotate(5deg); }
-.cover-brand { position:absolute; z-index:4; left:.9in; bottom:.57in; display:flex; align-items:center; gap:.16in; color:#fff; font-size:16pt; font-weight:800; letter-spacing:.08em; }
-.cover-brand img { width:.62in; height:.62in; border-radius:50%; }
-.running-header { position:fixed; z-index:1; top:-.5in; left:0; right:0; height:.3in; display:grid; grid-template-columns:1fr auto 1fr; align-items:center; border-bottom:1px solid #e4e7ed; color:#202633; font-size:7.5pt; font-weight:700; letter-spacing:.02em; text-transform:uppercase; }
-.running-header img { width:.28in; height:.28in; border-radius:50%; }
-.running-header span:last-child { text-align:right; }
-.running-footer { position:fixed; z-index:1; bottom:-.43in; left:0; right:0; display:flex; justify-content:space-between; gap:.25in; color:#586174; font-size:6.4pt; }
+.cover-wave { position:absolute; z-index:2; left:-.35in; right:-.35in; bottom:-.78in; height:2.75in; border-radius:55% 48% 0 0 / 28% 24% 0 0; background:var(--cover-charcoal); transform:rotate(1deg); }
+.cover-wave::before { content:""; position:absolute; left:35%; right:-8%; top:.22in; height:.62in; border-radius:55% 10% 0 0; background:var(--cover-crimson); transform:rotate(7deg); }
+.cover-wave::after { content:""; position:absolute; left:50%; right:-7%; top:.04in; height:.48in; border-radius:55% 10% 0 0; background:var(--cover-copper); transform:rotate(5deg); }
+.cover-label { position:absolute; z-index:4; left:.9in; bottom:.57in; color:#fff; font-size:12pt; font-weight:800; letter-spacing:.16em; text-transform:uppercase; }
 .document-page { position:relative; page-break-before:always; }
 .contents-page { page-break-before:auto; }
 .source-label,.finding-source { float:right; margin:0 0 .08in .12in; color:var(--muted); font-size:6.8pt; }
@@ -331,9 +345,7 @@ a { color:#175da6; }
 .supporting-page th,.supporting-page td { padding:.035in .045in; }
 @media print { a { color:inherit; text-decoration:none; } }
 </style></head><body>
-<section class="cover"><div class="cover-copy"><h1>Red Team Report</h1><div class="subtitle">${escapeHtml(target)}</div><div class="engagement-id">${escapeHtml(engagementId)}</div><div class="date">${escapeHtml(completedDate)}</div></div><div class="cover-wave"></div><div class="cover-brand">${logo ? `<img src="${logo}" alt="GLaDOS">` : ''}<span>GLaDOS Ops</span></div></section>
-<header class="running-header"><span>Red Team Report</span>${logo ? `<img src="${logo}" alt="">` : '<span>GLaDOS</span>'}<span>${escapeHtml(engagementId)}</span></header>
-<footer class="running-footer"><span>GLaDOS Ops · Security Engagement Report</span><span>Issued ${escapeHtml(completedDate)} · Secrets redacted</span></footer>
+<section class="cover"><div class="cover-copy"><h1>Red Team Report</h1><div class="subtitle">${escapeHtml(target)}</div><div class="engagement-id">${escapeHtml(engagementId)}</div><div class="date">${escapeHtml(completedDate)}</div></div><div class="cover-wave"></div><div class="cover-label">Security Assessment</div></section>
 <section class="document-page contents-page"><h1>Table of Contents</h1><ol class="toc-list">${contentsRows(findings, supporting)}</ol></section>
 ${execSection}
 <section class="document-page general-page"><h1>General Information</h1><h2>Testing Scope</h2><ul>${scope.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul><h2>Testing Period</h2><p>The assessment was performed between <strong>${escapeHtml(displayDate(metadata.engagement.started_at))}</strong> and <strong>${escapeHtml(displayDate(metadata.engagement.completed_at))}</strong>.</p><div class="information-grid"><div><span>Engagement status</span><strong>${escapeHtml(metadata.engagement.status || 'Not recorded')}</strong></div><div><span>Approved plans</span><strong>${approvedPlans}</strong></div><div><span>Completed tasks</span><strong>${completedTasks}</strong></div><div><span>Reported vulnerabilities</span><strong>${findings.length}</strong></div></div><h2>Vulnerabilities Summary</h2><table class="vulnerability-summary"><thead><tr><th>Risk</th><th>Score</th><th>Vulnerability</th></tr></thead><tbody>${findingSummaryRows(findings)}</tbody></table></section>

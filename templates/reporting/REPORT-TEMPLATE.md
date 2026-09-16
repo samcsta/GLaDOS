@@ -240,14 +240,14 @@ Never estimate missing cost or tokens. If unavailable, state “Unavailable from
 the runtime meter” and explain why. The currently executing reporting turn is
 not included until it returns, so the cutoff must always be explicit.
 
-## Published Web Application Report Standard
+## Published Report Standard
 
 The final `ENGAGEMENT-REPORT.html` and `ENGAGEMENT-REPORT.pdf` are rendered by
 `dashboard/scripts/generate-engagement-deliverables.js`. Do not hand-style or
 replace these publication artifacts. The renderer owns the standard visual
 system and maps the canonical report tree into this order:
 
-1. branded Red Team cover with target, engagement ID, and issue date;
+1. brand-neutral Red Team cover with target, engagement ID, and issue date;
 2. table of contents;
 3. executive summary;
 4. general information with scope, test period, engagement controls, and a
@@ -259,13 +259,14 @@ system and maps the canonical report tree into this order:
    expectations;
 8. finding-specific CWE links and general web-security learning references.
 
-The publication uses GLaDOS branding, US Letter pages, repeated report
-headers/footers, navy section rules, compact evidence typography, embedded
-screenshots, and the common Critical/High/Medium/Low color system. Organization
-logos, internal addresses, proprietary policy URLs, and binding remediation
-deadlines must be supplied through an approved future branding/policy profile;
-they must not be copied into the default renderer or improvised by a report
-agent.
+The publication uses a brand-neutral Red Team identity, US Letter pages,
+repeated report headers/footers, navy section rules, compact evidence
+typography, embedded screenshots, and the common Critical/High/Medium/Low color
+system. The cover uses a restrained charcoal, crimson, and copper palette.
+Organization logos, internal addresses, proprietary policy URLs, and binding
+remediation deadlines must be supplied through an approved future
+branding/policy profile; they must not be copied into the default renderer or
+improvised by a report agent.
 
 ## Report Validation Contract
 
