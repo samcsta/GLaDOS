@@ -243,7 +243,10 @@ function reportHtml({ engagementId, reportRoot, files, metadata, generatedAt }) 
   const execSection = execEntry
     ? `<section class="document-page executive-page" id="executive-summary" data-source="${escapeHtml(execEntry.relative)}">${renderMarkdown(execEntry.markdown)}</section>`
     : '<section class="document-page executive-page"><h1>Executive Summary</h1><p>No executive summary was provided.</p></section>';
-  const findingSections = findings.map((entry, index) => `<section class="document-page finding finding-${escapeHtml(entry.severity)}" id="${escapeHtml(entry.id)}" data-source="${escapeHtml(entry.relative)}">${index === 0 ? '<div class="section-kicker">Technical Details</div>' : ''}<div class="severity-badge risk-${escapeHtml(entry.severity)}"><strong>${escapeHtml(entry.score || 'N/A')}</strong><span>${escapeHtml(entry.severity)}</span></div><div class="finding-source">Technical details · ${escapeHtml(entry.relative)}</div>${renderMarkdown(entry.markdown)}</section>`).join('\n');
+  const findingSections = findings.map((entry, index) => {
+    const findingBody = renderMarkdown(entry.markdown).replace(/^\s*<h1>[\s\S]*?<\/h1>\s*/, '');
+    return `<section class="document-page finding finding-${escapeHtml(entry.severity)}" id="${escapeHtml(entry.id)}" data-source="${escapeHtml(entry.relative)}">${index === 0 ? '<div class="section-kicker">Technical Details</div>' : ''}<div class="finding-heading"><h1>${escapeHtml(entry.title)}</h1><div class="severity-badge risk-${escapeHtml(entry.severity)}"><strong>${escapeHtml(entry.score || 'N/A')}</strong><span>${escapeHtml(entry.severity)}</span></div></div>${findingBody}</section>`;
+  }).join('\n');
   const supportingSections = supporting.map((entry, index) => `<section class="document-page supporting-page" id="${escapeHtml(entry.id)}" data-source="${escapeHtml(entry.relative)}">${index === 0 ? '<div class="section-kicker">Supporting Engagement Record</div>' : ''}<div class="source-label">Supporting record · ${escapeHtml(entry.relative)}</div>${renderMarkdown(entry.markdown)}</section>`).join('\n');
   const target = metadata.engagement.target_name || engagementId;
   const scope = normalizedScope(metadata.engagement.scope);
@@ -290,7 +293,7 @@ body { margin:0; color:var(--ink); background:#fff; font:9.5pt/1.34 Arial,Helvet
 .cover-label { position:absolute; z-index:4; left:.9in; bottom:.57in; color:#fff; font-size:12pt; font-weight:800; letter-spacing:.16em; text-transform:uppercase; }
 .document-page { position:relative; page-break-before:always; }
 .contents-page { page-break-before:auto; }
-.source-label,.finding-source { float:right; margin:0 0 .08in .12in; color:var(--muted); font-size:6.8pt; }
+.source-label { float:right; margin:0 0 .08in .12in; color:var(--muted); font-size:6.8pt; }
 .section-kicker { margin:0 0 .17in; padding-bottom:.07in; border-bottom:1.5px solid var(--navy); color:var(--navy); font-size:15pt; font-variant:small-caps; letter-spacing:.015em; }
 h1,h2,h3,h4 { color:var(--navy); line-height:1.16; page-break-after:avoid; }
 h1 { margin:0 0 .2in; padding-bottom:.07in; border-bottom:1.5px solid var(--navy); font-size:15pt; font-weight:500; font-variant:small-caps; letter-spacing:.015em; }
@@ -323,8 +326,9 @@ thead th { color:#fff; background:var(--navy); text-align:center; font-variant:s
 .risk-low { color:#061a0e !important; background:var(--low) !important; }
 .risk-informational { color:#111 !important; background:#dce4ef !important; }
 .finding { padding-top:.02in; }
-.finding h1 { padding-right:.86in; font-size:13pt; }
-.severity-badge { position:absolute; top:.34in; right:0; width:.58in; height:.58in; display:flex; flex-direction:column; align-items:center; justify-content:center; border-radius:.09in; text-align:center; }
+.finding-heading { display:grid; grid-template-columns:minmax(0,1fr) .64in; gap:.18in; align-items:start; margin:0 0 .14in; border-bottom:1.5px solid var(--navy); }
+.finding-heading h1 { margin:0; padding:0 0 .09in; border:0; font-size:13pt; font-weight:600; font-variant:normal; letter-spacing:0; overflow-wrap:anywhere; }
+.severity-badge { width:.64in; height:.64in; display:flex; flex-direction:column; align-items:center; justify-content:center; margin-top:-.02in; border-radius:.09in; text-align:center; }
 .severity-badge strong { font-size:13pt; line-height:1; }
 .severity-badge span { margin-top:.025in; font-size:5.5pt; font-weight:800; text-transform:uppercase; }
 .finding img { display:block; max-width:100%; max-height:4.85in; margin:.08in auto .06in; border:1px solid #c8ced8; object-fit:contain; page-break-inside:avoid; }

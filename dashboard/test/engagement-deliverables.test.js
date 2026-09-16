@@ -64,11 +64,13 @@ test('generic engagement deliverables order reports and publish HTML, PDF, and m
   assert.match(html, /Vulnerability Remediation SLA/);
   assert.match(html, /Learning References/);
   assert.match(html, /severity-badge risk-high/);
+  assert.match(html, /finding-heading/);
   assert.match(html, /Security Assessment/);
   assert.match(html, /Security Engagement Report/);
   assert.doesNotMatch(html, /GLaDOS Ops/);
   assert.doesNotMatch(html, /GLaDOS handoff/);
   assert.doesNotMatch(html, /glados-logo/);
+  assert.doesNotMatch(html, /finding-source/);
   assert.match(html, /file:\/\//);
   assert.match(html, /<h1>CWE-639: Finding<\/h1>/);
   assert.match(html, /<h2>Summary<\/h2>/);
