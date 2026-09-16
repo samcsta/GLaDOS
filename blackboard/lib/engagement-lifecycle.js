@@ -27,12 +27,22 @@ function updateEngagement(db, { engagementId, status, completionGuard = null }) 
     if (completionGuard) completionGuard({ engagementId });
   }
 
-  db.prepare(`
-    UPDATE engagements
-    SET status = ?,
-        completed_at = CASE WHEN ? = 'active' THEN NULL ELSE COALESCE(completed_at, datetime('now')) END
-    WHERE id = ?
-  `).run(status, status, engagementId);
+  const persist = db.transaction(() => {
+    db.prepare(`
+      UPDATE engagements
+      SET status = ?,
+          completed_at = CASE WHEN ? = 'active' THEN NULL ELSE COALESCE(completed_at, datetime('now')) END
+      WHERE id = ?
+    `).run(status, status, engagementId);
+    if (status === 'complete') {
+      db.prepare(`
+        UPDATE plans
+        SET state = 'complete', completed_at = COALESCE(completed_at, datetime('now'))
+        WHERE engagement_id = ? AND state IN ('approved', 'executing')
+      `).run(engagementId);
+    }
+  });
+  persist();
   return db.prepare('SELECT * FROM engagements WHERE id = ?').get(engagementId);
 }
 

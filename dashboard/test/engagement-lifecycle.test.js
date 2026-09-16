@@ -21,6 +21,12 @@ function testDb() {
       assigned_to TEXT NOT NULL,
       status TEXT DEFAULT 'pending'
     );
+    CREATE TABLE plans (
+      id TEXT PRIMARY KEY,
+      engagement_id TEXT NOT NULL,
+      state TEXT NOT NULL,
+      completed_at TEXT
+    );
   `);
   return db;
 }
@@ -42,9 +48,14 @@ test('engagement completion records completion only after every task is terminal
   db.prepare('INSERT INTO engagements (id, target_name) VALUES (?, ?)').run('eng-2', 'target');
   db.prepare('INSERT INTO tasks (engagement_id, assigned_to, status) VALUES (?, ?, ?)')
     .run('eng-2', 'report-writer', 'completed');
+  db.prepare('INSERT INTO plans (id, engagement_id, state) VALUES (?, ?, ?)')
+    .run('plan-2', 'eng-2', 'approved');
   const completed = updateEngagement(db, { engagementId: 'eng-2', status: 'complete' });
   assert.equal(completed.status, 'complete');
   assert.ok(completed.completed_at);
+  const plan = db.prepare('SELECT state, completed_at FROM plans WHERE id = ?').get('plan-2');
+  assert.equal(plan.state, 'complete');
+  assert.ok(plan.completed_at);
 
   assert.throws(
     () => updateEngagement(db, { engagementId: 'eng-2', status: 'active' }),

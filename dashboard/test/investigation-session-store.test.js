@@ -18,6 +18,9 @@ test('new investigation sessions archive rather than delete prior blackboard dat
   db.prepare("INSERT INTO findings (engagement_id, target_url, finding_type, affected_component, title, discovered_by) VALUES ('eng-a', 'https://example.com', 'vulnerability', '/', 'A finding', 'glados')").run();
   db.close();
 
+  assert.equal(store.get(first.id).engagementCount, 1);
+  assert.equal(store.getActive().engagementCount, 1);
+
   const second = store.create({ name: 'Second investigation' });
   assert.notEqual(second.id, first.id);
   assert.equal(store.get(first.id).state, 'archived');

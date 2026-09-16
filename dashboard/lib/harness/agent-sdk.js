@@ -1365,6 +1365,11 @@ function buildSdkEnv(env = process.env, policy = loadPolicy()) {
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC || '1',
     DISABLE_TELEMETRY: env.DISABLE_TELEMETRY || '1',
     CLAUDE_AGENT_SDK_CLIENT_APP: 'glados-v4-dashboard',
+    GLADOS_RUNTIME_DIR: path.resolve(env.GLADOS_RUNTIME_DIR || GLADOS_RUNTIME_DIR),
+    GLADOS_REPO_ROOT: REPO_ROOT,
+    GLADOS_INVESTIGATIONS_DIR: path.resolve(env.GLADOS_INVESTIGATIONS_DIR || path.join(env.GLADOS_RUNTIME_DIR || GLADOS_RUNTIME_DIR, 'investigations')),
+    GLADOS_REPORTS_DIR: path.resolve(env.GLADOS_REPORTS_DIR || path.join(env.GLADOS_RUNTIME_DIR || GLADOS_RUNTIME_DIR, 'reports')),
+    BLACKBOARD_DB: path.resolve(env.BLACKBOARD_DB || path.join(env.GLADOS_RUNTIME_DIR || GLADOS_RUNTIME_DIR, 'blackboard', 'blackboard.db')),
     GLADOS_PROXY_URL: proxyUrlFromEnv(env),
   };
   delete out.ANTHROPIC_API_KEY;

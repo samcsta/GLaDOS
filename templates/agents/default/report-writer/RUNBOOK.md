@@ -70,8 +70,13 @@ summary, and full technical writeup.
     technical assessment, including chains, plan history, coverage, elapsed
     time, metered spend/tokens, evidence, limitations, and remediation themes.
 12. Scan the entire report tree for secrets and unrelated engagement content.
-    Return only the report root, file manifest, metrics cutoff, and a short
-    completion summary; do not paste every report into chat.
+    On `report_pass: final`, publish the consolidated HTML and PDF by running
+    `node "${GLADOS_REPO_ROOT}/dashboard/scripts/generate-engagement-deliverables.js" <engagement-id>`.
+    Treat a missing or invalid `ENGAGEMENT-REPORT.pdf` as a reporting failure;
+    do not mark the final report task complete until the PDF begins with `%PDF-`
+    and `DELIVERABLES-MANIFEST.json` includes it. Return only the report root,
+    file manifest, metrics cutoff, PDF path, and a short completion summary; do
+    not paste every report into chat.
 13. On `report_pass: initial`, create the complete initial draft and return it
     for the validator's single review-and-edit pass. On `report_pass: final`,
     read the validator's recommendations and corrected files in bounded pages,

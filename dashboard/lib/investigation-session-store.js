@@ -73,12 +73,30 @@ class InvestigationSessionStore {
   }
 
   get(id) {
-    const row = this.db.prepare('SELECT * FROM investigation_sessions WHERE id=?').get(id);
+    const row = this.db.prepare(`
+      SELECT s.*, p.name AS project_name,
+        (SELECT COUNT(*) FROM engagements e WHERE e.session_id=s.id) AS engagement_count,
+        (SELECT COUNT(*) FROM controller_jobs j
+          WHERE j.engagement_id IN (SELECT owned.id FROM engagements owned WHERE owned.session_id=s.id)
+            AND j.status IN ('queued','running','cancelling')) AS running_count
+      FROM investigation_sessions s
+      LEFT JOIN investigation_projects p ON p.id=s.project_id
+      WHERE s.id=?
+    `).get(id);
     return row ? decodeSession(row) : null;
   }
 
   getActive() {
-    const row = this.db.prepare(`SELECT * FROM investigation_sessions WHERE state='active' LIMIT 1`).get();
+    const row = this.db.prepare(`
+      SELECT s.*, p.name AS project_name,
+        (SELECT COUNT(*) FROM engagements e WHERE e.session_id=s.id) AS engagement_count,
+        (SELECT COUNT(*) FROM controller_jobs j
+          WHERE j.engagement_id IN (SELECT owned.id FROM engagements owned WHERE owned.session_id=s.id)
+            AND j.status IN ('queued','running','cancelling')) AS running_count
+      FROM investigation_sessions s
+      LEFT JOIN investigation_projects p ON p.id=s.project_id
+      WHERE s.state='active' LIMIT 1
+    `).get();
     return row ? decodeSession(row) : null;
   }
 
