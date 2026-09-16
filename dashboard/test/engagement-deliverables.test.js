@@ -54,7 +54,17 @@ test('generic engagement deliverables order reports and publish HTML, PDF, and m
   assert.equal(fs.existsSync(result.manifestPath), true);
   const html = fs.readFileSync(result.htmlPath, 'utf8');
   assert.match(html, /Fixture target/);
+  assert.match(html, /Red Team Report/);
+  assert.match(html, /Table of Contents/);
   assert.match(html, /Executive Summary/);
+  assert.match(html, /General Information/);
+  assert.match(html, /Vulnerabilities Summary/);
+  assert.match(html, /Technical Details/);
+  assert.match(html, /Security Risk Matrix/);
+  assert.match(html, /Vulnerability Remediation SLA/);
+  assert.match(html, /Learning References/);
+  assert.match(html, /severity-badge risk-high/);
+  assert.match(html, /GLaDOS Ops/);
   assert.match(html, /file:\/\//);
   assert.match(html, /<h1>CWE-639: Finding<\/h1>/);
   assert.match(html, /<h2>Summary<\/h2>/);
@@ -62,6 +72,8 @@ test('generic engagement deliverables order reports and publish HTML, PDF, and m
   assert.doesNotMatch(html, /#CWE-639: Finding#/);
   assert.doesNotMatch(html, /<script>bad\(\)<\/script>/);
   assert.match(html, /&lt;script&gt;bad\(\)&lt;\/script&gt;/);
+  assert.doesNotMatch(html, /Ford/);
+  assert.equal(result.manifest.report_style, 'glados-webapp-red-team-v1');
   assert.equal(result.manifest.files['ENGAGEMENT-REPORT.pdf'].sha256.length, 64);
 });
 

@@ -240,6 +240,33 @@ Never estimate missing cost or tokens. If unavailable, state “Unavailable from
 the runtime meter” and explain why. The currently executing reporting turn is
 not included until it returns, so the cutoff must always be explicit.
 
+## Published Web Application Report Standard
+
+The final `ENGAGEMENT-REPORT.html` and `ENGAGEMENT-REPORT.pdf` are rendered by
+`dashboard/scripts/generate-engagement-deliverables.js`. Do not hand-style or
+replace these publication artifacts. The renderer owns the standard visual
+system and maps the canonical report tree into this order:
+
+1. branded Red Team cover with target, engagement ID, and issue date;
+2. table of contents;
+3. executive summary;
+4. general information with scope, test period, engagement controls, and a
+   severity-colored vulnerability summary;
+5. technical details ordered Critical, High, Medium, then Low, with a CVSS
+   score badge, exact evidence, result, and remediation for each finding;
+6. supporting technical writeup, timeline, and error record;
+7. security risk matrix, policy-neutral remediation SLA handoff, and retest
+   expectations;
+8. finding-specific CWE links and general web-security learning references.
+
+The publication uses GLaDOS branding, US Letter pages, repeated report
+headers/footers, navy section rules, compact evidence typography, embedded
+screenshots, and the common Critical/High/Medium/Low color system. Organization
+logos, internal addresses, proprietary policy URLs, and binding remediation
+deadlines must be supplied through an approved future branding/policy profile;
+they must not be copied into the default renderer or improvised by a report
+agent.
+
 ## Report Validation Contract
 
 The report validator must:
@@ -262,4 +289,4 @@ The report validator must:
    revalidate the final draft or create a writer/validator loop unless the
    operator explicitly requests another review.
 
-Template maintained by GLaDOS Red Team. Last updated: 2026-07-15.
+Template maintained by GLaDOS Red Team. Last updated: 2026-09-16.

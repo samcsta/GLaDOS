@@ -72,6 +72,11 @@ summary, and full technical writeup.
 12. Scan the entire report tree for secrets and unrelated engagement content.
     On `report_pass: final`, publish the consolidated HTML and PDF by running
     `node "${GLADOS_REPO_ROOT}/dashboard/scripts/generate-engagement-deliverables.js" <engagement-id>`.
+    The generator is the authoritative GLaDOS web-application report standard:
+    branded cover, contents, executive summary, general information,
+    severity-colored finding summary, evidence-driven technical details,
+    supporting records, risk matrix, remediation handoff, and learning
+    references. Do not hand-style or replace the generated HTML/PDF.
     Treat a missing or invalid `ENGAGEMENT-REPORT.pdf` as a reporting failure;
     do not mark the final report task complete until the PDF begins with `%PDF-`
     and `DELIVERABLES-MANIFEST.json` includes it. Return only the report root,
