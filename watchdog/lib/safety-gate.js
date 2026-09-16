@@ -60,7 +60,7 @@ function isLoopback(value) {
   return LOOPBACK_HOSTS.has(host) || host.endsWith('.local');
 }
 
-function extractTargets(value) {
+function extractTargets(value, { includeLoopback = true } = {}) {
   const text = typeof value === 'string' ? value : JSON.stringify(value || {});
   const found = new Set();
   const urlPattern = /https?:\/\/[^\s'"`<>]+/gi;
@@ -68,19 +68,26 @@ function extractTargets(value) {
   for (const match of text.matchAll(urlPattern)) {
     const cleaned = match[0].replace(/[),.;]+$/, '');
     urlSpans.push([match.index, match.index + match[0].length]);
-    if (!isLoopback(cleaned)) found.add(cleaned);
+    if (includeLoopback || !isLoopback(cleaned)) found.add(cleaned);
   }
   const bareTargetText = [...text].map((char, index) => (
     urlSpans.some(([start, end]) => index >= start && index < end) ? ' ' : char
   )).join('');
   for (const match of bareTargetText.matchAll(/\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b/gi)) {
     const host = match[0].toLowerCase();
-    if (!isLoopback(host)) found.add(`https://${host}`);
+    if (includeLoopback || !isLoopback(host)) found.add(`https://${host}`);
   }
   for (const match of bareTargetText.matchAll(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)) {
-    if (!isLoopback(match[0])) found.add(`https://${match[0]}`);
+    if (includeLoopback || !isLoopback(match[0])) found.add(`https://${match[0]}`);
   }
   return [...found];
+}
+
+function shellTargetText(command) {
+  return String(command || '').replace(
+    /(?:^|\s)(?:-x|--proxy)(?:=|\s+)(?:"[^"]*"|'[^']*'|\S+)/gi,
+    ' '
+  );
 }
 
 function shellCommandName(command) {
@@ -119,7 +126,9 @@ function classifyToolUse(toolName, input = {}) {
     // document.cookie as hostnames.
     targets: browserNavigateToUrl
       ? extractTargets(input.url)
-      : ((webFetch || networkShell) ? extractTargets(input) : []),
+      : (networkShell
+          ? extractTargets(shellTargetText(command))
+          : (webFetch ? extractTargets(input) : [])),
   };
 }
 
@@ -145,12 +154,14 @@ function hostMatches(host, rule) {
   return host === clean || host.endsWith(`.${clean}`);
 }
 
-function activeScopes() {
-  if (!fs.existsSync(BLACKBOARD_DB)) return [];
+function activeScopes({
+  dbPath = BLACKBOARD_DB,
+  sessionId = process.env.GLADOS_SESSION_ID || 'legacy',
+} = {}) {
+  if (!fs.existsSync(dbPath)) return [];
   let db;
   try {
-    db = new Database(BLACKBOARD_DB, { readonly: true, fileMustExist: true });
-    const sessionId = process.env.GLADOS_SESSION_ID || 'legacy';
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
     return db.prepare("SELECT id, scope FROM engagements WHERE status = 'active' AND session_id=? ORDER BY started_at DESC").all(sessionId)
       .flatMap(row => {
         let scope = row.scope;
@@ -161,7 +172,7 @@ function activeScopes() {
   finally { try { db?.close(); } catch {} }
 }
 
-function targetAllowed(agentId, target, turnTargets = []) {
+function targetAllowed(agentId, target, turnTargets = [], options = {}) {
   const host = normalizeHost(target);
   if (!host) return { allowed: false, reason: `could not determine target host from ${target}` };
   if (PASSIVE_HOSTS.some(rule => hostMatches(host, rule)) && PHASE1_AGENTS.has(agentId)) {
@@ -179,7 +190,7 @@ function targetAllowed(agentId, target, turnTargets = []) {
     return { allowed: true, reason: `operator prompt explicitly named ${host}` };
   }
 
-  const scope = activeScopes();
+  const scope = activeScopes(options);
   const matched = scope.find(entry => {
     const item = typeof entry.item === 'string'
       ? entry.item
@@ -215,7 +226,15 @@ function hasRequiredHttpAttribution(agentId, classification) {
   return { allowed: true };
 }
 
-function evaluateToolUse({ agentId, toolName, input = {}, turnTargets = [] }) {
+function evaluateToolUse({
+  agentId,
+  toolName,
+  input = {},
+  turnTargets = [],
+  engagementId,
+  sessionId = process.env.GLADOS_SESSION_ID || 'legacy',
+  dbPath = BLACKBOARD_DB,
+}) {
   const halt = agentStatus(agentId);
   if (halt.haltActive) {
     return { allowed: false, interrupt: true, reason: `${agentId} is halted by ${halt.marker?.initiator || 'operator'}: ${halt.marker?.reason || 'halt active'}` };
@@ -230,7 +249,7 @@ function evaluateToolUse({ agentId, toolName, input = {}, turnTargets = [] }) {
 
   if ((toolName === 'Task' || toolName === 'Agent')) {
     const targetAgent = input.subagent_type || input.subagentType || input.agent || input.agentId || input.agent_id;
-    const plan = planCheckDispatch(targetAgent);
+    const plan = planCheckDispatch(targetAgent, engagementId, { sessionId, dbPath });
     if (!plan.allowed) return { allowed: false, reason: `subagent plan gate denied: ${plan.reason}`, plan };
   }
 
@@ -243,7 +262,7 @@ function evaluateToolUse({ agentId, toolName, input = {}, turnTargets = [] }) {
     return { allowed: false, reason: 'GLaDOS is the coordinator and must dispatch a named specialist for target-capable work' };
   }
 
-  const plan = planCheckDispatch(agentId);
+  const plan = planCheckDispatch(agentId, engagementId, { sessionId, dbPath });
   if (!plan.allowed) return { allowed: false, reason: `plan gate denied ${agentId}: ${plan.reason}`, plan };
   if (PHASE1_AGENTS.has(agentId) && use.mutating && !use.browser) {
     return { allowed: false, reason: `${agentId} is phase-1 and may not perform mutating or active-test operations` };
@@ -254,7 +273,7 @@ function evaluateToolUse({ agentId, toolName, input = {}, turnTargets = [] }) {
 
   const targets = use.targets.length ? use.targets : (use.browser ? turnTargets : []);
   for (const target of targets) {
-    const scope = targetAllowed(agentId, target, turnTargets);
+    const scope = targetAllowed(agentId, target, turnTargets, { sessionId, dbPath });
     if (!scope.allowed) return { allowed: false, reason: `scope gate denied: ${scope.reason}` };
     const health = targetHealthDecision(target);
     if (!health.allowed) return { allowed: false, reason: `health gate denied: ${health.reason}` };

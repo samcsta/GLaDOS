@@ -917,6 +917,10 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
   try {
     const sdkCwd = resolveSdkWorkingDirectory({ env: process.env });
     const turnEnv = { ...process.env, GLADOS_SESSION_ID: sessionId };
+    // Route every Agent SDK request through the loopback relay. Besides preserving
+    // LiteLLM deployment receipts, the relay applies narrowly scoped provider
+    // compatibility fixes (for example, DeepSeek does not accept Claude effort).
+    turnEnv.ANTHROPIC_BASE_URL = await liteLlmResponseRelay.ensureStarted();
     if (securityReviewArtifactRoot) {
       let run = null;
       try { run = JSON.parse(fs.readFileSync(path.join(securityReviewArtifactRoot, 'run.json'), 'utf8')); } catch {}
@@ -926,7 +930,6 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
       turnEnv.GLADOS_SECURITY_REVIEW_REPOSITORY = run?.repositoryPath || '';
       turnEnv.GLADOS_SECURITY_REVIEW_SOURCE_TYPE = run?.sourceType || '';
       turnEnv.GLADOS_SECURITY_REVIEW_GIT_HISTORY = run?.gitHistoryAvailable ? '1' : '0';
-      turnEnv.ANTHROPIC_BASE_URL = await liteLlmResponseRelay.ensureStarted();
     }
     const securityReviewMaxTurns = securityReviewArtifactRoot
       ? (loadPolicy().harness?.securityReviewCoordinatorMaxTurns ?? 1000)

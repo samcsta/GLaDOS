@@ -42,13 +42,15 @@ const META_AGENTS = new Set([
   'source-review-validator',
 ]);
 
-let dbHandle = null;
-function getDb() {
-  if (dbHandle) return dbHandle;
-  if (!fs.existsSync(BLACKBOARD_DB)) return null;
+const dbHandles = new Map();
+function getDb(dbPath = BLACKBOARD_DB) {
+  const resolved = path.resolve(dbPath);
+  if (dbHandles.has(resolved)) return dbHandles.get(resolved);
+  if (!fs.existsSync(resolved)) return null;
   try {
-    dbHandle = new Database(BLACKBOARD_DB, { readonly: true, fileMustExist: true });
-    return dbHandle;
+    const handle = new Database(resolved, { readonly: true, fileMustExist: true });
+    dbHandles.set(resolved, handle);
+    return handle;
   } catch {
     return null;
   }
@@ -57,9 +59,8 @@ function getDb() {
 // Look up the "current" engagement when the caller didn't pass one.
 // Preference: most recently started active engagement. Status values are
 // application-defined ('active' is the default per the schema).
-function currentEngagementId(db) {
+function currentEngagementId(db, sessionId = process.env.GLADOS_SESSION_ID || 'legacy') {
   try {
-    const sessionId = process.env.GLADOS_SESSION_ID || 'legacy';
     const row = db.prepare(
       "SELECT id FROM engagements WHERE status = 'active' AND session_id=? ORDER BY started_at DESC LIMIT 1"
     ).get(sessionId);
@@ -136,7 +137,7 @@ function agentsApprovedByPlan(planJson) {
 
 // The public tool. Returns:
 //   { allowed, reason, phase, engagement_id?, plan_id?, approved_agents? }
-function planCheckDispatch(agentId, engagementId) {
+function planCheckDispatch(agentId, engagementId, options = {}) {
   if (!agentId || typeof agentId !== 'string') {
     return { allowed: false, reason: 'missing agent_id', phase: 'unknown' };
   }
@@ -154,7 +155,7 @@ function planCheckDispatch(agentId, engagementId) {
   }
 
   // Exploitation class — requires approved plan.
-  const db = getDb();
+  const db = getDb(options.dbPath || BLACKBOARD_DB);
   if (!db) {
     return {
       allowed: false,
@@ -163,7 +164,10 @@ function planCheckDispatch(agentId, engagementId) {
     };
   }
 
-  const engId = engagementId || currentEngagementId(db);
+  const engId = engagementId || currentEngagementId(
+    db,
+    options.sessionId || process.env.GLADOS_SESSION_ID || 'legacy'
+  );
   if (!engId) {
     return {
       allowed: false,

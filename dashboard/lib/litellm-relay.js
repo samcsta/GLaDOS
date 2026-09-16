@@ -24,6 +24,37 @@ function finiteCost(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function sanitizeUnsupportedParams(requestBody) {
+  if (!requestBody || typeof requestBody !== 'object' || Array.isArray(requestBody)) {
+    return { body: requestBody, removed: [] };
+  }
+  const model = String(requestBody.model || '').trim();
+  if (!/^deepseek(?:-|$)/i.test(model)) return { body: requestBody, removed: [] };
+
+  const body = { ...requestBody };
+  const removed = [];
+  if (Object.prototype.hasOwnProperty.call(body, 'reasoning_effort')) {
+    delete body.reasoning_effort;
+    removed.push('reasoning_effort');
+  }
+  // Claude Code enables adaptive thinking by default for models it believes
+  // support it. LiteLLM maps that Anthropic control to OpenAI's
+  // reasoning_effort, which the configured DeepSeek deployment rejects.
+  if (Object.prototype.hasOwnProperty.call(body, 'thinking')) {
+    delete body.thinking;
+    removed.push('thinking');
+  }
+  if (body.output_config && typeof body.output_config === 'object' && !Array.isArray(body.output_config)
+      && Object.prototype.hasOwnProperty.call(body.output_config, 'effort')) {
+    const outputConfig = { ...body.output_config };
+    delete outputConfig.effort;
+    if (Object.keys(outputConfig).length) body.output_config = outputConfig;
+    else delete body.output_config;
+    removed.push('output_config.effort');
+  }
+  return { body, removed };
+}
+
 class LiteLlmResponseRelay {
   constructor({ env = process.env, fetchImpl = global.fetch, tokenLoader = loadLlmAuthToken, maxReceipts = 5000, dbPath = BLACKBOARD_DB } = {}) {
     this.env = env;
@@ -170,11 +201,19 @@ class LiteLlmResponseRelay {
       let requestBody = null;
       try { requestBody = body.length ? JSON.parse(body.toString('utf8')) : null; } catch {}
 
+      const compatibility = sanitizeUnsupportedParams(requestBody);
+      const upstreamBody = compatibility.removed.length
+        ? Buffer.from(JSON.stringify(compatibility.body))
+        : body;
+      if (compatibility.removed.length) {
+        console.log(`[litellm-relay] removed unsupported DeepSeek parameters: ${compatibility.removed.join(', ')}`);
+      }
+
       const headers = { ...req.headers };
       delete headers.host;
       delete headers['content-length'];
       const init = { method: req.method, headers };
-      if (!['GET', 'HEAD'].includes(req.method) && body.length) init.body = body;
+      if (!['GET', 'HEAD'].includes(req.method) && upstreamBody.length) init.body = upstreamBody;
       const upstreamResponse = await this.fetchImpl(`${this.upstream}${req.url}`, init);
       const requestId = crypto.randomUUID();
       const gatewayCallId = upstreamResponse.headers.get('x-litellm-call-id')
@@ -246,4 +285,4 @@ class LiteLlmResponseRelay {
   }
 }
 
-module.exports = { LiteLlmResponseRelay, finiteCost, upstreamBaseUrl };
+module.exports = { LiteLlmResponseRelay, finiteCost, sanitizeUnsupportedParams, upstreamBaseUrl };

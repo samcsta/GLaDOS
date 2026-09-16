@@ -422,7 +422,15 @@ function decideToolUse({ agentId, toolName, input = {}, policy = loadPolicy(), w
   const bashContractReason = bashToolContractViolation(toolName, input);
   if (bashContractReason) return { allowed: false, reason: bashContractReason };
 
-  return evaluateToolUse({ agentId, toolName, input, turnTargets });
+  return evaluateToolUse({
+    agentId,
+    toolName,
+    input,
+    turnTargets,
+    engagementId: env.GLADOS_SECURITY_REVIEW_ENGAGEMENT_ID,
+    sessionId: env.GLADOS_SESSION_ID || 'legacy',
+    dbPath: env.BLACKBOARD_DB || BLACKBOARD_DB,
+  });
 }
 
 function investigationDispatchContractViolation(targetAgent, input = {}, env = process.env) {
@@ -1484,7 +1492,7 @@ function buildAgentSdkOptions(agentId, options = {}) {
       : (policy.harness?.specialistMaxTurns ?? 100)),
   };
   const effort = normalizeEffort(options.effort, null);
-  if (effort) sdkOptions.effort = effort;
+  if (effort && modelSupportsReasoningEffort(model)) sdkOptions.effort = effort;
   if (options.resumeSessionId) sdkOptions.resume = options.resumeSessionId;
   if (reviewReservations) sdkOptions.gladosReviewReservations = reviewReservations;
   if ((options.platform || process.platform) === 'win32') {
@@ -1493,6 +1501,11 @@ function buildAgentSdkOptions(agentId, options = {}) {
     });
   }
   return sdkOptions;
+}
+
+function modelSupportsReasoningEffort(model) {
+  const alias = bareModelAlias(model, { fallback: '' });
+  return !/^deepseek(?:-|$)/i.test(alias);
 }
 
 function contentText(block) {
@@ -2263,6 +2276,7 @@ module.exports = {
   readAgentPrompt,
   buildAgentDefinitions,
   buildAgentSdkOptions,
+  modelSupportsReasoningEffort,
   mapSdkMessageToEvents,
   isMissingSdkConversationError,
   shouldPersistSdkSession,

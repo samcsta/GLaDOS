@@ -422,7 +422,12 @@ test('GLaDOS process mounts fleet tools but enforces caller-specific permissions
 
 test('chat turns pass reasoning effort and force SDK automatic compaction', () => {
   const env = baseTestEnv();
-  const opts = buildAgentSdkOptions('glados', { env, effort: 'xhigh', autoCompact: true });
+  const opts = buildAgentSdkOptions('glados', {
+    env,
+    model: 'gpt-5.6-sol',
+    effort: 'xhigh',
+    autoCompact: true,
+  });
   assert.equal(opts.effort, 'xhigh');
   assert.equal(opts.settings.autoCompactEnabled, true);
 
@@ -439,6 +444,59 @@ test('chat turns pass reasoning effort and force SDK automatic compaction', () =
   assert.equal(boundary.kind, 'context-compacted');
   assert.equal(boundary.preTokens, 190000);
   assert.equal(boundary.postTokens, 41000);
+});
+
+test('DeepSeek chat turns omit unsupported reasoning effort', () => {
+  const env = baseTestEnv();
+  const opts = buildAgentSdkOptions('glados', {
+    env,
+    model: 'deepseek-v4-flash-0731',
+    effort: 'xhigh',
+    autoCompact: true,
+  });
+  assert.equal(opts.model, 'deepseek-v4-flash-0731');
+  assert.equal(Object.hasOwn(opts, 'effort'), false);
+  assert.equal(opts.settings.autoCompactEnabled, true);
+});
+
+test('exploitation tool gate resolves the active engagement from the turn session', () => {
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-plan-session-'));
+  const dbPath = path.join(runtimeRoot, 'blackboard.db');
+  const db = new (require('better-sqlite3'))(dbPath);
+  db.exec(`
+    CREATE TABLE engagements (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL, status TEXT NOT NULL,
+      started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, scope TEXT
+    );
+    CREATE TABLE plans (
+      id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, state TEXT NOT NULL,
+      plan_json TEXT NOT NULL, approved_at TEXT
+    );
+  `);
+  db.prepare("INSERT INTO engagements (id, session_id, status, scope) VALUES (?, ?, 'active', ?)")
+    .run('eng-session-a', 'session-a', JSON.stringify(['http://127.0.0.1:31766']));
+  db.prepare("INSERT INTO plans (id, engagement_id, state, plan_json, approved_at) VALUES (?, ?, 'approved', ?, CURRENT_TIMESTAMP)")
+    .run('plan-session-a', 'eng-session-a', JSON.stringify({ agent_chain: ['webapp-vuln'] }));
+  db.close();
+
+  const decision = decideToolUse({
+    agentId: 'webapp-vuln',
+    toolName: 'Bash',
+    input: {
+      command: '/usr/bin/curl -x http://127.0.0.1:18080 -k -H "X-GLaDOS-Agent: webapp-vuln" http://127.0.0.1:31766',
+    },
+    policy: loadPolicy(),
+    env: baseTestEnv({
+      GLADOS_SESSION_ID: 'session-a',
+      GLADOS_RUNTIME_DIR: runtimeRoot,
+      BLACKBOARD_DB: dbPath,
+    }),
+    turnTargets: ['http://127.0.0.1:31766'],
+  });
+
+  assert.equal(decision.allowed, true);
+  assert.equal(decision.plan.engagement_id, 'eng-session-a');
+  assert.equal(decision.plan.plan_id, 'plan-session-a');
 });
 
 test('chat turns send screenshots as native SDK image blocks', async () => {
@@ -721,12 +779,18 @@ test('Bash contract denies root-wide find while allowing bounded absolute search
 test('scope parsing ignores URL paths and browser JavaScript while preserving the turn target', () => {
   const target = 'http://136.116.95.87:56453/robots.txt';
   assert.deepEqual(extractTargets(target), [target]);
+  assert.deepEqual(extractTargets('http://127.0.0.1:31766/'), ['http://127.0.0.1:31766/']);
 
   const headersOnlyGet = classifyToolUse('Bash', {
     command: `/usr/bin/curl -x http://127.0.0.1:18080 -D - -H "X-GLaDOS-Agent: webapp-recon" ${target}`,
   });
   assert.equal(headersOnlyGet.mutating, false, 'curl -D dumps headers and is not curl -d request data');
   assert.deepEqual(headersOnlyGet.targets, [target]);
+
+  const loopbackGet = classifyToolUse('Bash', {
+    command: '/usr/bin/curl -x http://127.0.0.1:18080 -H "X-GLaDOS-Agent: webapp-vuln" http://127.0.0.1:31766',
+  });
+  assert.deepEqual(loopbackGet.targets, ['http://127.0.0.1:31766']);
 
   const evaluate = classifyToolUse('mcp__browser-webapp-recon__browser_evaluate', {
     function: '() => ({ html: document.documentElement.outerHTML, cookies: document.cookie })',
