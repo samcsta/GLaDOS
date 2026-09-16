@@ -21,7 +21,7 @@ function fixture() {
   fs.mkdirSync(path.join(root, engagementId, 'evidence'), { recursive: true });
   fs.writeFileSync(path.join(root, engagementId, 'evidence', 'proof.png'), 'image');
   fs.writeFileSync(path.join(reportRoot, 'RT', 'ExecSummary.md'), '# Executive Summary\nSafe summary.\n');
-  fs.writeFileSync(path.join(reportRoot, 'RT', 'Writeup.md'), '# Writeup\n<script>bad()</script>\n');
+  fs.writeFileSync(path.join(reportRoot, 'RT', 'Writeup.md'), '# Writeup\n<script>bad()</script>\n## 6. Findings Index\nSummary.\n\n| Severity | Finding |\n| --- | --- |\n| High | Example |\n');
   fs.writeFileSync(path.join(reportRoot, 'RT', 'Timeline.md'), '# Timeline\nDone.\n');
   fs.writeFileSync(path.join(reportRoot, 'CWEs', 'High', 'CWE-639.md'), '#CWE-639: Finding#\n#Summary#\n[Action 1]\nSafe.\n#Evidence 1: Proof#\n![proof](../../../evidence/proof.png)\n[Final Result]\nDone.\n');
   const dbPath = path.join(root, 'blackboard.db');
@@ -66,6 +66,8 @@ test('generic engagement deliverables order reports and publish HTML, PDF, and m
   assert.match(html, /Learning References/);
   assert.match(html, /severity-badge risk-high/);
   assert.match(html, /finding-intro/);
+  assert.match(html, /class="findings-index-heading"/);
+  assert.match(html, /class="findings-index-table"/);
   assert.match(html, /Security Assessment/);
   assert.match(html, /Security Engagement Report/);
   assert.doesNotMatch(html, /GLaDOS Ops/);

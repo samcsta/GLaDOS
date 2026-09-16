@@ -127,7 +127,10 @@ function renderMarkdown(markdown) {
   renderer.html = html => `<pre class="raw-html">${escapeHtml(html)}</pre>`;
   const marked = new Marked({ renderer, gfm: true, breaks: false });
   const normalized = normalizeDradisHeadings(markdown);
-  return marked.parse(redactReportText(stripRedundantWorkflowLabels(normalized)));
+  let html = marked.parse(redactReportText(stripRedundantWorkflowLabels(normalized)));
+  html = html.replace(/<h2>([^<]*\bFindings Index\b[^<]*)<\/h2>/i, '<h2 class="findings-index-heading">$1</h2>');
+  html = html.replace(/(<h2 class="findings-index-heading">[\s\S]*?<\/h2>[\s\S]*?)(<table>)/i, '$1<table class="findings-index-table">');
+  return html;
 }
 
 function engagementMetadata(engagementId, dbPath = BLACKBOARD_DB) {
@@ -362,6 +365,17 @@ a { color:#175da6; }
 .reference-list li { margin:.12in 0; }
 .supporting-page table { font-size:6.7pt; }
 .supporting-page th,.supporting-page td { padding:.035in .045in; }
+.findings-index-heading { page-break-before:always; }
+.findings-index-table { table-layout:fixed; font-size:7pt !important; }
+.findings-index-table th:nth-child(1) { width:.65in; }
+.findings-index-table th:nth-child(2) { width:1.05in; }
+.findings-index-table th:nth-child(3) { width:1.55in; }
+.findings-index-table th:nth-child(4) { width:2.25in; }
+.findings-index-table th:nth-child(5) { width:.5in; }
+.findings-index-table th:nth-child(6) { width:1.18in; }
+.findings-index-table td:first-child { font-weight:700; white-space:nowrap; }
+.findings-index-table th:nth-child(5),.findings-index-table td:nth-child(5) { text-align:center; }
+.findings-index-table a { font-weight:700; }
 @media print { a { color:inherit; text-decoration:none; } }
 </style></head><body>
 <section class="cover"><div class="cover-copy"><h1>Red Team Report</h1><div class="subtitle">${escapeHtml(target)}</div><div class="engagement-id">${escapeHtml(engagementId)}</div><div class="date">${escapeHtml(completedDate)}</div></div><div class="cover-wave"></div><div class="cover-label">Security Assessment</div></section>

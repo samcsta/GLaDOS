@@ -223,6 +223,16 @@ log in the executive summary.
 9. Assessment metrics: elapsed time, token usage, and metered cost.
 10. Evidence index and final conclusion.
 
+Start the findings index on a fresh publication page and format it as a compact
+Markdown table with these columns:
+Severity, ID / CWE, Finding, Validation, CVSS 3.1, and Details. Use a descriptive
+link such as `Detailed finding report` instead of printing a raw filesystem
+path. Follow the table with brief Supporting Observations, Tested-Negative
+Coverage, and Severity Coverage subsections when applicable. Keep enabling,
+informational, and negative results out of the primary vulnerability rows, and
+explain any deliberate difference between engagement severity and the numeric
+CVSS score.
+
 ### Required Assessment Metrics
 
 Immediately before writing metrics, call

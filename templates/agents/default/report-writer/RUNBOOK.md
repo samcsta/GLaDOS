@@ -69,6 +69,11 @@ summary, and full technical writeup.
 11. Write `RT/ExecSummary.md` for leadership and `RT/Writeup.md` as the full
     technical assessment, including chains, plan history, coverage, elapsed
     time, metered spend/tokens, evidence, limitations, and remediation themes.
+    Start the findings index on a fresh publication page and format it as a
+    compact table with Severity, ID / CWE, Finding, Validation, CVSS 3.1, and
+    a named Details link. Never print raw report paths as index prose. Follow
+    the table with concise supporting,
+    tested-negative, and severity-coverage notes when those categories exist.
 12. Scan the entire report tree for secrets and unrelated engagement content.
     On `report_pass: final`, publish the consolidated HTML and PDF by running
     `node "${GLADOS_REPO_ROOT}/dashboard/scripts/generate-engagement-deliverables.js" <engagement-id>`.
