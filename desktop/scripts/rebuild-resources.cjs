@@ -2,6 +2,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { rebuild } = require('@electron/rebuild');
+const { DEFAULT_UPDATER_CACHE_DIR, writeUpdateConfigFile } = require('../lib/update-config.cjs');
+const { DEFAULT_UPDATE_ORIGIN } = require('../lib/update-channel.cjs');
 
 const ARCH_NAMES = ['ia32', 'x64', 'armv7l', 'arm64', 'universal'];
 
@@ -16,6 +18,16 @@ function appResourcesDir(context) {
     return path.join(context.appOutDir, appName, 'Contents', 'Resources');
   }
   return path.join(context.appOutDir, 'resources');
+}
+
+function ensurePackagedUpdateConfig(resources) {
+  const configPath = path.join(resources, 'app-update.yml');
+  if (fs.existsSync(configPath)) return;
+  writeUpdateConfigFile(configPath, {
+    feedUrl: DEFAULT_UPDATE_ORIGIN,
+    channel: process.env.GLADOS_UPDATE_CHANNEL || 'latest',
+    updaterCacheDirName: DEFAULT_UPDATER_CACHE_DIR,
+  });
 }
 
 function nativeModulesFor(dir) {
@@ -182,6 +194,7 @@ exports.default = async function rebuildCopiedResources(context) {
     process.env.npm_config_python = process.env.npm_config_python || '/usr/bin/python3';
   }
   const resources = appResourcesDir(context);
+  ensurePackagedUpdateConfig(resources);
   const arch = targetArch(context);
   pruneArchitecturePackages(resources, context.electronPlatformName, arch);
   const candidates = [
@@ -238,3 +251,4 @@ exports.nativeModuleKey = nativeModuleKey;
 exports.normalizeNativeModule = normalizeNativeModule;
 exports.pruneArchitecturePackages = pruneArchitecturePackages;
 exports.pruneNodePtyWindowsArchitectures = pruneNodePtyWindowsArchitectures;
+exports.ensurePackagedUpdateConfig = ensurePackagedUpdateConfig;

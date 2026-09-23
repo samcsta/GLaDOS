@@ -5,6 +5,7 @@ const { fork, spawnSync } = require('node:child_process');
 const { app, BrowserWindow, dialog, ipcMain, net, session, shell } = require('electron');
 const { AppImageUpdater, DebUpdater, MacUpdater } = require('electron-updater');
 const { WINDOWS_SOURCE_URL, binaryUpdatesSupported, resolveUpdateAccess } = require('./lib/update-channel.cjs');
+const { ensureFallbackUpdateConfig } = require('./lib/update-config.cjs');
 const { SetupAssistant } = require('./lib/setup-assistant.cjs');
 const { systemNetworkEnvironment } = require('./lib/network-environment.cjs');
 const { loadCompletedSecurityReview, resolveCompletedSecurityReview, safeEngagementId } = require('./lib/security-review-report.cjs');
@@ -353,6 +354,13 @@ function updaterForPlatform(access) {
   else if (process.platform === 'linux' && process.env.APPIMAGE) next = new AppImageUpdater(options);
   else if (process.platform === 'linux') next = new DebUpdater(options);
   else throw new Error(`private updater is not configured for ${process.platform}/${process.arch}`);
+  const fallbackConfigPath = ensureFallbackUpdateConfig({
+    bundledConfigPath: path.join(process.resourcesPath, 'app-update.yml'),
+    userDataDir: app.getPath('userData'),
+    feedUrl: access.feedUrl,
+    channel: options.channel,
+  });
+  if (fallbackConfigPath) next.updateConfigPath = fallbackConfigPath;
   next.autoDownload = false;
   next.autoInstallOnAppQuit = false;
   next.logger = null;

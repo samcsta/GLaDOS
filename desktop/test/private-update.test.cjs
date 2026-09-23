@@ -9,8 +9,9 @@ const {
 } = require('../lib/update-channel.cjs');
 const {
   captureRuntimePayload, installRuntimePayload, nativeModuleKey,
-  pruneNodePtyWindowsArchitectures, targetArch,
+  ensurePackagedUpdateConfig, pruneNodePtyWindowsArchitectures, targetArch,
 } = require('../scripts/rebuild-resources.cjs');
+const { ensureFallbackUpdateConfig } = require('../lib/update-config.cjs');
 
 test('private update configuration requires HTTPS and strips a trailing slash', () => {
   assert.equal(validateFeedUrl('https://updates.example.test/glados/'), 'https://updates.example.test/glados');
@@ -49,6 +50,49 @@ test('update feed and optional bearer authentication remain operator-overridable
   assert.deepEqual(access.requestHeaders, { Authorization: 'Bearer fixture-update-token-12345' });
 });
 
+test('missing packaged updater metadata is replaced with a private fallback config', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-update-config-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const userDataDir = path.join(root, 'user-data');
+  const fallbackPath = ensureFallbackUpdateConfig({
+    bundledConfigPath: path.join(root, 'missing', 'app-update.yml'),
+    userDataDir,
+    feedUrl: 'https://updates.example.test/glados/macos/arm64',
+    channel: 'latest',
+  });
+  assert.equal(fallbackPath, path.join(userDataDir, 'app-update.yml'));
+  assert.equal(fs.readFileSync(fallbackPath, 'utf8'), [
+    'provider: generic',
+    'url: "https://updates.example.test/glados/macos/arm64"',
+    'channel: "latest"',
+    'updaterCacheDirName: "glados-updater"',
+    '',
+  ].join('\n'));
+  assert.equal(fs.statSync(fallbackPath).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(userDataDir).mode & 0o777, 0o700);
+});
+
+test('existing packaged updater metadata is preserved', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-update-config-existing-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const bundledConfigPath = path.join(root, 'Resources', 'app-update.yml');
+  fs.mkdirSync(path.dirname(bundledConfigPath), { recursive: true });
+  fs.writeFileSync(bundledConfigPath, 'provider: generic\n');
+  assert.equal(ensureFallbackUpdateConfig({
+    bundledConfigPath,
+    userDataDir: path.join(root, 'user-data'),
+    feedUrl: 'https://updates.example.test/glados/macos/arm64',
+  }), null);
+  assert.equal(fs.existsSync(path.join(root, 'user-data', 'app-update.yml')), false);
+});
+
+test('directory-packaged artifacts include updater metadata', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-pack-update-config-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  ensurePackagedUpdateConfig(root);
+  assert.match(fs.readFileSync(path.join(root, 'app-update.yml'), 'utf8'), /updaterCacheDirName: "glados-updater"/);
+});
+
 test('packaged update bridge exposes one guarded apply action and a notification banner', () => {
   const desktopDir = path.resolve(__dirname, '..');
   const main = fs.readFileSync(path.join(desktopDir, 'main.cjs'), 'utf8');
@@ -64,6 +108,8 @@ test('packaged update bridge exposes one guarded apply action and a notification
   assert.doesNotMatch(main, /ipcMain\.handle\('desktop:update:(?:download|install)'/);
   assert.match(main, /beforeDownload\.activeAgents/);
   assert.match(main, /beforeInstall\.activeAgents/);
+  assert.match(main, /ensureFallbackUpdateConfig/);
+  assert.match(main, /next\.updateConfigPath/);
   assert.match(preload, /applyUpdate\(\)/);
   assert.doesNotMatch(preload, /downloadUpdate\(|installUpdate\(/);
   assert.match(dashboard, /id="update-banner"/);
