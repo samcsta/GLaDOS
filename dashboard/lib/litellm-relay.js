@@ -29,28 +29,70 @@ function sanitizeUnsupportedParams(requestBody) {
     return { body: requestBody, removed: [] };
   }
   const model = String(requestBody.model || '').trim();
-  if (!/^deepseek(?:-|$)/i.test(model)) return { body: requestBody, removed: [] };
-
-  const body = { ...requestBody };
   const removed = [];
-  if (Object.prototype.hasOwnProperty.call(body, 'reasoning_effort')) {
-    delete body.reasoning_effort;
-    removed.push('reasoning_effort');
+  let body = requestBody;
+
+  // Anthropic rejects an assistant history entry when a thinking block has no
+  // text. This can be produced by an interrupted/resumed Agent SDK turn: the
+  // SDK records the content-block start, but the first thinking delta never
+  // arrives. Remove only those malformed blocks at the relay boundary so a
+  // valid resumed conversation (including tool-use and non-empty thinking)
+  // remains intact.
+  if (Array.isArray(requestBody.messages)) {
+    let messagesChanged = false;
+    const messages = [];
+    for (const [messageIndex, message] of requestBody.messages.entries()) {
+      if (!message || typeof message !== 'object' || !Array.isArray(message.content)) {
+        messages.push(message);
+        continue;
+      }
+      const content = message.content.filter((block, blockIndex) => {
+        const malformedThinking = block?.type === 'thinking'
+          && (typeof block.thinking !== 'string' || block.thinking.trim() === '');
+        if (!malformedThinking) return true;
+        messagesChanged = true;
+        removed.push(`messages[${messageIndex}].content[${blockIndex}].thinking`);
+        return false;
+      });
+      if (content.length === message.content.length) {
+        messages.push(message);
+      } else if (content.length > 0) {
+        messages.push({ ...message, content });
+      } else if (message.role !== 'assistant') {
+        // Keep the original shape for non-assistant messages. The malformed
+        // block is gone, but dropping a user message would alter prompt
+        // semantics more than necessary.
+        messages.push({ ...message, content });
+      } else {
+        // An assistant message containing only the malformed block is empty
+        // after repair and must not be sent as an empty Anthropic message.
+        messagesChanged = true;
+      }
+    }
+    if (messagesChanged) body = { ...body, messages };
   }
-  // Claude Code enables adaptive thinking by default for models it believes
-  // support it. LiteLLM maps that Anthropic control to OpenAI's
-  // reasoning_effort, which the configured DeepSeek deployment rejects.
-  if (Object.prototype.hasOwnProperty.call(body, 'thinking')) {
-    delete body.thinking;
-    removed.push('thinking');
-  }
-  if (body.output_config && typeof body.output_config === 'object' && !Array.isArray(body.output_config)
-      && Object.prototype.hasOwnProperty.call(body.output_config, 'effort')) {
-    const outputConfig = { ...body.output_config };
-    delete outputConfig.effort;
-    if (Object.keys(outputConfig).length) body.output_config = outputConfig;
-    else delete body.output_config;
-    removed.push('output_config.effort');
+
+  if (/^deepseek(?:-|$)/i.test(model)) {
+    if (body === requestBody) body = { ...requestBody };
+    if (Object.prototype.hasOwnProperty.call(body, 'reasoning_effort')) {
+      delete body.reasoning_effort;
+      removed.push('reasoning_effort');
+    }
+    // Claude Code enables adaptive thinking by default for models it believes
+    // support it. LiteLLM maps that Anthropic control to OpenAI's
+    // reasoning_effort, which the configured DeepSeek deployment rejects.
+    if (Object.prototype.hasOwnProperty.call(body, 'thinking')) {
+      delete body.thinking;
+      removed.push('thinking');
+    }
+    if (body.output_config && typeof body.output_config === 'object' && !Array.isArray(body.output_config)
+        && Object.prototype.hasOwnProperty.call(body.output_config, 'effort')) {
+      const outputConfig = { ...body.output_config };
+      delete outputConfig.effort;
+      if (Object.keys(outputConfig).length) body.output_config = outputConfig;
+      else delete body.output_config;
+      removed.push('output_config.effort');
+    }
   }
   return { body, removed };
 }
@@ -206,7 +248,7 @@ class LiteLlmResponseRelay {
         ? Buffer.from(JSON.stringify(compatibility.body))
         : body;
       if (compatibility.removed.length) {
-        console.log(`[litellm-relay] removed unsupported DeepSeek parameters: ${compatibility.removed.join(', ')}`);
+        console.log(`[litellm-relay] sanitized request fields: ${compatibility.removed.join(', ')}`);
       }
 
       const headers = { ...req.headers };

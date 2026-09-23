@@ -1,6 +1,6 @@
 # GLaDOS
 
-GLaDOS v4.5.8 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
+GLaDOS v4.5.9 is a local Electron application for supervised red-team assessment. The Claude Agent SDK runs the coordinator and named specialists against the LiteLLM Anthropic Messages endpoint. Blackboard, watchdog, GLaDOS Ops, and per-agent Playwright browser servers are attached as MCP servers.
 
 The application has no OpenClaw or Burp Suite runtime dependency. HTTP capture, replay, history, metrics, and per-agent attribution are provided by a supervised local mitmproxy process behind `/api/proxy/*`. Signed macOS packages include the pinned official Apple-silicon mitmproxy runtime; the Linux installer and Windows source-build prerequisite script provision the pinned command-line runtime.
 
@@ -201,6 +201,6 @@ npm run smoke:kali:docker --prefix desktop
 npm run smoke:fedora:docker --prefix desktop
 ```
 
-The release marker is `v4.5.8`. Build artifacts are written under
+The release marker is `v4.5.9`. Build artifacts are written under
 `artifacts/desktop/` and use the product name `GLaDOS`, so the bundle remains
 `GLaDOS.app`.

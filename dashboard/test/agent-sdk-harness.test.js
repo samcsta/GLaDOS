@@ -1297,8 +1297,10 @@ test('forces LiteLLM gateway auth and refuses OAuth fallback', () => {
     /Missing GLaDOS LiteLLM key/
   );
 
+  const normalEnv = { ...process.env };
+  delete normalEnv.CLAUDE_CODE_NO_MODEL_FALLBACK;
   const env = buildSdkEnv({
-    ...process.env,
+    ...normalEnv,
     ANTHROPIC_AUTH_TOKEN: 'litellm-test-token',
     ANTHROPIC_API_KEY: 'should-not-survive',
     CLAUDE_CODE_OAUTH_TOKEN: 'should-not-survive',
@@ -1306,8 +1308,16 @@ test('forces LiteLLM gateway auth and refuses OAuth fallback', () => {
   assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'litellm-test-token');
   assert.equal(env.ANTHROPIC_BASE_URL, 'https://llmapi.redteamstuff.com');
   assert.equal(env.CLAUDE_CODE_USE_GATEWAY, '1');
+  assert.equal('CLAUDE_CODE_NO_MODEL_FALLBACK' in env, false);
   assert.equal('ANTHROPIC_API_KEY' in env, false);
   assert.equal('CLAUDE_CODE_OAUTH_TOKEN' in env, false);
+
+  const reviewEnv = buildSdkEnv({
+    ...process.env,
+    ANTHROPIC_AUTH_TOKEN: 'litellm-test-token',
+    GLADOS_SECURITY_REVIEW: '1',
+  });
+  assert.equal(reviewEnv.CLAUDE_CODE_NO_MODEL_FALLBACK, '1');
 });
 
 test('denies disabled high-risk agents and blocked subagent dispatch', () => {

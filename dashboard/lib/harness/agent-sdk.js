@@ -1362,6 +1362,11 @@ function buildSdkEnv(env = process.env, policy = loadPolicy()) {
     ANTHROPIC_BASE_URL: env.ANTHROPIC_BASE_URL || policy.harness?.anthropicBaseUrl || 'https://llmapi.redteamstuff.com',
     ANTHROPIC_AUTH_TOKEN: token,
     CLAUDE_CODE_USE_GATEWAY: '1',
+    // Security reviews must be model-pure. Claude Code otherwise has an
+    // internal fallback path that can silently substitute another model after
+    // an upstream model/availability error, invalidating the review's model
+    // attestation. Keep the normal chat fallback behavior unchanged.
+    ...(env.GLADOS_SECURITY_REVIEW === '1' ? { CLAUDE_CODE_NO_MODEL_FALLBACK: '1' } : {}),
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC || '1',
     DISABLE_TELEMETRY: env.DISABLE_TELEMETRY || '1',
     CLAUDE_AGENT_SDK_CLIENT_APP: 'glados-v4-dashboard',

@@ -1,6 +1,6 @@
 # GLaDOS Desktop
 
-Electron shell for GLaDOS v4.5.8. The macOS bundle is named `GLaDOS.app`; the
+Electron shell for GLaDOS v4.5.9. The macOS bundle is named `GLaDOS.app`; the
 Linux package is `GLaDOS-<version>-x86_64.AppImage`. Windows 11 x64 is tested
 as an unsigned local source build; GLaDOS does not distribute Windows binaries.
 

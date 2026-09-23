@@ -125,6 +125,45 @@ test('DeepSeek compatibility drops an effort-only output_config and leaves other
   assert.deepEqual(sanitizeUnsupportedParams(sol), { body: sol, removed: [] });
 });
 
+test('Anthropic compatibility removes empty resumed thinking blocks but preserves valid content', () => {
+  const request = {
+    model: 'claude-opus-5-5',
+    messages: [
+      { role: 'user', content: 'continue the review' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '' },
+          { type: 'thinking', thinking: 'valid reasoning' },
+          { type: 'text', text: 'I will inspect the repository.' },
+          { type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: 'README.md' } },
+        ],
+      },
+    ],
+  };
+  const result = sanitizeUnsupportedParams(request);
+  assert.deepEqual(result.removed, ['messages[1].content[0].thinking']);
+  assert.deepEqual(result.body.messages[1].content, [
+    { type: 'thinking', thinking: 'valid reasoning' },
+    { type: 'text', text: 'I will inspect the repository.' },
+    { type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: 'README.md' } },
+  ]);
+  assert.equal(request.messages[1].content[0].thinking, '');
+});
+
+test('Anthropic compatibility drops an assistant message containing only an empty thinking block', () => {
+  const result = sanitizeUnsupportedParams({
+    model: 'claude-opus-5-5',
+    messages: [
+      { role: 'user', content: 'continue' },
+      { role: 'assistant', content: [{ type: 'thinking' }] },
+      { role: 'user', content: 'next step' },
+    ],
+  });
+  assert.deepEqual(result.removed, ['messages[1].content[0].thinking']);
+  assert.deepEqual(result.body.messages.map(message => message.content), ['continue', 'next step']);
+});
+
 test('relay strips unsupported DeepSeek effort before forwarding upstream', async () => {
   const fixtureCredential = ['fixture', 'relay', 'credential'].join('-');
   let forwardedBody;

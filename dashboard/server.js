@@ -554,6 +554,44 @@ function securityReviewArtifactRootFromPrompt(message) {
   return resolved.startsWith(`${investigations}${path.sep}`) ? resolved : null;
 }
 
+function securityReviewExpectedModelsFromArtifact(artifactRoot) {
+  if (!artifactRoot) return {};
+  try {
+    const run = JSON.parse(fs.readFileSync(path.join(artifactRoot, 'run.json'), 'utf8'));
+    return run?.modelPolicy?.expectedModels && typeof run.modelPolicy.expectedModels === 'object'
+      ? run.modelPolicy.expectedModels
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function securityReviewModelDrift(request, evidence, expectedModels) {
+  const role = request.reviewRole
+    || (request.agentId === 'glados' ? 'coordinator'
+      : request.agentId === 'source-code' ? 'source-code-primary' : request.agentId);
+  const expected = bareModelAlias(expectedModels?.[role], { fallback: null });
+  if (!expected) return null;
+  const observed = [
+    ['Agent SDK response', request.requestedModel],
+    ['LiteLLM logical alias', evidence?.logicalModelAlias],
+    ['LiteLLM billed model', evidence?.billedModelName],
+  ];
+  for (const [source, value] of observed) {
+    const model = bareModelAlias(value, { fallback: null });
+    if (model && model !== expected) {
+      return {
+        role,
+        expected,
+        observed: model,
+        source,
+        message: `security-review model drift: ${role} expected ${expected}, observed ${model} (${source})`,
+      };
+    }
+  }
+  return null;
+}
+
 const SECURITY_REVIEW_TRACK_ROLES = [
   'authorization-access-control',
   'data-flow-injection',
@@ -802,6 +840,7 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
   const securityReviewRolesByToolCall = new Map();
   const securityReviewWorkersByToolCall = new Map();
   const securityReviewAttestations = new Map();
+  const securityReviewExpectedModels = securityReviewExpectedModelsFromArtifact(securityReviewArtifactRoot);
   const persistAttestation = request => {
     if (securityReviewAttestations.has(request.requestId)) return securityReviewAttestations.get(request.requestId);
     const pending = (async () => {
@@ -834,6 +873,19 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
           db.prepare("UPDATE security_review_llm_requests SET status='CONFLICT', last_error='request ID reused for a different work unit' WHERE request_id=?").run(request.requestId);
           return null;
         }
+        const requestDrift = securityReviewModelDrift(request, null, securityReviewExpectedModels);
+        if (requestDrift) {
+          db.prepare(`
+            UPDATE security_review_llm_requests
+            SET status='CONFLICT', last_error=?
+            WHERE request_id=? AND engagement_id=?
+          `).run(requestDrift.message, request.requestId, engagementId);
+          const error = new Error(requestDrift.message);
+          error.code = 'GLADOS_SECURITY_REVIEW_MODEL_DRIFT';
+          error.expectedModel = requestDrift.expected;
+          error.observedModel = requestDrift.observed;
+          throw error;
+        }
       } finally { db.close(); }
       const headerReceipt = liteLlmResponseRelay.receipt(request.requestId);
       const evidence = headerReceipt?.gatewayModelId
@@ -859,6 +911,22 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
           `).run(Number(evidence.attempts || 1), evidence.reason, request.requestId, engagementId);
         } finally { unresolved.close(); }
         return null;
+      }
+      const evidenceDrift = securityReviewModelDrift(request, evidence, securityReviewExpectedModels);
+      if (evidenceDrift) {
+        const rejected = new Database(BLACKBOARD_DB);
+        try {
+          rejected.prepare(`
+            UPDATE security_review_llm_requests
+            SET status='CONFLICT', last_error=?
+            WHERE request_id=? AND engagement_id=?
+          `).run(evidenceDrift.message, request.requestId, engagementId);
+        } finally { rejected.close(); }
+        const error = new Error(evidenceDrift.message);
+        error.code = 'GLADOS_SECURITY_REVIEW_MODEL_DRIFT';
+        error.expectedModel = evidenceDrift.expected;
+        error.observedModel = evidenceDrift.observed;
+        throw error;
       }
       const requestedModel = request.requestedModel || evidence.requestedModel;
       const id = observationId({
