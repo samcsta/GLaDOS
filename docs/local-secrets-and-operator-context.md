@@ -46,8 +46,10 @@ permissions, and never commits the values. Each red teamer runs this locally
 with their own credentials.
 
 The optional Clippy MCP bearer lives in `~/.glados/secrets/clippy-mcp.json`.
-Run `scripts/setup-clippy-mcp.sh` to store it with owner-only permissions, then
-restart GLaDOS. The agent harness attaches Clippy only for normal investigations
+Each operator can enter it in Settings → Clippy MCP, test the connection, or
+remove it. The saved value is never returned to the browser. The terminal
+alternative is `scripts/setup-clippy-mcp.sh`. Restart GLaDOS after a change.
+The agent harness attaches Clippy only for normal investigations
 and mounts the read-only tools allowed for each agent in
 `config/glados-policy.json`. `GLADOS_CLIPPY_MCP=0` disables it.
 The credential is per operator and remains outside app releases and source updates.

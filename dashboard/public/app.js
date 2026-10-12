@@ -2546,13 +2546,14 @@ function chatComposerMarkup(tabId, label, { coordinator = false } = {}) {
   return `
     <div class="chat-composer-shell" data-chat-composer data-chat-tab="${escapeHtml(tabId)}">
       <div class="chat-attachment-strip" data-chat-attachment-strip hidden></div>
-      <textarea data-chat-tab="${escapeHtml(tabId)}" placeholder="Message ${escapeHtml(label)}…" aria-label="Message ${escapeHtml(label)}"></textarea>
+      <textarea data-chat-tab="${escapeHtml(tabId)}" placeholder="Message ${escapeHtml(label)}…" aria-label="Message ${escapeHtml(label)}" rows="2"></textarea>
       <div class="chat-composer-toolbar">
         <div class="chat-composer-tools">
           <input data-chat-files type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
-          <button type="button" data-chat-attach class="composer-icon-button" aria-label="Add screenshots" title="Add screenshots">+</button>
-          ${coordinator ? '<button type="button" data-chat-full-access class="composer-access-button" aria-pressed="false"><span aria-hidden="true">♢</span><span data-chat-access-label>Full access</span></button>' : ''}
+          <button type="button" data-chat-attach class="composer-icon-button" aria-label="Add screenshots" title="Add screenshots"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M8 12.5 13.7 6.8a3 3 0 0 1 4.2 4.2l-7.5 7.5a5 5 0 0 1-7.1-7.1l8-8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          ${coordinator ? '<button type="button" data-chat-full-access class="composer-access-button" aria-pressed="false"><span class="composer-access-indicator" aria-hidden="true"></span><span data-chat-access-label>Full access</span></button>' : ''}
         </div>
+        <span class="composer-keyboard-hint" aria-hidden="true">Enter to send · Shift+Enter for a new line</span>
         <div class="chat-composer-controls">
           <label class="composer-select" title="GLaDOS model">
             <span class="sr-only">Model</span>
@@ -2562,8 +2563,8 @@ function chatComposerMarkup(tabId, label, { coordinator = false } = {}) {
             <span class="sr-only">Reasoning effort</span>
             <select data-chat-effort aria-label="Reasoning effort">${efforts.map(([value, text]) => `<option value="${value}">${text}</option>`).join('')}</select>
           </label>
-          <button type="button" data-chat-stop data-chat-tab="${escapeHtml(tabId)}" class="composer-stop-button" title="Stop the current response" aria-label="Stop response" disabled>■</button>
-          <button type="button" data-chat-send data-chat-tab="${escapeHtml(tabId)}" class="composer-send-button" title="Send" aria-label="Send message">↑</button>
+          <button type="button" data-chat-stop data-chat-tab="${escapeHtml(tabId)}" class="composer-stop-button" title="Stop the current response" aria-label="Stop response" disabled><svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
+          <button type="button" data-chat-send data-chat-tab="${escapeHtml(tabId)}" class="composer-send-button" title="Send" aria-label="Send message"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M12 19V5m0 0-5.5 5.5M12 5l5.5 5.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         </div>
       </div>
     </div>`;
@@ -5400,6 +5401,117 @@ async function wireFullAccessControl(wrap) {
   }
 }
 
+async function wireClippySettings(wrap) {
+  const card = wrap.querySelector('#clippy-connection-card');
+  if (!card) return;
+  const field = card.querySelector('#clippy-token');
+  const status = card.querySelector('#clippy-connection-status');
+  const detail = card.querySelector('#clippy-connection-detail');
+  const save = card.querySelector('#clippy-save');
+  const test = card.querySelector('#clippy-test');
+  const remove = card.querySelector('#clippy-remove');
+  const reveal = card.querySelector('#clippy-reveal');
+  let configured = false;
+  let enabled = false;
+  let busy = false;
+
+  const render = (message = '') => {
+    const hasDraft = Boolean(field.value.trim());
+    card.classList.toggle('connected', configured && enabled);
+    status.textContent = configured ? (enabled ? 'Credential saved on this computer' : 'Saved, but disabled by environment') : 'Not connected';
+    detail.textContent = message || (configured
+      ? 'The saved token is hidden. New agent turns use this connection after GLaDOS restarts.'
+      : 'Enter your own Clippy bearer token to add read-only knowledge to GLaDOS.');
+    save.disabled = busy || !hasDraft;
+    test.disabled = busy || (!hasDraft && !configured);
+    remove.disabled = busy || !configured;
+    reveal.disabled = busy || !hasDraft;
+    field.disabled = busy;
+  };
+
+  const request = async (method, path, token) => {
+    const response = await fetch(path, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      ...(token === undefined ? {} : { body: JSON.stringify({ token }) }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    return body;
+  };
+
+  reveal.addEventListener('click', () => {
+    const showing = field.type === 'text';
+    field.type = showing ? 'password' : 'text';
+    reveal.textContent = showing ? 'Show' : 'Hide';
+    reveal.setAttribute('aria-label', showing ? 'Show entered token' : 'Hide entered token');
+  });
+  field.addEventListener('input', () => render());
+
+  test.addEventListener('click', async () => {
+    if (busy) return;
+    busy = true;
+    render('Checking Clippy…');
+    try {
+      const result = await request('POST', '/api/settings/clippy/test', field.value.trim() || undefined);
+      render(`Connected to Clippy. ${result.toolCount} tools advertised; GLaDOS uses its read-only selection.`);
+      showToast('Clippy connection verified.', { kind: 'success', label: 'Clippy MCP' });
+    } catch (error) {
+      render(`Connection check failed: ${error.message}`);
+      showToast(error.message, { kind: 'warning', label: 'Clippy MCP' });
+    } finally { busy = false; render(detail.textContent); }
+  });
+
+  save.addEventListener('click', async () => {
+    if (busy || !field.value.trim()) return;
+    busy = true;
+    render('Saving credential…');
+    try {
+      const result = await request('PUT', '/api/settings/clippy', field.value);
+      configured = result.configured;
+      enabled = result.enabled;
+      field.value = '';
+      field.type = 'password';
+      reveal.textContent = 'Show';
+      render('Saved locally. Restart GLaDOS to use the connection in new agent turns.');
+      showToast('Clippy credential saved on this computer.', { kind: 'success', label: 'Clippy MCP' });
+    } catch (error) {
+      render(`Could not save: ${error.message}`);
+      pushNotification('error', error.message, { toast: true, label: 'Clippy MCP' });
+    } finally { busy = false; render(detail.textContent); }
+  });
+
+  remove.addEventListener('click', async () => {
+    if (busy || !configured) return;
+    const approved = await confirmAction({
+      title: 'Disconnect Clippy MCP?',
+      message: 'This deletes the credential saved on this computer. Active agent turns may finish with their current connection; restart GLaDOS afterward.',
+      confirmLabel: 'Disconnect',
+    });
+    if (!approved) return;
+    busy = true;
+    render('Removing credential…');
+    try {
+      const result = await request('DELETE', '/api/settings/clippy');
+      configured = result.configured;
+      enabled = result.enabled;
+      field.value = '';
+      render('Disconnected locally. Restart GLaDOS to clear existing agent connections.');
+      showToast('Clippy credential removed.', { kind: 'success', label: 'Clippy MCP' });
+    } catch (error) {
+      render(`Could not disconnect: ${error.message}`);
+      pushNotification('error', error.message, { toast: true, label: 'Clippy MCP' });
+    } finally { busy = false; render(detail.textContent); }
+  });
+
+  try {
+    const result = await fetchJson('/api/settings/clippy', { timeoutMs: 5000 });
+    configured = result.configured;
+    enabled = result.enabled;
+    render();
+  } catch (error) { render(`Could not load Clippy status: ${error.message}`); }
+}
+
 function setupResultRow(label, ok, message) {
   return `<div class="setup-result ${ok ? 'pass' : 'fail'}"><span>${ok ? '✓' : '×'}</span><div><strong>${escapeHtml(label)}</strong><small>${escapeHtml(message)}</small></div></div>`;
 }
@@ -5545,6 +5657,15 @@ async function renderSettingsPane() {
       <div class="settings-section-heading"><div><h2>Setup Assistant</h2><p class="settings-section-copy">Configure the workstation from start to finish: LiteLLM, optional local credentials, the unique proxy CA, and live verification.</p></div><button id="launch-setup-assistant" type="button" class="safe">Open Setup Assistant</button></div>
       <div id="setup-summary" class="setup-summary"><div class="setup-summary-loading">Checking setup…</div></div>
     </section>
+    <section class="settings-section clippy-settings-section">
+      <div class="settings-section-heading"><div><h2>Clippy MCP</h2><p class="settings-section-copy">Connect your own credential for prior assessments and asset context. GLaDOS uses approved read-only lookups during investigations.</p></div></div>
+      <div id="clippy-connection-card" class="clippy-connection-card">
+        <div class="clippy-connection-heading"><span class="clippy-status-dot" aria-hidden="true"></span><div><strong id="clippy-connection-status">Checking connection…</strong><small id="clippy-connection-detail" role="status" aria-live="polite">Reading your local settings.</small></div></div>
+        <div class="clippy-credential-row"><label for="clippy-token">Bearer token</label><div class="clippy-token-input"><input id="clippy-token" type="password" placeholder="Paste your Clippy token" autocomplete="off" spellcheck="false" aria-describedby="clippy-token-note" /><button id="clippy-reveal" type="button" aria-label="Show entered token" disabled>Show</button></div></div>
+        <p id="clippy-token-note" class="clippy-token-note">Saved only in your local GLaDOS secrets folder. Updates keep it; the saved value is never shown here.</p>
+        <div class="clippy-connection-actions"><button id="clippy-save" type="button" class="safe" disabled>Save credential</button><button id="clippy-test" type="button" disabled>Test connection</button><button id="clippy-remove" type="button" class="clippy-disconnect" disabled>Disconnect</button></div>
+      </div>
+    </section>
     <section class="settings-section full-access-section">
       <div class="settings-section-heading"><div><h2>Computer Use</h2><p class="settings-section-copy">Choose whether GLaDOS stays inside its normal safety boundary or may operate this workstation directly when supported. Full Access is always off by default and requires an explicit confirmation.</p></div></div>
       <div id="full-access-card" class="full-access-card">
@@ -5612,6 +5733,7 @@ async function renderSettingsPane() {
   paneEl.appendChild(wrap);
   wireOperationControls(wrap);
   wireSetupAssistant(wrap);
+  wireClippySettings(wrap);
   wireFullAccessControl(wrap);
   const operatorName = wrap.querySelector('#operator-name');
   const operatorPreview = wrap.querySelector('#operator-initials-preview');

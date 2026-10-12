@@ -24,7 +24,7 @@ Updates never include or delete the GLaDOS runtime directory (`~/.glados` on mac
 
 ## Optional Clippy MCP Knowledge Source
 
-Clippy can supply prior-assessment, project, domain, infrastructure, GitHub, and Ford employee-directory context. To enable the read-only integration, run `scripts/setup-clippy-mcp.sh`, enter the bearer token at the hidden prompt, and restart GLaDOS. The token is stored in `~/.glados/secrets/clippy-mcp.json` with owner-only permissions, not in this checkout or `.env`. Set `GLADOS_CLIPPY_MCP=0` to disable the connection without deleting the credential.
+Clippy can supply prior-assessment, project, domain, infrastructure, GitHub, and Ford employee-directory context. In **Settings → Clippy MCP**, each operator can paste their own bearer token, save it, test the connection, and disconnect. The saved token is never displayed. The terminal alternative is `scripts/setup-clippy-mcp.sh`. Restart GLaDOS after changing the credential. The token is stored in `~/.glados/secrets/clippy-mcp.json` with owner-only permissions, not in this checkout or `.env`. Set `GLADOS_CLIPPY_MCP=0` to disable the connection without deleting the credential.
 
 GLaDOS mounts only selected lookup tools by agent, as listed in `config/glados-policy.json`. Clippy assessment dispatch, context upload, inventory writes, test-box actions, file sharing, and support submissions are not mounted. Clippy is unavailable in source-only security reviews so prior assessment context cannot enter a blind review. Treat Clippy records as leads with source and freshness, never as active-testing scope or current proof. A dedicated read-only Clippy token is preferred because the supplied token may have broader server-side permissions.
 

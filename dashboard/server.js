@@ -26,7 +26,7 @@ const { fetchLiteLlmAttestation, observationId } = require('./lib/litellm-attest
 const { LiteLlmResponseRelay } = require('./lib/litellm-relay');
 const { activeTurnConflict } = require('./lib/chat-turn-admission');
 const { isKickoffApproval, isKickoffCancel, isNetReconRequested, resolveKickoffResources } = require('./lib/kickoff-intent');
-const { loadClippyToken } = require('./lib/secrets/clippy-mcp');
+const { loadClippyToken, secretPath: clippySecretPath, saveClippyToken, removeClippyToken, probeClippyConnection } = require('./lib/secrets/clippy-mcp');
 const { getLiteLlmUsage } = require('./lib/litellm-usage');
 const { sdkUsageForPeriod } = require('./lib/sdk-usage');
 const { cleanupLooseInvestigationArtifacts, resetMutableAgentStatus } = require('./lib/runtime-reset');
@@ -225,6 +225,39 @@ app.post('/api/settings/full-access', (req, res) => {
     return res.json({ ok: true, available: true, platform: process.platform, ...state });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/settings/clippy', (_req, res) => {
+  const configured = fs.existsSync(clippySecretPath(process.env));
+  res.json({ ok: true, configured, enabled: configured && process.env.GLADOS_CLIPPY_MCP !== '0' });
+});
+
+app.put('/api/settings/clippy', (req, res) => {
+  try {
+    saveClippyToken(req.body?.token, process.env);
+    res.json({ ok: true, configured: true, enabled: process.env.GLADOS_CLIPPY_MCP !== '0', restartRecommended: true });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message });
+  }
+});
+
+app.post('/api/settings/clippy/test', async (req, res) => {
+  try {
+    const token = req.body?.token ? req.body.token : loadClippyToken({ ...process.env, GLADOS_CLIPPY_MCP: '1' });
+    if (!token) return res.status(400).json({ ok: false, error: 'No Clippy credential is saved' });
+    res.json({ ok: true, ...(await probeClippyConnection(token)) });
+  } catch (error) {
+    res.status(502).json({ ok: false, error: error.message });
+  }
+});
+
+app.delete('/api/settings/clippy', (_req, res) => {
+  try {
+    removeClippyToken(process.env);
+    res.json({ ok: true, configured: false, enabled: false, restartRecommended: true });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
   }
 });
 

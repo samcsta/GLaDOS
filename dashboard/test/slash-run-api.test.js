@@ -113,6 +113,17 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     const settingsAgents = await request(srv.port, 'GET', '/api/settings/agents');
     assert.equal(settingsAgents.status, 200);
     assert.equal(settingsAgents.json.agents.some(agent => agent.id === 'atlas'), false, 'stale removed workspaces must not reappear in Settings');
+    const clippyBefore = await request(srv.port, 'GET', '/api/settings/clippy');
+    assert.deepEqual(clippyBefore.json, { ok: true, configured: false, enabled: false });
+    const clippySaved = await request(srv.port, 'PUT', '/api/settings/clippy', { token: 'Bearer api-test-secret' });
+    assert.equal(clippySaved.status, 200);
+    assert.equal(fs.statSync(path.join(srv.runtime, 'secrets', 'clippy-mcp.json')).mode & 0o077, 0);
+    const clippyStatus = await request(srv.port, 'GET', '/api/settings/clippy');
+    assert.equal(clippyStatus.json.configured, true);
+    assert.equal(clippyStatus.raw.includes('api-test-secret'), false);
+    const clippyRemoved = await request(srv.port, 'DELETE', '/api/settings/clippy');
+    assert.equal(clippyRemoved.status, 200);
+    assert.equal(fs.existsSync(path.join(srv.runtime, 'secrets', 'clippy-mcp.json')), false);
     const atlasDetails = await request(srv.port, 'GET', '/api/agents/atlas/details');
     assert.equal(atlasDetails.status, 404);
 
