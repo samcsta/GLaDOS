@@ -97,9 +97,11 @@ test('VPN-only mode serves updates without per-user application credentials', as
     assert.doesNotMatch(landing.body.toString(), /github\.com\/samcsta\/GLaDOS/);
     assert.match(landing.body.toString(), /Open Windows v4\.5\.8 source/);
     assert.match(landing.body.toString(), /<details>/);
+    assert.match(landing.body.toString(), /v4\.6\.0/);
+    assert.match(landing.body.toString(), /Clippy MCP as the standard approved source/);
+    assert.match(landing.body.toString(), /macOS and Linux downloads are v4\.6\.0/);
     assert.match(landing.body.toString(), /v4\.5\.9/);
     assert.match(landing.body.toString(), /Fixed malformed Anthropic assistant thinking blocks/);
-    assert.match(landing.body.toString(), /Linux and Windows downloads may remain on v4\.5\.8/);
     assert.match(landing.body.toString(), /no official Windows binaries are published/i);
     assert.doesNotMatch(landing.body.toString(), /GLaDOS-9\.9\.9-x64\.exe/);
     const blockedWindowsFeed = await request(server.address().port, '/glados/windows/x64/latest.yml');

@@ -80,6 +80,17 @@ function renderDownloadPage(installerRoot, installerBasePath = '/installers') {
   const wikiUrl = 'https://wiki.r3dt34m.net/rt/glados';
   const logoPath = `${installerBasePath.replace(/\/$/, '')}/linux/glados.png`;
   const releaseNotes = [{
+    version: 'v4.6.0',
+    label: 'macOS and Linux release · October 12, 2026',
+    title: 'Clippy knowledge and a cleaner operator workspace',
+    notes: [
+      'Added Clippy MCP as the standard approved source for prior assessments, domain and infrastructure inventory, and code references during webapp kickoff.',
+      'Added a Settings connection panel where each operator can save, test, or remove their own Clippy credential without exposing the saved token.',
+      'Refined the GLaDOS message composer while keeping attachments, Full Access, model, reasoning, stop, and send controls.',
+      'Kept Clippy lookups read-only and excluded them from blind investigations and source-only security reviews.',
+    ],
+    footnote: 'macOS and Linux downloads are v4.6.0. Windows remains a source build; no official Windows binary is published.',
+  }, {
     version: 'v4.5.9',
     label: 'macOS release · September 23, 2026',
     title: 'Security-review reliability and model-integrity patch',
@@ -87,9 +98,8 @@ function renderDownloadPage(installerRoot, installerBasePath = '/installers') {
       'Fixed malformed Anthropic assistant thinking blocks before they reach LiteLLM, preventing invalid-request failures when a provider omits thinking text.',
       'Pinned the Claude Agent SDK to 0.3.280 for deterministic release behavior.',
       'Security-review runs now disable Claude Code model fallback and attest the requested SDK model, LiteLLM alias, and billed provider model; model drift fails closed.',
-      'Added regression coverage for relay sanitization, exact-model enforcement, and model-drift detection.',
     ],
-    footnote: 'This macOS build is v4.5.9. Linux and Windows downloads may remain on v4.5.8 until their platform releases are updated.',
+    footnote: 'Historical macOS release.',
   }];
   const platforms = [
     {
