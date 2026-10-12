@@ -26,6 +26,7 @@ const { fetchLiteLlmAttestation, observationId } = require('./lib/litellm-attest
 const { LiteLlmResponseRelay } = require('./lib/litellm-relay');
 const { activeTurnConflict } = require('./lib/chat-turn-admission');
 const { isKickoffApproval, isKickoffCancel, isNetReconRequested, resolveKickoffResources } = require('./lib/kickoff-intent');
+const { loadClippyToken } = require('./lib/secrets/clippy-mcp');
 const { getLiteLlmUsage } = require('./lib/litellm-usage');
 const { sdkUsageForPeriod } = require('./lib/sdk-usage');
 const { cleanupLooseInvestigationArtifacts, resetMutableAgentStatus } = require('./lib/runtime-reset');
@@ -1373,6 +1374,12 @@ function isFreshSessionQuestion(message) {
 }
 
 function kickoffApprovalPrompt(target) {
+  if (loadClippyToken()) return [
+    `For \`${target}\`, I can check Clippy MCP for matching assessments, prior findings, domains, infrastructure, and code references before web app recon.`,
+    'Dradis Tab, Dradis, and DomainsAI will be used only if you request them or Clippy is unavailable on a future run.',
+    '',
+    'Continue with the Clippy check, or name a change?'
+  ].join('\n');
   return [
     `Ok, I am going to proceed with the pre-assessment checks for \`${target}\` in this order:`,
     '',
@@ -1414,10 +1421,11 @@ function createPendingGladosKickoff(target, originalMessage, extra = {}) {
 }
 
 function buildApprovedKickoffMessage(pending, operatorReply) {
-  const resources = resolveKickoffResources(operatorReply);
+  const resources = resolveKickoffResources(operatorReply, { clippyAvailable: Boolean(loadClippyToken()) });
   const resourceText = resources.length ? resources.map(r => `${r.label} (${r.url})`).join(', ') : 'none';
   const approvedIds = new Set(resources.map(r => r.id));
   const skipped = [
+    { id: 'clippy', label: 'Clippy MCP', url: 'https://clippy.redteamstuff.com:8443/mcp/' },
     { id: 'dradistab', label: 'Dradis Tab', url: 'https://dradistab.redteamstuff.com' },
     { id: 'dradis', label: 'Dradis', url: 'https://dradis.redteamstuff.com' },
     { id: 'domainsai', label: 'DomainsAI', url: 'https://domainsai.redteamstuff.com' },
@@ -1430,12 +1438,14 @@ function buildApprovedKickoffMessage(pending, operatorReply) {
     '',
     'Operator approval gate has already completed in the dashboard.',
     `Approved pre-agent resources, in order: ${resourceText}.`,
-    `Explicitly skipped resources: ${skippedText}.`,
+    `Resources not selected: ${skippedText}.`,
     `Network/infrastructure recon explicitly requested by operator: ${netReconRequested ? 'yes' : 'no'}.`,
     '',
     'Hard workflow rules:',
     '- Do not consult any unapproved resource.',
-    '- If Dradis or Dradis Tab is skipped, do not read the dradis-workflow skill and do not browse dradistab.redteamstuff.com or dradis.redteamstuff.com.',
+    '- If Clippy MCP is selected, query the exact target and known aliases for matching projects and prior assessment content, then relevant domain, infrastructure, and GitHub records. Read promising hits before summarizing. Record source, age, and confidence; do not treat historical records as current proof or as testing scope. Do not run every search category when a target has no relevant records.',
+    '- Do not browse Dradis Tab, Dradis, or DomainsAI merely to repeat Clippy results. If a needed detailed report is absent from Clippy, report the gap and ask before consulting an unselected source.',
+    '- If Dradis or Dradis Tab is not selected, do not read the dradis-workflow skill and do not browse dradistab.redteamstuff.com or dradis.redteamstuff.com.',
     '- For DomainsAI use exactly https://domainsai.redteamstuff.com; do not guess public lookalike domains.',
     '- When Dradis has a matching project, summarize whether it appears associated with the local operator profile and list existing CWE/finding coverage if available.',
     '- For Ford webapp targets that redirect to corp.sts.ford.com, treat corp.sts.ford.com only as an authentication dependency. Do not investigate, fuzz, enumerate, or report findings on that host.',
@@ -1871,11 +1881,11 @@ app.post('/api/chat/glados', async (req, res) => {
       return res.json({ ok: true, gated: true, cancelled: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
     }
 
-    if (!isKickoffApproval(message) && !/\b(skip|only|domainsai|dradis|dradistab)\b/i.test(message)) {
+    if (!isKickoffApproval(message) && !/\b(skip|only|clippy|domainsai|dradis|dradistab)\b/i.test(message)) {
       const ev = transcriptEvent(
         session.id, 'glados',
         'assistant-text',
-        `I am still paused before starting \`${pendingGladosKickoff.target}\`. Reply with "continue", "skip DradisTab/Dradis and proceed with DomainsAI", or another explicit change before I check resources or dispatch agents.`
+        `I am still paused before starting \`${pendingGladosKickoff.target}\`. Reply with "continue", "proceed blind", or name the resource change you want before I check resources or dispatch agents.`
       );
       return res.json({ ok: true, gated: true, waiting: true, result: { payloads: [{ text: ev.text, mediaUrl: null }] } });
     }

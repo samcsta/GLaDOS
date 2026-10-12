@@ -22,6 +22,14 @@ Application code is replaceable. Operator data is not.
 
 Updates never include or delete the GLaDOS runtime directory (`~/.glados` on macOS/Linux and the equivalent user-profile path on Windows). The LiteLLM key is stored in macOS Keychain, with a private per-user file fallback on Linux and Windows; it does not belong in `.env`.
 
+## Optional Clippy MCP Knowledge Source
+
+Clippy can supply prior-assessment, project, domain, infrastructure, GitHub, and Ford employee-directory context. To enable the read-only integration, run `scripts/setup-clippy-mcp.sh`, enter the bearer token at the hidden prompt, and restart GLaDOS. The token is stored in `~/.glados/secrets/clippy-mcp.json` with owner-only permissions, not in this checkout or `.env`. Set `GLADOS_CLIPPY_MCP=0` to disable the connection without deleting the credential.
+
+GLaDOS mounts only selected lookup tools by agent, as listed in `config/glados-policy.json`. Clippy assessment dispatch, context upload, inventory writes, test-box actions, file sharing, and support submissions are not mounted. Clippy is unavailable in source-only security reviews so prior assessment context cannot enter a blind review. Treat Clippy records as leads with source and freshness, never as active-testing scope or current proof. A dedicated read-only Clippy token is preferred because the supplied token may have broader server-side permissions.
+
+For `/investigate`, the dashboard now proposes one Clippy context check when a credential is configured. After approval, GLaDOS searches matching assessments and prior content, then relevant domain, infrastructure, and GitHub inventory. It records provenance and age in `baseline.context_intake` before dispatching web app recon. Dradis Tab, Dradis, and DomainsAI are available by explicit selection or for an approved gap; Dradis remains the report destination. Without Clippy, the existing three-source kickoff remains available. Operator-selected blind runs query none of them. The versioned templates cover new agent workspaces, while the runtime kickoff rule applies to existing workspaces; installed users still need their own credential. Ship these source changes in a tagged signed app release for other users and future app updates.
+
 ## Repository Layout
 
 | Path | Purpose |

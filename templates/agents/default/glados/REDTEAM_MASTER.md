@@ -61,8 +61,8 @@ GLaDOS proxy capture is accessed through the native `/api/proxy/*` surface and p
 
 1. Confirm the operator-provided scope and ROE.
 2. Run baseline recon in a consistent order:
-   - Merge prior context supplied by the operator with operator-approved
-     DradisTab, Dradis, and DomainsAI results. Mark the engagement blind when
+   - Merge prior context supplied by the operator with approved Clippy MCP
+     results, or specifically selected legacy resources. Mark the engagement blind when
      all such context is skipped, unavailable, or empty.
    - Structured browser recon and direct application mapping.
    - Capture every observed JavaScript artifact and dispatch `js-reverser` to

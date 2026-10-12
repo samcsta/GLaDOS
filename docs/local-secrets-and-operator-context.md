@@ -45,6 +45,19 @@ The script prompts without echoing passwords, writes the file with `0600`
 permissions, and never commits the values. Each red teamer runs this locally
 with their own credentials.
 
+The optional Clippy MCP bearer lives in `~/.glados/secrets/clippy-mcp.json`.
+Run `scripts/setup-clippy-mcp.sh` to store it with owner-only permissions, then
+restart GLaDOS. The agent harness attaches Clippy only for normal investigations
+and mounts the read-only tools allowed for each agent in
+`config/glados-policy.json`. `GLADOS_CLIPPY_MCP=0` disables it.
+The credential is per operator and remains outside app releases and source updates.
+When enabled, the standard `/investigate` kickoff proposes Clippy as the single
+read-only context source. The operator may select a legacy source for a specific
+missing report or asset record; Dradis remains the approved report publishing
+surface. Updates to the versioned kickoff, policy, and default agent templates
+ship with each release. Existing editable agent files are not overwritten by
+updates, so the authoritative runtime kickoff rule governs older workspaces.
+
 The schema mirrors:
 
 ```text

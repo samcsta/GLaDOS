@@ -25,8 +25,10 @@ Never infer wrap-up from elapsed time, a root flag, one critical finding, an
 empty current plan, or agent fatigue. Reporting is not the automatic next phase.
 
 At kickoff, build `baseline.context_intake` from the operator's supplied prior
-context plus every operator-approved intelligence source among DradisTab,
-Dradis, and DomainsAI. Record `context_mode=informed` when any substantive
+context plus the approved intelligence sources. When configured, Clippy MCP is
+the default source for project history, prior findings, and domain, infrastructure,
+and code inventory. DradisTab, Dradis, and DomainsAI are opt-in sources for a
+specific gap; Dradis remains the reporting destination. Record `context_mode=informed` when any substantive
 context exists. If the operator skips the sources or they return nothing,
 record `context_mode=blind` with the exact skipped/empty/unavailable reasons.
 Going in blind is allowed; pretending context existed is not.
@@ -64,51 +66,23 @@ pivot; small scripts are not exempt.
 3. Read `glados-ops__operator_context` and `glados-ops__local_auth_status`
    for local non-secret background knowledge and redacted credential-profile
    availability.
-4. **Investigation kickoff — announce and confirm before any external
-   query.** Use this kickoff only when the dashboard sends an approved
-   slash-command investigation message. Do not infer a formal investigation
-   from ordinary chat, diagnostics, or one-off proxy tests.
-   STOP before reading any intelligence resource and post a single message
-   listing exactly what you intend to consult, in order:
+4. **Investigation kickoff.** Use this flow only after the dashboard has
+   approved the slash-command investigation and passed the selected resources.
+   Do not infer a formal investigation from ordinary chat or proxy diagnostics.
+   Do not ask for a second approval. Follow the selected resource list exactly;
+   when Clippy is configured it is the default, and legacy resources require
+   explicit selection. Announce the target and begin the approved read-only
+   checks. If the operator chose blind mode, skip all prior-context queries.
 
-   > "Ok, I am going to proceed with the pre-assessment checks for
-   > `<target>` in this order: (1) DradisTab — check whether a prior or
-   > in-flight assessment exists, (2) Dradis — if a matching project exists
-   > and belongs to the local operator profile, summarize the existing CWE
-   > coverage/findings, (3) DomainsAI — search the target domain at
-   > `https://domainsai.redteamstuff.com` for asset/domain context. Would
-   > you like any changes before I proceed?"
-
-   Then **wait for an explicit operator response.** Do not call
-   `glados-ops__*` resource browsers, DradisTab, Dradis, DomainsAI, or
-   spawn any subagent until the operator replies. Acceptable replies and
-   how to interpret them:
-
-   - "continue" / "proceed" / "go" / "yes" → run all three in the order
-     above.
-   - "skip dradis" / "skip dradistab" / "only domainsai" / similar → run
-     only the resources the operator did not skip; respect the order of
-     what remains.
-   - "domainsai first" / any explicit reordering → use the operator's
-     order.
-   - Anything else (questions, scope clarifications, "no", silence past a
-     reasonable interactive window) → do not start; ask once for a clear
-     decision and continue waiting.
-
-   After confirmation, summarize what you actually consulted and the key
-   facts learned in one message, then dispatch agents per step 7.
-
-5. Consult internal red-team intelligence resources per the operator's
-   confirmed plan from step 3. The canonical resources (see operator
-   context `intelligence_resources`):
-   - **Dradis Tab** (`dradistab.redteamstuff.com`) — check whether the
-     target has prior or in-flight assessments before doing fresh recon.
-   - **Dradis** (`dradis.redteamstuff.com`) — pull prior findings if a
-     project exists.
-   - **DomainsAI** (`domainsai.redteamstuff.com`) — asset/domain
-     intelligence on the target and related infrastructure. Surface
-   findings to `webapp-recon` and `plan-synthesizer` so they can use the data
-   instead of duplicating queries.
+5. Check the approved resources. For Clippy MCP, search matching projects and
+   prior assessments, read relevant hits, then query domain, infrastructure,
+   and GitHub inventory only where the target or technology makes it useful.
+   Record provenance, record age, and uncertainty. Do not treat historical
+   data as live proof or scope. Do not repeat the same check in DradisTab,
+   Dradis, or DomainsAI. If Clippy lacks a needed detailed report, tell the
+   operator exactly what is missing and get approval before consulting an
+   unselected source. Preserve Dradis for approved report publishing. Surface
+   relevant findings to `webapp-recon` and `plan-synthesizer`.
 6. Write a single `baseline.context_intake` record containing operator context,
    resource results, `context_mode`, and per-source status. Pass that exact
    context package to every recon/planning task. If the package is blind, say
@@ -190,7 +164,7 @@ pivot; small scripts are not exempt.
 ### Local Source Security Review Workflow
 
 - For `/security-review <local-path>`, follow the injected `SOURCE SECURITY REVIEW WORKFLOW v4` deep coordinator contract. Do not reduce it to one broad source-code pass.
-- Obey `context_mode` exactly. `blind` prohibits searching for or reading prior reports, Dradis projects, historical blackboard findings, old investigation artifacts, and operator context containing earlier conclusions. `regression` uses only explicitly supplied historical context. `informed` keeps discovery blind, then runs regression. Never silently upgrade a blind run to an informed run.
+- Obey `context_mode` exactly. `blind` prohibits Clippy lookups and searching for or reading prior reports, Dradis projects, historical blackboard findings, old investigation artifacts, and operator context containing earlier conclusions. `regression` uses only explicitly supplied historical context. `informed` keeps discovery blind, then runs regression. Never silently upgrade a blind run to an informed run.
 - Keep the assessed repository read-only and write only under the injected `artifact_root` and blackboard.
 - Run intake/prior-context handling, deterministic inventory, a repository-derived threat model, durable repeated blind discovery workers until measured saturation, centralized deduplication, six separately tasked specialist tracks, historical regression when prior context exists, centralized candidate and attack-path closure, `source-review-validator`, safe local dynamic validation where needed, then automatic controller finalization.
 - A worker answer is not a receipt. Persist every discovery attempt with a terminal status, actual model, candidate artifact, and hash-bound receipt. Retry a failed/canceled worker successfully or explicitly omit it with a reason. Map every raw candidate exactly once during deduplication and retain every canonical candidate through validation.

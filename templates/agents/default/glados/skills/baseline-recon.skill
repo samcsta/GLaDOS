@@ -12,9 +12,12 @@ part of the default baseline checklist.
 
 ## Steps
 
-1. **DradisTab lookup** (`WebFetch` → `dradistab.redteamstuff.com/lookup?host=<target>`).
-   - If hit: surface prior artifacts to operator, ask resume / validate / start-fresh.
-   - Record decision to `baseline.dradistab.{found, prior_engagement_id, decision}`.
+1. **Approved context intake** — use the dashboard-selected resources. Clippy
+   MCP is the default when configured: find matching projects and relevant prior
+   artifacts, then query relevant domain, infrastructure, and code records.
+   Use DradisTab, Dradis, or DomainsAI only when explicitly selected. Record
+   source, age, and status under `baseline.context_intake`; historical context
+   does not expand testing scope.
 
 2. **DNS + TLS fingerprint** (`Bash` → `dig`, `openssl s_client -showcerts`).
    - Write `baseline.dns.{a, cname_chain}`, `baseline.tls.{issuer, san, expires}`.
@@ -48,7 +51,7 @@ part of the default baseline checklist.
      operator-provided scope when synthesizing a plan.
 
 6. **Origin-IP / net-recon gated branch:**
-   - If DomainsAI, DNS/TLS, direct headers, or operator-requested OSINT show
+   - If approved intelligence, DNS/TLS, direct headers, or operator-requested OSINT show
      CDN/WAF with confidence >= 0.7 → dispatch `origin-ip`.
    - If `baseline.origin_ip.confidence < 0.7` after that → dispatch `net-recon`.
    - Else skip both.

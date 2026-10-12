@@ -59,3 +59,13 @@ test('resource skip clauses apply to every named comma-separated resource', () =
     ['dradistab', 'dradis']
   );
 });
+
+test('Clippy is the single default intake source when configured', () => {
+  const configured = { clippyAvailable: true };
+  assert.deepEqual(resolveKickoffResources('Continue', configured).map(resource => resource.id), ['clippy']);
+  assert.deepEqual(resolveKickoffResources('Continue, also use Dradis for the full report', configured).map(resource => resource.id), ['clippy', 'dradis']);
+  assert.deepEqual(resolveKickoffResources('Skip Clippy and proceed', configured).map(resource => resource.id), ['dradistab', 'dradis', 'domainsai']);
+  assert.deepEqual(resolveKickoffResources('Proceed blind', configured), []);
+  assert.deepEqual(resolveKickoffResources('Only DomainsAI', configured).map(resource => resource.id), ['domainsai']);
+  assert.deepEqual(resolveKickoffResources('Skip Clippy and use Dradis', configured).map(resource => resource.id), ['dradis']);
+});

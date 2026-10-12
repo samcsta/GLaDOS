@@ -64,11 +64,20 @@
   ],
   "intelligence_resources": [
     {
+      "id": "clippy",
+      "name": "Clippy MCP",
+      "host": "clippy.redteamstuff.com:8443",
+      "purpose": "Read-only project history, prior assessment content, domain and infrastructure inventory, GitHub references, and task-relevant directory records.",
+      "when_to_use": "Default approved context intake for a web application assessment when the local Clippy credential is configured. Historical records are leads, not current proof or scope.",
+      "auth": { "credential_profile": "local Clippy MCP secret", "notes": "Configured per installation outside the repository." },
+      "users": ["glados", "webapp-recon", "api-expert", "source-code", "osint", "report-writer", "report-validator"]
+    },
+    {
       "id": "dradistab",
       "name": "Dradis Tab",
       "host": "dradistab.redteamstuff.com",
       "purpose": "Project metadata index — what assessments have been run, what is in flight, project ownership and status.",
-      "when_to_use": "Phase 1 / planning: check whether a target has prior or in-flight assessments before starting recon.",
+      "when_to_use": "Only when explicitly selected or when a specific Clippy project-history gap is approved for follow-up.",
       "auth": { "credential_profile": "dradis", "see_auth_flow": "dradis" },
       "users": ["glados", "osint", "webapp-recon", "report-writer"]
     },
@@ -77,7 +86,7 @@
       "name": "Dradis Professional",
       "host": "dradis.redteamstuff.com",
       "purpose": "Detailed prior findings and report content for known projects.",
-      "when_to_use": "Phase 1 / planning: pull prior findings on the target if a corresponding Dradis project exists. Reporting: only push findings with operator approval.",
+      "when_to_use": "Read detailed prior findings only when explicitly selected or a specific Clippy gap is approved. Reporting: only push findings with operator approval.",
       "auth": { "credential_profile": "dradis", "see_auth_flow": "dradis" },
       "users": ["glados", "report-writer", "report-validator"]
     },
@@ -86,7 +95,7 @@
       "name": "DomainsAI",
       "host": "domainsai.redteamstuff.com",
       "purpose": "Asset and domain intelligence for Ford-owned domains, subdomains, and related infrastructure. Reference data only — not an authorization gate.",
-      "when_to_use": "Phase 1 OSINT and webapp recon: enrich subdomain context, identify related infrastructure, validate ownership signals before treating a host as scoped. Should be consulted as a crucial step of recon, not an optional one.",
+      "when_to_use": "Only when explicitly selected or when a specific Clippy asset-data gap is approved for follow-up. Reference data never changes engagement scope.",
       "auth": { "credential_profile": null, "notes": "Internal red-team tooling on the redteamstuff.com domain; access is per the operator's existing red-team session." },
       "users": ["glados", "osint", "webapp-recon"]
     }

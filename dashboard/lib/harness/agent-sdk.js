@@ -6,6 +6,7 @@ const { spawn } = require('node:child_process');
 const { GLADOS_RUNTIME_DIR, GLADOS_AGENT_WORKSPACES, BLACKBOARD_DB, WATCHDOG_DB, MODEL_OVERRIDES_JSON } = require('../config');
 const { DashboardTranscriptStore } = require('../transcript-store');
 const { loadLlmAuthToken } = require('../secrets/llm-secrets');
+const { CLIPPY_URL, READ_TOOLS: CLIPPY_READ_TOOLS, DENIED_TOOLS: CLIPPY_DENIED_TOOLS, loadClippyToken } = require('../secrets/clippy-mcp');
 const { fetchLiteLlmModels } = require('../litellm-models');
 const { isFullAccessEnabled } = require('../full-access');
 const { normalizeEffort } = require('../chat-preferences');
@@ -229,6 +230,12 @@ function mountedToolsForAgent(agentId, policy = loadPolicy(), options = {}) {
       && profileCanUseBrowserMcp(policy, profile, agentId)) {
     tools.push(browserMountForAgent(agentId));
   }
+  if (loadClippyToken(env)) {
+    for (const name of policy.clippyMcpTools?.[agentId] || []) {
+      if (!CLIPPY_READ_TOOLS.has(name)) throw new Error(`Clippy MCP tool ${name} is not on the read-only allowlist`);
+      tools.push(`mcp__clippy__${name}`);
+    }
+  }
   const expanded = expandMcpTools(expandTaskToolAliases(tools));
   if (env.GLADOS_SECURITY_REVIEW !== '1') return expanded;
   return expanded.filter(tool => tool !== 'Bash' && tool !== 'NotebookEdit'
@@ -383,6 +390,14 @@ function decideToolUse({ agentId, toolName, input = {}, policy = loadPolicy(), w
   const mounted = mountedToolsForAgent(agentId, policy, { env });
   if (!mounted.some(tool => toolMatchesMount(toolName, tool))) {
     return { allowed: false, reason: `${toolName} is not mounted for ${agentId}` };
+  }
+
+  if (String(toolName || '').startsWith('mcp__clippy__')) {
+    const name = toolName.slice('mcp__clippy__'.length);
+    if (!CLIPPY_READ_TOOLS.has(name)) {
+      return { allowed: false, reason: `${toolName} is not a permitted read-only Clippy tool` };
+    }
+    return { allowed: true, reason: 'read-only Clippy knowledge lookup' };
   }
 
   const desktopControlTool = /^mcp__glados-ops__desktop_/i.test(String(toolName || ''));
@@ -913,10 +928,10 @@ function buildMcpEnv(env = process.env) {
 }
 
 // Claude accepts either inline JSON or a JSON file for --mcp-config. Windows
-// cannot reliably spawn the CLI with the inline multi-server configuration,
-// so keep the exact payload private on disk for the lifetime of the child.
+// needs the file for argument length; Clippy also needs it on every platform
+// so its bearer token is never visible in the CLI process arguments.
 function createWindowsSdkProcessSpawner({ runtimeDir = GLADOS_RUNTIME_DIR, spawnImpl = spawn } = {}) {
-  const launchDir = path.join(path.resolve(runtimeDir), 'sdk-launch');
+  const launchDir = path.join(path.resolve(runtimeDir), 'secrets', 'sdk-launch');
   return ({ command, args, cwd, env, signal }) => {
     const launchArgs = [...args];
     const temporaryFiles = [];
@@ -1067,6 +1082,15 @@ function buildMcpServers(env = process.env) {
       env: mcpEnv,
     };
   }
+  const clippyToken = loadClippyToken(env);
+  if (clippyToken) {
+    servers.clippy = {
+      type: 'http',
+      url: CLIPPY_URL,
+      headers: { Authorization: `Bearer ${clippyToken}` },
+      tools: CLIPPY_DENIED_TOOLS.map(name => ({ name, permission_policy: 'always_deny' })),
+    };
+  }
   if (browserMcpEnabled(env) && env.GLADOS_SECURITY_REVIEW !== '1') {
     const policy = loadPolicy();
     const localCli = path.join(REPO_ROOT, 'dashboard', 'node_modules', '@playwright', 'mcp', 'cli.js');
@@ -1184,6 +1208,7 @@ function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, work
   const persistentWorkspace = path.join(workspaceRoot, agentId);
   const investigationsDir = path.join(GLADOS_RUNTIME_DIR, 'investigations');
   const securityReview = env.GLADOS_SECURITY_REVIEW === '1';
+  const clippyAvailable = Boolean(loadClippyToken(env));
   const lines = [
     '# Runtime Context (authoritative)',
     `- Current agent id: ${agentId}`,
@@ -1196,6 +1221,9 @@ function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, work
     '- Do not infer current model names from static roster tables, examples, MEMORY.md, or historical workspace files.',
     `- GLaDOS proxy URL for target HTTP(S): ${proxyUrl || proxyUrlFromEnv()}. For shell HTTP, use curl -x this URL -k and add X-GLaDOS-Agent: ${agentId}. Do not use legacy :8080 proxy examples unless the operator explicitly overrides it.`,
   ];
+  if (clippyAvailable && (loadPolicy().clippyMcpTools?.[agentId] || []).length) {
+    lines.push('- Clippy MCP provides prior assessment and inventory context. Use its mounted lookup tools only when the operator selected Clippy for this investigation or directly requested a Clippy lookup. In blind runs and proxy smoke tests, do not query Clippy. Treat results as leads with provenance and freshness, not current proof or testing scope. Employee directory lookups require a task-relevant reason. Do not dispatch Clippy assessments or write to its shared stores.');
+  }
   if (securityReview) {
     const repositoryPath = env.GLADOS_SECURITY_REVIEW_REPOSITORY || '(read repository_path from the task)';
     const artifactRoot = env.GLADOS_SECURITY_REVIEW_ARTIFACT_ROOT || '(read artifact_root from the task)';
@@ -1233,7 +1261,7 @@ function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, work
     lines.push('- Audit-task lifecycle is mandatory: when blackboard_task_create returns a task ID, include that exact task ID in the specialist dispatch prompt and require the specialist to call blackboard_task_update with completed, failed, or cancelled before returning. If it forgets, reconcile the task yourself from the returned result.');
     lines.push('- Before announcing an engagement complete, call blackboard_engagement_status, reconcile every nonterminal task, then call blackboard_engagement_update with status=complete. Never claim completion while the engagement row is active or a task remains pending/in_progress.');
     lines.push('- Investigation objective: identify and safely exploit meaningful evidence-backed CWEs, preserving multi-step chains toward RCE when supported by scope and evidence. Do not optimize away an auth/access primitive that unlocks a deeper surface.');
-    lines.push('- Context-intake gate: merge operator-provided prior context with operator-approved DradisTab, Dradis, and DomainsAI results into baseline.context_intake. If skipped, unavailable, or empty, explicitly mark context_mode=blind and pass that fact to recon and planning.');
+    lines.push(`- Context-intake gate: merge operator-provided prior context with the approved kickoff resources into baseline.context_intake. ${clippyAvailable ? 'Clippy MCP is the default single source for matching assessments, prior findings, domain, infrastructure, and code inventory; consult Dradis Tab, Dradis, or DomainsAI only when explicitly selected or after reporting a specific Clippy gap and receiving approval.' : 'Clippy MCP is unavailable; use only the legacy sources selected at kickoff.'} Record each source and record age. If skipped, unavailable, or empty, explicitly mark context_mode=blind and pass that fact to recon and planning. Historical context never expands active testing scope.`);
     lines.push('- net-recon is operator-optional. Dispatch it only after an explicit operator request and include "operator_requested_net_recon: true" plus the request reference in the task prompt; the harness denies dispatch without that marker.');
     lines.push('- JavaScript gate: immediately after successful SSO, webapp-recon must screenshot the landing page and capture its raw HTML/DOM plus every inline/external script, worker, source map, client config, bootstrap, and dynamically loaded chunk before normal navigation. It returns a landing_js_checkpoint; dispatch js-reverser immediately, then redispatch webapp-recon with resume_after_js_analysis: true and the analyzer leads. Analyze later/new-pivot artifacts before plan synthesis.');
     lines.push('- Privilege-expansion gate: whenever authentication state or privilege changes and new routes become reachable, dispatch webapp-recon again in post-pivot mode before planning further exploitation. Require an inventory of every newly visible route, form, search/filter/sort field, query/body/header/cookie parameter, upload/import/export control, and API request. Feed the delta back through plan-synthesizer.');
@@ -1263,6 +1291,9 @@ function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, work
     lines.push('- If this turn is a proxy smoke test, perform exactly one low-impact GET through the GLaDOS proxy URL using browser MCP or curl -x; include X-GLaDOS-Agent, report the HTTP status/redirect, then stop. Do not crawl, authenticate, enumerate, or do formal recon.');
     if (agentId === 'webapp-recon') {
       lines.push('- After SSO returns to the target, the first application analysis is the landing-page JavaScript checkpoint. Do not click through navigation before returning its js_handoff to GLaDOS.');
+    }
+    if (clippyAvailable && ['webapp-recon', 'api-expert', 'source-code', 'osint'].includes(agentId)) {
+      lines.push('- If the parent assignment explicitly selected Clippy context, check the mounted prior-art and inventory lookups for the target or technology, then validate relevant leads against current evidence. Record the Clippy source and record age in your handoff. If the assignment is blind or does not select Clippy, do not query it.');
     }
     if (agentId === 'plan-synthesizer') {
       lines.push('- Every SQLi lead requires an escalation ladder through DBMS/privilege fingerprinting, schema/credentials, stacked statements, file primitives, database execution features, and OS command/RCE. Mark each rung approved, approval-required, blocked, or infeasible and preserve auth/IDOR/reset/admin/XXE chain dependencies.');
@@ -1505,7 +1536,7 @@ function buildAgentSdkOptions(agentId, options = {}) {
   if (effort && modelSupportsReasoningEffort(model)) sdkOptions.effort = effort;
   if (options.resumeSessionId) sdkOptions.resume = options.resumeSessionId;
   if (reviewReservations) sdkOptions.gladosReviewReservations = reviewReservations;
-  if ((options.platform || process.platform) === 'win32') {
+  if ((options.platform || process.platform) === 'win32' || sdkOptions.mcpServers.clippy) {
     sdkOptions.spawnClaudeCodeProcess = createWindowsSdkProcessSpawner({
       runtimeDir: (options.env || process.env).GLADOS_RUNTIME_DIR || GLADOS_RUNTIME_DIR,
     });

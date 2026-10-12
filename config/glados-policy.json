@@ -132,6 +132,15 @@
     "webapp-validator",
     "webapp-vuln"
   ],
+  "clippyMcpTools": {
+    "glados": ["projects_search", "search", "read", "list_files", "directory_lookup", "directory_search", "cross_search", "domain_search", "domain_lookup", "infra_search", "infra_lookup", "github_search", "github_lookup"],
+    "webapp-recon": ["search", "read", "list_files", "domain_search", "domain_lookup", "infra_search", "infra_lookup", "github_search", "github_lookup"],
+    "api-expert": ["search", "read", "list_files", "domain_search", "domain_lookup", "infra_search", "infra_lookup", "github_search", "github_lookup"],
+    "source-code": ["search", "read", "list_files", "github_search", "github_lookup", "github_property_values"],
+    "osint": ["projects_search", "search", "read", "list_files", "directory_lookup", "directory_search", "cross_search", "domain_search", "domain_lookup", "infra_search", "infra_lookup", "github_search", "github_lookup", "github_property_values"],
+    "report-writer": ["search", "read", "list_files"],
+    "report-validator": ["search", "read", "list_files"]
+  },
   "agentToolProfiles": {
     "glados": "leader",
     "webapp-recon": "chain-capable-specialist",

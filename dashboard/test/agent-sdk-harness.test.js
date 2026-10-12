@@ -39,7 +39,7 @@ const { classifyToolUse, extractTargets } = require('glados-watchdog/lib/safety-
 const { planCheckDispatch, PHASE1_AGENTS, EXPLOITATION_AGENTS, META_AGENTS } = require('glados-watchdog/lib/plan-gate');
 
 function baseTestEnv(extra = {}) {
-  const env = { ...process.env, ANTHROPIC_AUTH_TOKEN: 'test-token', ...extra };
+  const env = { ...process.env, ANTHROPIC_AUTH_TOKEN: 'test-token', GLADOS_CLIPPY_MCP: '0', ...extra };
   for (const key of ['GLADOS_BROWSER_MCP', 'GLADOS_BROWSER_MCP_COMMAND', 'GLADOS_BROWSER_MCP_ARGS', 'GLADOS_BROWSER_MCP_ARGS_JSON', 'GLADOS_MITM_LISTEN_HOST', 'GLADOS_MITM_LISTEN_PORT', 'GLADOS_PROXY_URL', 'GLADOS_REPLAY_PROXY']) {
     if (!(key in extra)) delete env[key];
   }
@@ -213,11 +213,12 @@ test('every registered agent has exactly one watchdog dispatch classification', 
 });
 
 test('uses the caller tool policy and PreToolUse hard deny for direct turns', async () => {
+  const env = baseTestEnv();
   const opts = buildAgentSdkOptions('webapp-recon', {
-    env: baseTestEnv(),
+    env,
     turnTargets: ['https://ford.com'],
   });
-  const intendedTools = mountedToolsForAgent('webapp-recon');
+  const intendedTools = mountedToolsForAgent('webapp-recon', loadPolicy(), { env });
   assert.equal(opts.includePartialMessages, true);
   assert.equal(opts.forwardSubagentText, true);
   assert.equal(opts.permissionMode, 'default');
@@ -654,10 +655,59 @@ test('Windows SDK launch externalizes MCP configuration and excludes unrelated h
   assert.equal(captured.spawnOptions.signal, signal);
   const configIndex = captured.args.indexOf('--mcp-config');
   const configFile = captured.args[configIndex + 1];
-  assert.ok(configFile.startsWith(path.join(runtimeDir, 'sdk-launch')));
+  assert.ok(configFile.startsWith(path.join(runtimeDir, 'secrets', 'sdk-launch')));
   assert.ok(configFile.length < inlineConfig.length);
   assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), JSON.parse(inlineConfig));
   child.emit('exit', 0, null);
+  assert.equal(fs.existsSync(configFile), false);
+});
+
+test('Clippy mounts only selected read tools, excludes reviews, and keeps its bearer out of launch args', () => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-clippy-mcp-'));
+  const secretDir = path.join(runtimeDir, 'secrets');
+  fs.mkdirSync(secretDir, { mode: 0o700 });
+  const secretFile = path.join(secretDir, 'clippy-mcp.json');
+  fs.writeFileSync(secretFile, JSON.stringify({ version: 1, token: 'private-test-bearer' }), { mode: 0o600 });
+  const env = baseTestEnv({ GLADOS_RUNTIME_DIR: runtimeDir, GLADOS_CLIPPY_MCP: '1' });
+  const opts = buildAgentSdkOptions('glados', { env, platform: 'darwin' });
+
+  assert.equal(opts.mcpServers.clippy.type, 'http');
+  assert.equal(opts.mcpServers.clippy.url, 'https://clippy.redteamstuff.com:8443/mcp/');
+  assert.equal(opts.mcpServers.clippy.headers.Authorization, 'Bearer private-test-bearer');
+  assert.equal(opts.mcpServers.clippy.tools.find(row => row.name === 'start_session').permission_policy, 'always_deny');
+  assert.equal(typeof opts.spawnClaudeCodeProcess, 'function');
+  assert.match(opts.systemPrompt, /Clippy MCP is the default single source/);
+  assert.match(opts.agents['webapp-recon'].prompt, /If the parent assignment explicitly selected Clippy context/);
+  assert.ok(opts.gladosMountedTools.includes('mcp__clippy__projects_search'));
+  assert.ok(opts.gladosMountedTools.includes('mcp__clippy__directory_lookup'));
+  assert.ok(opts.gladosMountedTools.includes('mcp__clippy__domain_search'));
+  assert.ok(!opts.gladosMountedTools.includes('mcp__clippy__start_session'));
+  assert.ok(opts.agents['webapp-recon'].tools.includes('mcp__clippy__domain_search'));
+  assert.ok(!opts.agents['webapp-recon'].tools.includes('mcp__clippy__directory_lookup'));
+  assert.ok(!opts.agents['source-code'].tools.includes('mcp__clippy__domain_search'));
+  assert.equal(decideToolUse({ agentId: 'glados', toolName: 'mcp__clippy__projects_search', input: { query: 'FordTube' }, env }).allowed, true);
+  assert.equal(decideToolUse({ agentId: 'glados', toolName: 'mcp__clippy__start_session', input: { target: 'example.test', template: 'recon' }, env }).allowed, false);
+  assert.equal(decideToolUse({ agentId: 'webapp-recon', toolName: 'mcp__clippy__directory_search', input: { query: 'person' }, env }).allowed, false);
+
+  const reviewEnv = { ...env, GLADOS_SECURITY_REVIEW: '1' };
+  const reviewOpts = buildAgentSdkOptions('glados', { env: reviewEnv });
+  assert.equal(reviewOpts.mcpServers.clippy, undefined);
+  assert.equal(mountedToolsForAgent('glados', loadPolicy(), { env: reviewEnv }).some(tool => tool.startsWith('mcp__clippy__')), false);
+
+  const fakeChild = new EventEmitter();
+  fakeChild.stdin = new EventEmitter();
+  fakeChild.stdout = new EventEmitter();
+  fakeChild.stderr = null;
+  let captured;
+  const spawnImpl = (command, args) => { captured = { command, args }; return fakeChild; };
+  const spawner = createWindowsSdkProcessSpawner({ runtimeDir, spawnImpl });
+  const inlineConfig = JSON.stringify({ mcpServers: opts.mcpServers });
+  spawner({ command: 'claude', args: ['--mcp-config', inlineConfig], cwd: runtimeDir, env, signal: new AbortController().signal });
+  assert.equal(captured.args.join(' ').includes('private-test-bearer'), false);
+  const configFile = captured.args[1];
+  assert.equal(fs.statSync(configFile).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(fs.readFileSync(configFile, 'utf8')).mcpServers.clippy.headers.Authorization, 'Bearer private-test-bearer');
+  fakeChild.emit('exit', 0, null);
   assert.equal(fs.existsSync(configFile), false);
 });
 

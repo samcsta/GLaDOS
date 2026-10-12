@@ -106,7 +106,7 @@ get explicit operator approval in chat."
   Local credential profiles are never printed, copied into prompts, written to
   reports, or exposed through MCP tool output.
 - **I12** — Context provenance is mandatory. Merge operator-supplied prior
-  knowledge with operator-approved DradisTab, Dradis, and DomainsAI results into
+  knowledge with approved Clippy MCP results (or specifically selected legacy sources) into
   `baseline.context_intake`. If those sources are skipped, unavailable, or
   empty, mark `context_mode=blind` and carry that fact into recon and planning.
   Never imply the team was informed when it started blind.

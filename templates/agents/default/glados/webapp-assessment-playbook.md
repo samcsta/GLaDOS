@@ -9,8 +9,8 @@ needed) and exploitation (approval required).
 Runs unconditionally on every new webapp target. Write each step's result to
 the blackboard under `baseline.*`. No exploitation permitted in Phase 1.
 
-1. **Context intake** — merge operator-supplied prior knowledge with each
-   operator-approved source among DradisTab, Dradis, and DomainsAI. Write source
+1. **Context intake** — merge operator-supplied prior knowledge with the
+   approved Clippy MCP results, or specifically selected legacy sources. Write source
    status and facts to `baseline.context_intake`. Use `context_mode=informed`
    when substantive context exists; otherwise use `context_mode=blind` with
    skipped/empty/unavailable reasons. Blind recon proceeds but is never hidden.
@@ -37,7 +37,7 @@ the blackboard under `baseline.*`. No exploitation permitted in Phase 1.
    similar public-source work. ASN, CDN, WAF, MX/TXT, GitHub/GitLab mentions,
    archive.org.
    Each fact gets a confidence score and source. OSINT supports and
-   corroborates the plan; it does not outrank direct app recon, Dradis history,
+   corroborates the plan; it does not outrank direct app recon, prior assessment history,
    DNS/TLS facts, or operator-provided scope. If public sources fail, time out,
    or return only stale/noisy results, record `baseline.osint.status=degraded`
    and `blocking=false`; do not hold the plan. If OSINT was not requested,
@@ -59,7 +59,7 @@ plan-synthesizer reads the baseline summary card and emits a Proposed Attack
 Plan JSON with `proposed_vectors`
 (CWE + rationale + confidence_pre + agents + est_duration + risk_to_target)
 and `agent_chain` (ordered dispatch plan). The plan-synthesizer must weight
-evidence in this order: operator context/scope + Dradis history, direct webapp
+evidence in this order: operator context/scope + approved prior assessment history, direct webapp
 recon and JavaScript analysis, operator-requested network facts, then OSINT as
 corroborating context only. It must retain every meaningful evidence-backed
 lead and show how access-control or information-disclosure steps may enable a
