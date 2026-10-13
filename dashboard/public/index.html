@@ -10,8 +10,8 @@
       document.documentElement.dataset.theme = theme === 'classic' ? 'classic' : 'quantum';
     } catch { document.documentElement.dataset.theme = 'quantum'; }
   </script>
-  <link rel="stylesheet" href="/styles.css?v=20261012-clippy-composer" />
-  <link rel="stylesheet" href="/chat-alternate.css?v=20261012-clippy-composer" />
+  <link rel="stylesheet" href="/styles.css?v=20261013-chat-qol" />
+  <link rel="stylesheet" href="/chat-alternate.css?v=20261013-chat-qol" />
 </head>
 <body>
   <header class="topbar">
@@ -22,7 +22,7 @@
     <nav class="tabs" id="tabs"></nav>
     <div class="controls">
       <label class="toggle"><input type="checkbox" id="errors-only" /> Errors only</label>
-      <label class="toggle" title="When off, hide thinking blocks and intermediate tool calls — show only your input to GLaDOS, tool results, and final assistant output."><input type="checkbox" id="debug-mode" checked /> Debug</label>
+      <label class="toggle" title="Show thinking and detailed tool activity"><input type="checkbox" id="debug-mode" /> Debug</label>
     </div>
     <button id="notifications-toggle" class="notification-toggle" type="button" aria-label="Open notifications" title="Notifications">
       Alerts <span id="notifications-badge" class="notification-badge hidden">0</span>
@@ -55,7 +55,6 @@
         <span class="sidebar-heading-controls"><span class="collapsible-chevron">▾</span></span>
       </h2>
       <div class="workspace-links" id="workspace-links">
-        <a href="#" id="open-overview">Overview</a>
         <a href="#" id="open-glados">GLaDOS</a>
         <a href="#" id="open-plans">Plans <span id="plans-badge" class="plans-badge hidden">0</span></a>
         <a href="#" id="open-reports">Reports</a>
@@ -97,7 +96,7 @@
     <div id="sidebar-splitter" class="layout-splitter vertical" role="separator" aria-orientation="vertical" title="Drag to resize sidebar"></div>
 
     <section class="pane" id="pane">
-      <div class="pane-empty">Open Overview or start chatting with GLaDOS.</div>
+      <div class="pane-empty">Open GLaDOS to start chatting.</div>
     </section>
   </main>
 
@@ -124,6 +123,13 @@
     <div id="notification-list" class="notification-list"></div>
   </aside>
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
+  <div id="command-palette" class="command-palette hidden" aria-hidden="true" inert>
+    <div class="command-palette-dialog" role="dialog" aria-modal="true" aria-label="Jump to a session or agent">
+      <div class="command-palette-head"><input id="command-query" type="search" autocomplete="off" placeholder="Find a session or agent…" aria-label="Find a session or agent" /><button id="command-close" type="button" aria-label="Close jump menu">×</button></div>
+      <div id="command-results" class="command-results" role="listbox" aria-label="Matching sessions and agents"></div>
+      <p>↑ ↓ navigate · Enter open · Esc close</p>
+    </div>
+  </div>
   <div id="modal-root"></div>
 
   <link rel="stylesheet" href="/vendor/xterm/css/xterm.css" />
@@ -131,6 +137,6 @@
   <script src="/vendor/dompurify/purify.min.js"></script>
   <script src="/vendor/xterm/lib/xterm.js"></script>
   <script src="/vendor/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
-  <script src="/app.js?v=20261012-clippy-composer"></script>
+  <script src="/app.js?v=20261013-chat-qol"></script>
 </body>
 </html>

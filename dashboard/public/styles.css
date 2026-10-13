@@ -509,14 +509,12 @@ body.errors-only .entry:not(.tool-result.error):not(.prompt-error):not(.operator
 /* Debug off: show only operator messages and final assistant output. */
 body.debug-off .entry.thinking,
 body.debug-off .entry.tool-call,
-body.debug-off .entry.tool-result,
-body.debug-off .entry.prompt-error,
 body.debug-off .entry.meta,
 body.debug-off .entry.harness-init,
 body.debug-off .entry.liveness,
-body.debug-off .entry.permission-denied,
 body.debug-off .entry.result,
 body.debug-off .entry.session-start { display: none; }
+body.debug-off .entry.tool-call.provenance-focus { display: block; }
 
 /* --- Proxy tab (native traffic history live view) --- */
 .proxy-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
@@ -2046,4 +2044,30 @@ html[data-theme="quantum"] .security-review-card { background: var(--bg-hi); }
   html[data-theme="quantum"] .tabs { order: 2; }
   html[data-theme="quantum"] .notification-toggle { min-width: 52px !important; padding-inline: 7px; }
   html[data-theme="quantum"] .settings-pane { padding: 16px 12px; }
+}
+
+/* Keyboard jump overlay; the toolbar stays free of navigation controls. */
+.command-palette { position: fixed; inset: 0; z-index: 200; display: flex; align-items: flex-start; justify-content: center; padding: min(15vh, 120px) 14px 14px; background: rgba(3,8,15,.72); backdrop-filter: blur(4px); }
+.command-palette.hidden { display: none; }
+.command-palette-dialog { width: min(600px, 100%); padding: 11px; border: 1px solid var(--control-hover-border); border-radius: 14px; background: var(--bg-hi); box-shadow: 0 25px 80px rgba(0,0,0,.55); }
+.command-palette-head { display: flex; gap: 8px; }
+.command-palette-head input { flex: 1; min-width: 0; height: 42px; padding: 0 12px; border: 1px solid var(--control-border); border-radius: 8px; outline: 0; color: var(--fg); background: var(--bg); font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.command-palette-head input:focus { border-color: var(--accent); }
+.command-palette-head button { width: 42px; font-size: 20px; }
+.command-results { max-height: min(54vh, 410px); overflow-y: auto; padding-top: 8px; }
+.command-result { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 39px; padding: 8px 11px; border: 0; border-radius: 7px; text-align: left; background: transparent; }
+.command-result strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
+.command-result small { flex: 0 0 auto; color: var(--fg-dim); font-size: 10px; }
+.command-result:hover, .command-result.selected { background: var(--accent-soft) !important; }
+.command-empty { margin: 18px 8px; color: var(--fg-dim); }
+.command-palette-dialog > p { margin: 9px 5px 0; color: var(--fg-dim); font-size: 10px; }
+#agent-list .agent-row-last { color: var(--fg-dim); }
+#agent-list li.quiet .agent-row-state { color: var(--warn); }
+#agent-list li.quiet .dot { background: var(--warn); box-shadow: 0 0 0 2px rgba(250,204,21,.12); }
+
+@media (max-width: 760px) {
+  .topbar { flex-wrap: wrap; }
+  .tabs { flex: 1 1 100%; order: 5; }
+  .controls { display: flex; }
+  .controls .toggle { display: flex; font-size: 10px; }
 }

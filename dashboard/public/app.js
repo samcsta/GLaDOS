@@ -1,6 +1,14 @@
 const ALERT_KINDS = new Set(['error', 'failed', 'offline', 'denied']);
 const DASHBOARD_THEME_KEY = 'glados-dash.theme';
 const DASHBOARD_THEMES = new Set(['quantum', 'classic']);
+const CHAT_TEXT_SCALE_KEY = 'glados-dash.chat-text-scale';
+
+function savedChatTextScale() {
+  try {
+    const value = Number(localStorage.getItem(CHAT_TEXT_SCALE_KEY));
+    return Number.isFinite(value) && value >= 0.8 && value <= 1.8 ? value : 1;
+  } catch { return 1; }
+}
 
 function savedDashboardTheme() {
   try {
@@ -12,6 +20,7 @@ function savedDashboardTheme() {
 const state = {
   agents: [],          // from /api/agents
   active: new Map(),   // agentId -> { sessionId }
+  agentActivity: new Map(), // agentId -> last meaningful session or transcript event
   openTabs: [],        // [{ id: 'glados-chat' | agentId, kind: 'chat'|'agent', label }]
   currentTab: null,
   transcripts: new Map(), // tabId -> { es, el, events[], sending }
@@ -63,6 +72,7 @@ const state = {
   unreadNotifications: 0,
   provenanceFocus: null,
   theme: savedDashboardTheme(),
+  chatTextScale: savedChatTextScale(),
 };
 
 function applyDashboardTheme(theme, { persist = true } = {}) {
@@ -92,6 +102,15 @@ const errorsOnlyEl = document.getElementById('errors-only');
 const debugModeEl = document.getElementById('debug-mode');
 const notificationDrawerEl = document.getElementById('notification-drawer');
 const notificationListEl = document.getElementById('notification-list');
+
+function setChatTextScale(value) {
+  const clamped = Math.max(0.8, Math.min(1.8, Math.round(Number(value) * 10) / 10));
+  state.chatTextScale = Number.isFinite(clamped) ? clamped : 1;
+  document.documentElement.style.setProperty('--chat-text-scale', String(state.chatTextScale));
+  try { localStorage.setItem(CHAT_TEXT_SCALE_KEY, String(state.chatTextScale)); } catch {}
+}
+
+setChatTextScale(state.chatTextScale);
 
 function storageGetJson(key, fallback) {
   try {
@@ -125,6 +144,7 @@ function closeSessionStreams() {
   }
   state.transcripts.clear();
   state.active.clear();
+  state.agentActivity.clear();
 }
 
 async function loadInvestigationSessions() {
@@ -441,13 +461,16 @@ errorsOnlyEl.addEventListener('change', () => {
 // tool results, and final assistant output visible.
 function applyDebugMode() {
   document.body.classList.toggle('debug-off', !debugModeEl.checked);
+  try { localStorage.setItem('glados-dash.debug-mode', debugModeEl.checked ? '1' : '0'); } catch {}
 }
+try { debugModeEl.checked = localStorage.getItem('glados-dash.debug-mode') === '1'; } catch {}
 debugModeEl.addEventListener('change', applyDebugMode);
 applyDebugMode();
 
 function setAgentHaltedState(agentId, halted) {
   const agent = state.agents.find(entry => entry.id === agentId);
   if (agent) agent.halted = !!halted;
+  noteAgentActivity(agentId, halted ? 'Operator halted agent' : 'Agent resumed', { status: halted ? 'halted' : 'running' });
   renderAgentList();
   syncAgentViewToolbars(agentId);
 }
@@ -458,12 +481,14 @@ function syncAgentViewToolbars(agentId = null) {
     if (agentId && id !== agentId) return;
     const agent = state.agents.find(entry => entry.id === id);
     const halted = !!agent?.halted;
-    const active = state.active.has(id);
+    const view = agentActivityView(id);
     const status = toolbar.querySelector('.agent-runtime-status');
     if (status) {
-      status.className = `agent-runtime-status ${halted ? 'halted' : (active ? 'running' : 'idle')}`;
-      status.textContent = halted ? 'Halted' : (active ? 'Running' : 'Idle');
+      status.className = `agent-runtime-status ${view.status || 'idle'}`;
+      status.textContent = view.status ? view.status[0].toUpperCase() + view.status.slice(1) : 'Idle';
     }
+    const lastActivity = toolbar.querySelector('.agent-last-activity');
+    if (lastActivity) lastActivity.textContent = view.detail;
     const halt = toolbar.querySelector('[data-agent-action="halt"]');
     const resume = toolbar.querySelector('[data-agent-action="resume"]');
     if (halt) halt.disabled = halted;
@@ -488,6 +513,7 @@ function createAgentViewToolbar(agentId) {
       <span class="agent-view-title"><strong>${escapeHtml(label)}</strong><small>${role}</small></span>
       <span class="agent-runtime-status idle">Idle</span>
     </div>
+    <span class="agent-last-activity" aria-live="off"></span>
     <details class="agent-actions">
       <summary>Actions</summary>
       <div class="agent-actions-menu" role="menu" aria-label="${escapeHtml(agentId)} actions">
@@ -648,7 +674,13 @@ async function loadAgents() {
   state.agents = j.agents || [];
   state.active.clear();
   for (const a of state.agents) {
-    if (a.active) state.active.set(a.id, { sessionId: a.session?.sessionId });
+    if (a.active) {
+      state.active.set(a.id, { sessionId: a.session?.sessionId });
+      if (state.agentActivity.get(a.id)?.status !== 'running') noteAgentActivity(a.id, 'Detected active', { startedAt: a.session?.startedAt });
+    }
+  }
+  for (const id of previouslyActive) {
+    if (!state.active.has(id)) noteAgentActivity(id, 'Session finished', { status: 'done' });
   }
   for (const a of state.agents) {
     if (!a.active || a.id === 'glados' ) continue;
@@ -661,6 +693,75 @@ async function loadAgents() {
   renderAgentList();
   syncAgentViewToolbars();
   return true;
+}
+
+function activityTime(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const parsed = Date.parse(value || '');
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function noteAgentActivity(agentId, detail, { status = 'running', startedAt = null, at = Date.now() } = {}) {
+  if (!agentId) return;
+  const previous = state.agentActivity.get(agentId) || {};
+  const eventTime = activityTime(at) || Date.now();
+  if (previous.lastAt && eventTime < previous.lastAt) return;
+  state.agentActivity.set(agentId, {
+    status,
+    detail,
+    lastAt: eventTime,
+    startedAt: activityTime(startedAt) || (status === 'running'
+      ? (previous.status === 'running' ? previous.startedAt || eventTime : eventTime)
+      : previous.startedAt || null),
+  });
+}
+
+function agentActivityView(agentId) {
+  const agent = state.agents.find(item => item.id === agentId);
+  const record = state.agentActivity.get(agentId);
+  const running = state.active.has(agentId);
+  const elapsed = record?.lastAt ? formatElapsed(Date.now() - record.lastAt) : null;
+  const last = record?.detail ? `${record.detail}${elapsed ? ` · ${elapsed} ago` : ''}` : '';
+  if (agent?.halted) return { status: 'halted', detail: last || 'Needs attention' };
+  if (running) {
+    const quiet = record?.lastAt && Date.now() - record.lastAt > 120_000;
+    const age = record?.startedAt ? formatElapsed(Date.now() - record.startedAt) : '';
+    return { status: quiet ? 'quiet' : 'running', detail: last || (age ? `Active for ${age}` : 'Working') };
+  }
+  if (record?.status === 'done') return { status: 'done', detail: last };
+  return { status: '', detail: '' };
+}
+
+function updateAgentActivityTimes() {
+  document.querySelectorAll('#agent-list li[data-id]').forEach(row => {
+    const view = agentActivityView(row.dataset.id);
+    const stateElement = row.querySelector('.agent-row-state');
+    const detailElement = row.querySelector('.agent-row-last');
+    if (stateElement) stateElement.textContent = view.status;
+    if (detailElement) detailElement.textContent = view.detail;
+    row.classList.toggle('quiet', view.status === 'quiet');
+    row.title = view.detail ? `${row.dataset.id}: ${view.status || 'available'} · ${view.detail}` : row.dataset.id;
+  });
+  document.querySelectorAll('.agent-view-toolbar').forEach(toolbar => {
+    const view = agentActivityView(toolbar.dataset.agentId);
+    const status = toolbar.querySelector('.agent-runtime-status');
+    if (status) {
+      status.className = `agent-runtime-status ${view.status || 'idle'}`;
+      status.textContent = view.status ? view.status[0].toUpperCase() + view.status.slice(1) : 'Idle';
+    }
+    const detail = toolbar.querySelector('.agent-last-activity');
+    if (detail) detail.textContent = view.detail;
+  });
+}
+
+let agentActivityRefreshTimer = null;
+function scheduleAgentActivityRefresh() {
+  if (agentActivityRefreshTimer) return;
+  agentActivityRefreshTimer = setTimeout(() => {
+    agentActivityRefreshTimer = null;
+    renderAgentList();
+    syncAgentViewToolbars();
+  }, 350);
 }
 
 
@@ -677,7 +778,8 @@ function renderAgentList() {
   const groups = [
     ['Needs attention', filtered.filter(a => a.halted)],
     ['Running', filtered.filter(a => state.active.has(a.id) && !a.halted)],
-    ['Available', filtered.filter(a => !state.active.has(a.id) && !a.halted)],
+    ['Recent', filtered.filter(a => !state.active.has(a.id) && !a.halted && state.agentActivity.get(a.id)?.status === 'done')],
+    ['Available', filtered.filter(a => !state.active.has(a.id) && !a.halted && state.agentActivity.get(a.id)?.status !== 'done')],
   ];
   for (const [label, agents] of groups) {
     if (!agents.length) continue;
@@ -690,8 +792,9 @@ function renderAgentList() {
     li.dataset.id = a.id;
     li.tabIndex = 0;
     li.className = (state.active.has(a.id) ? 'live ' : '') + (a.halted ? 'halted ' : '') + (state.currentTab === a.id ? 'active' : '');
-    li.innerHTML = `<span class="dot"></span><span class="agent-row-main"><span class="name">${escapeHtml(a.id)}</span><small>${escapeHtml(a.model || a.name || 'Ready')}</small></span>` +
-      `<span class="agent-row-state">${a.halted ? 'halted' : (state.active.has(a.id) ? 'live' : '')}</span>`;
+    const activity = agentActivityView(a.id);
+    li.innerHTML = `<span class="dot"></span><span class="agent-row-main"><span class="name">${escapeHtml(a.id)}</span><small class="agent-row-model">${escapeHtml(a.model || a.name || 'Ready')}</small><small class="agent-row-last">${escapeHtml(activity.detail)}</small></span>` +
+      `<span class="agent-row-state">${escapeHtml(activity.status)}</span>`;
     li.addEventListener('click', () => openAgentTab(a.id));
     li.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') openAgentTab(a.id); });
     agentListEl.appendChild(li);
@@ -704,6 +807,7 @@ function renderAgentList() {
     agentListEl.appendChild(empty);
   }
   syncAgentViewToolbars();
+  updateAgentActivityTimes();
 }
 
 function parseUtcTimestamp(value) {
@@ -860,7 +964,6 @@ function setCurrentTab(id) {
 
 function updateWorkspaceNav() {
   const mapping = {
-    overview: 'open-overview',
     'glados-chat': 'open-glados',
     plans: 'open-plans',
     reports: 'open-reports',
@@ -934,7 +1037,7 @@ function renderPane() {
   paneEl.innerHTML = '';
   const id = state.currentTab;
   if (!id) {
-    paneEl.innerHTML = '<div class="pane-empty">Open Overview or start chatting with GLaDOS.</div>';
+    paneEl.innerHTML = '<div class="pane-empty">Open GLaDOS to start chatting.</div>';
     return;
   }
   const tab = state.openTabs.find(t => t.id === id);
@@ -2914,6 +3017,51 @@ function chatElement(root, selector, tabId) {
   return root?.querySelector(`${selector}[data-chat-tab="${CSS.escape(tabId)}"]`) || null;
 }
 
+function refreshChatFind(chat, { advance = 0 } = {}) {
+  const bar = chat?.querySelector('.chat-find-bar');
+  if (!bar || bar.hidden) return;
+  const query = bar.querySelector('input').value.trim().toLocaleLowerCase();
+  const transcript = chat.querySelector('.transcript');
+  transcript.querySelectorAll('.entry.find-current').forEach(entry => entry.classList.remove('find-current'));
+  const matches = query ? [...transcript.querySelectorAll('.entry')].filter(entry => {
+    if (getComputedStyle(entry).display === 'none') return false;
+    return (entry.textContent || '').toLocaleLowerCase().includes(query);
+  }) : [];
+  let index = Number(bar.dataset.findIndex || 0);
+  if (advance) index += advance;
+  index = matches.length ? (index + matches.length) % matches.length : 0;
+  bar.dataset.findIndex = String(index);
+  bar.querySelector('.chat-find-count').textContent = query ? `${matches.length ? index + 1 : 0} of ${matches.length}` : 'Type to search';
+  const current = matches[index];
+  if (current) {
+    current.classList.add('find-current');
+    current.querySelectorAll('details').forEach(details => { details.open = true; });
+    const rec = state.transcripts.get(state.currentTab);
+    if (rec) rec.autoScroll = false;
+    current.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+}
+
+function closeChatFind(chat) {
+  const bar = chat?.querySelector('.chat-find-bar');
+  if (!bar) return;
+  bar.hidden = true;
+  chat.querySelectorAll('.entry.find-current').forEach(entry => entry.classList.remove('find-current'));
+  if (bar.returnFocus?.isConnected) bar.returnFocus.focus();
+  else chat.querySelector('textarea')?.focus();
+}
+
+function openChatFind(chat) {
+  const bar = chat?.querySelector('.chat-find-bar');
+  if (!bar) return;
+  if (bar.hidden) bar.returnFocus = document.activeElement;
+  bar.hidden = false;
+  const input = bar.querySelector('input');
+  input.focus();
+  input.select();
+  refreshChatFind(chat);
+}
+
 function renderAgentChatSurface(agentId, tabId, coordinator) {
   const label = agentId === 'glados' ? 'GLaDOS' : agentId;
   const chat = document.createElement('div');
@@ -2922,6 +3070,12 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
   chat.style.setProperty('--agent-feed-label', `"${String(label).toUpperCase()} / CHAMBER FEED"`);
   const toolbar = createAgentViewToolbar(agentId);
   chat.appendChild(toolbar);
+
+  const findBar = document.createElement('div');
+  findBar.className = 'chat-find-bar';
+  findBar.hidden = true;
+  findBar.innerHTML = '<label>Find in conversation <input type="search" autocomplete="off" aria-label="Find in conversation" /></label><span class="chat-find-count">Type to search</span><button type="button" data-find-previous aria-label="Previous result">↑</button><button type="button" data-find-next aria-label="Next result">↓</button><button type="button" data-find-close aria-label="Close find">×</button>';
+  chat.appendChild(findBar);
 
   const transcript = document.createElement('div');
   transcript.className = 'transcript';
@@ -2934,6 +3088,14 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
   inputRow.innerHTML = chatComposerMarkup(tabId, label, { coordinator });
   chat.append(transcript, sendingEl, inputRow);
   paneEl.appendChild(chat);
+  findBar.querySelector('input').addEventListener('input', () => { findBar.dataset.findIndex = '0'; refreshChatFind(chat); });
+  findBar.querySelector('input').addEventListener('keydown', event => {
+    if (event.key === 'Enter') { event.preventDefault(); refreshChatFind(chat, { advance: event.shiftKey ? -1 : 1 }); }
+    if (event.key === 'Escape') { event.preventDefault(); closeChatFind(chat); }
+  });
+  findBar.querySelector('[data-find-previous]').addEventListener('click', () => refreshChatFind(chat, { advance: -1 }));
+  findBar.querySelector('[data-find-next]').addEventListener('click', () => refreshChatFind(chat, { advance: 1 }));
+  findBar.querySelector('[data-find-close]').addEventListener('click', () => closeChatFind(chat));
   syncAgentViewToolbars(agentId);
 
   const rec = ensureTranscript(tabId, agentId);
@@ -3295,7 +3457,7 @@ function appendEntry(container, ev, rec) {
     const args = ev.arguments !== undefined
       ? JSON.stringify(ev.arguments, null, 2)
       : (ev.toolInput !== undefined ? JSON.stringify(ev.toolInput, null, 2) : '');
-    el.innerHTML = `<span class="ts">${ts}</span><span class="tool-name">→ ${escapeHtml(ev.toolName || '?')}</span>${renderCollapsible(args, 'args')}`;
+    el.innerHTML = `<details class="tool-details"><summary><span class="tool-name">→ ${escapeHtml(ev.toolName || '?')}</span><span class="ts">${ts}</span></summary><div class="tool-details-body">${renderCollapsible(args, 'args')}</div></details>`;
     const targetUrl = extractEventUrl(ev);
     if (targetUrl && rec?.agentId) {
       const traffic = document.createElement('button');
@@ -3324,7 +3486,7 @@ function appendEntry(container, ev, rec) {
     const truncNote = isTruncated
       ? `<div class="truncation-note"><button class="truncation-load-btn" type="button">[body truncated at 8KB — click to load full ${fullText.length.toLocaleString()} chars]</button></div>`
       : '';
-    el.innerHTML = `<span class="ts">${ts}</span><span class="tool-name">${header} ${escapeHtml(ev.toolName || '?')}${extra}</span>${renderCollapsible(displayed, 'out')}${truncNote}`;
+    el.innerHTML = `<details class="tool-details" ${ev.isError ? 'open' : ''}><summary><span class="tool-name">${header} ${escapeHtml(ev.toolName || '?')}${extra}</span><span class="ts">${ts}</span></summary><div class="tool-details-body">${renderCollapsible(displayed, 'out')}${truncNote}</div></details>`;
     if (isTruncated) {
       const btn = el.querySelector('.truncation-load-btn');
       btn?.addEventListener('click', () => {
@@ -3383,6 +3545,17 @@ function appendEntry(container, ev, rec) {
   }
 
   container.appendChild(el);
+  if (rec?.agentId && ['assistant-text', 'tool-call', 'tool-result', 'prompt-error', 'permission-denied'].includes(kind)) {
+    const detail = kind === 'assistant-text' ? 'Responded'
+      : kind === 'tool-call' ? `Used ${ev.toolName || 'a tool'}`
+      : kind === 'tool-result' ? (ev.isError ? `Tool error: ${ev.toolName || 'unknown'}` : `Tool finished: ${ev.toolName || 'unknown'}`)
+      : kind === 'permission-denied' ? 'Permission denied' : 'Prompt failed';
+    noteAgentActivity(rec.agentId, detail, {
+      status: state.active.has(rec.agentId) ? 'running' : 'done',
+      at: ev.ts || Date.now(),
+    });
+    scheduleAgentActivityRefresh();
+  }
   if (kind === 'tool-call' && state.provenanceFocus?.agentId === rec?.agentId) {
     setTimeout(() => focusTranscriptProvenance(rec), 0);
   }
@@ -3534,6 +3707,7 @@ function subscribeLobby() {
     const arr = JSON.parse(e.data);
     for (const a of arr) {
       state.active.set(a.agentId, { sessionId: a.sessionId });
+      if (state.agentActivity.get(a.agentId)?.status !== 'running') noteAgentActivity(a.agentId, 'Session active', { startedAt: a.startedAt });
       if (a.agentId !== 'glados' && !state.openTabs.find(t => t.id === a.agentId)) {
         ensureAgentTab(a.agentId);
       }
@@ -3545,6 +3719,7 @@ function subscribeLobby() {
     refreshInvestigationNavigationSoon();
     if (info.investigationSessionId && info.investigationSessionId !== state.currentSessionId) return;
     state.active.set(info.agentId, { sessionId: info.sessionId });
+    noteAgentActivity(info.agentId, 'Session started', { startedAt: info.startedAt });
     logEvent('started', `${info.agentId} session-started`);
     renderAgentList();
     if (info.agentId !== 'glados' && !state.openTabs.find(t => t.id === info.agentId)) {
@@ -3556,6 +3731,7 @@ function subscribeLobby() {
     refreshInvestigationNavigationSoon();
     if (info.investigationSessionId && info.investigationSessionId !== state.currentSessionId) return;
     state.active.delete(info.agentId);
+    noteAgentActivity(info.agentId, 'Session finished', { status: 'done' });
     logEvent('ended', `${info.agentId} session-ended`);
     renderAgentList();
   });
@@ -3566,6 +3742,7 @@ function subscribeLobby() {
     if (!info.agentId) return;
     clearTranscriptTab(tabIdForAgent(info.agentId));
     state.active.delete(info.agentId);
+    noteAgentActivity(info.agentId, 'Session reset', { status: 'done' });
     logEvent('ended', `${info.agentId} session-reset`);
     renderAgentList();
     if (state.currentTab === tabIdForAgent(info.agentId)) renderPane();
@@ -3584,11 +3761,13 @@ function subscribeLobby() {
     if (info.investigationSessionId && info.investigationSessionId !== state.currentSessionId) return;
     if (info.live) {
       state.active.set(info.agentId, { sessionId: info.sessionId || info.state || 'live' });
+      if (state.agentActivity.get(info.agentId)?.status !== 'running') noteAgentActivity(info.agentId, 'Agent active', { startedAt: info.startedAt });
       if (info.agentId !== 'glados' && !state.openTabs.find(t => t.id === info.agentId)) {
         ensureAgentTab(info.agentId);
       }
     } else {
       state.active.delete(info.agentId);
+      noteAgentActivity(info.agentId, 'Agent finished', { status: 'done' });
     }
     renderAgentList();
   });
@@ -3612,6 +3791,8 @@ function subscribeLobby() {
     const tabId = data.agentId === 'glados' ? 'glados-chat' : null;
     if (!tabId) return;
     state.active.set(data.agentId, { sessionId: data.turnId || 'chat-turn' });
+    noteAgentActivity(data.agentId, 'Thinking', { startedAt: data.startedAt });
+    renderAgentList();
     syncAgentViewToolbars(data.agentId);
     const rec = state.transcripts.get(tabId);
     if (rec) {
@@ -3632,6 +3813,8 @@ function subscribeLobby() {
     const tabId = data.agentId === 'glados' ? 'glados-chat' : null;
     if (!tabId) return;
     state.active.delete(data.agentId);
+    noteAgentActivity(data.agentId, 'Turn complete', { status: 'done' });
+    renderAgentList();
     syncAgentViewToolbars(data.agentId);
     const rec = state.transcripts.get(tabId);
     if (rec?.sending) {
@@ -6507,7 +6690,6 @@ async function decidePlan(id, action, body) {
 
 // (escapeHtml defined earlier in this file)
 
-document.getElementById('open-overview').addEventListener('click', ev => { ev.preventDefault(); openOverview(); });
 document.getElementById('open-glados').addEventListener('click', ev => { ev.preventDefault(); openGladosChat(); });
 document.getElementById('open-plans').addEventListener('click', ev => { ev.preventDefault(); openPlans(); });
 document.getElementById('open-reports').addEventListener('click', ev => { ev.preventDefault(); openReports(); });
@@ -6544,6 +6726,135 @@ document.getElementById('notifications-clear')?.addEventListener('click', () => 
   state.unreadNotifications = 0;
   persistNotifications();
   renderNotifications();
+});
+
+const commandPaletteEl = document.getElementById('command-palette');
+const commandQueryEl = document.getElementById('command-query');
+const commandResultsEl = document.getElementById('command-results');
+let commandChoices = [];
+let commandSelectedIndex = 0;
+let commandReturnFocus = null;
+
+function closeCommandPalette() {
+  commandPaletteEl.classList.add('hidden');
+  commandPaletteEl.setAttribute('aria-hidden', 'true');
+  commandPaletteEl.inert = true;
+  if (commandReturnFocus?.isConnected) commandReturnFocus.focus();
+  else document.getElementById('sidebar-toggle')?.focus();
+}
+
+function commandItems() {
+  return [
+    { kind: 'chat', id: 'glados-chat', label: 'GLaDOS Chat', note: 'Current session' },
+    ...state.investigationSessions.map(session => ({
+      kind: 'session', id: session.id, label: session.name || session.id,
+      note: session.id === state.currentSessionId ? 'Current session' : 'Session',
+    })),
+    ...state.agents.filter(agent => agent.id !== 'glados').map(agent => ({
+      kind: 'agent', id: agent.id, label: agent.id,
+      note: agentActivityView(agent.id).status || 'Agent',
+    })),
+  ];
+}
+
+function renderCommandResults() {
+  const query = commandQueryEl.value.trim().toLocaleLowerCase();
+  commandChoices = commandItems().filter(item => `${item.label} ${item.note}`.toLocaleLowerCase().includes(query)).slice(0, 35);
+  commandSelectedIndex = Math.min(commandSelectedIndex, Math.max(0, commandChoices.length - 1));
+  commandResultsEl.replaceChildren();
+  if (!commandChoices.length) {
+    const empty = document.createElement('p');
+    empty.className = 'command-empty';
+    empty.textContent = 'No matching sessions or agents';
+    commandResultsEl.appendChild(empty);
+    return;
+  }
+  commandChoices.forEach((item, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `command-result${index === commandSelectedIndex ? ' selected' : ''}`;
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', String(index === commandSelectedIndex));
+    const name = document.createElement('strong');
+    name.textContent = item.label;
+    const note = document.createElement('small');
+    note.textContent = item.note;
+    button.append(name, note);
+    button.addEventListener('click', () => selectCommandItem(item));
+    commandResultsEl.appendChild(button);
+  });
+}
+
+async function selectCommandItem(item) {
+  closeCommandPalette();
+  try {
+    if (item.kind === 'session') {
+      await activateInvestigationSession(item.id);
+      openGladosChat();
+    } else if (item.kind === 'agent') openAgentTab(item.id);
+    else openGladosChat();
+  } catch (error) {
+    pushNotification('error', `Could not open ${item.label}: ${error.message}`, { toast: true });
+  }
+}
+
+function openCommandPalette() {
+  commandReturnFocus = document.activeElement;
+  commandQueryEl.value = '';
+  commandSelectedIndex = 0;
+  commandPaletteEl.classList.remove('hidden');
+  commandPaletteEl.setAttribute('aria-hidden', 'false');
+  commandPaletteEl.inert = false;
+  renderCommandResults();
+  commandQueryEl.focus();
+}
+
+document.getElementById('command-close')?.addEventListener('click', closeCommandPalette);
+commandPaletteEl.addEventListener('click', event => { if (event.target === commandPaletteEl) closeCommandPalette(); });
+commandQueryEl.addEventListener('input', () => { commandSelectedIndex = 0; renderCommandResults(); });
+commandQueryEl.addEventListener('keydown', event => {
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    if (commandChoices.length) commandSelectedIndex = (commandSelectedIndex + (event.key === 'ArrowDown' ? 1 : -1) + commandChoices.length) % commandChoices.length;
+    renderCommandResults();
+    commandResultsEl.querySelector('.selected')?.scrollIntoView({ block: 'nearest' });
+  } else if (event.key === 'Enter') {
+    event.preventDefault();
+    if (commandChoices[commandSelectedIndex]) selectCommandItem(commandChoices[commandSelectedIndex]);
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    closeCommandPalette();
+  }
+});
+
+document.addEventListener('keydown', event => {
+  const modifier = event.metaKey || event.ctrlKey;
+  if (modifier && !event.altKey && event.key.toLocaleLowerCase() === 'k') {
+    event.preventDefault();
+    commandPaletteEl.classList.contains('hidden') ? openCommandPalette() : closeCommandPalette();
+    return;
+  }
+  if (!commandPaletteEl.classList.contains('hidden')) return;
+  const chat = paneEl.querySelector('.chat-visual-chamber');
+  if (modifier && chat && !event.altKey) {
+    if (event.code === 'Equal' || event.key === '+' || event.key === '=') {
+      event.preventDefault();
+      setChatTextScale(state.chatTextScale + 0.1);
+    } else if (event.code === 'Minus' || event.key === '-') {
+      event.preventDefault();
+      setChatTextScale(state.chatTextScale - 0.1);
+    } else if (event.code === 'Digit0' || event.key === '0') {
+      event.preventDefault();
+      setChatTextScale(1);
+    } else if (event.key.toLocaleLowerCase() === 'f') {
+      event.preventDefault();
+      openChatFind(chat);
+    }
+  }
+  if (event.key === 'Escape') {
+    if (!commandPaletteEl.classList.contains('hidden')) closeCommandPalette();
+    else if (chat && !chat.querySelector('.chat-find-bar')?.hidden) closeChatFind(chat);
+  }
 });
 
 document.addEventListener('pointerdown', event => {
@@ -6645,16 +6956,15 @@ function wirePersistentLayout() {
 
 Promise.all([loadInvestigationSessions(), loadOperatorProfile().catch(() => state.operatorProfile)])
   .then(() => Promise.all([loadAgents(), loadSecurityReviews()])).then(() => {
-  const allowedStatic = new Set(['overview', 'glados-chat', 'plans', 'reports', 'settings', 'terminal', 'proxy', 'update']);
+  const allowedStatic = new Set(['glados-chat', 'plans', 'reports', 'settings', 'terminal', 'proxy', 'update']);
   const agentIds = new Set(state.agents.map(agent => agent.id).filter(id => id !== 'glados'));
   const savedTabs = storageGetJson('glados-dash.open-tabs', []);
   state.openTabs = Array.isArray(savedTabs)
     ? savedTabs.filter(tab => tab && (allowedStatic.has(tab.id) || agentIds.has(tab.id)))
     : [];
-  if (!state.openTabs.some(tab => tab.id === 'glados-chat')) state.openTabs.push({ id: 'glados-chat', kind: 'chat', label: 'GLaDOS Chat' });
-  if (!state.openTabs.some(tab => tab.id === 'overview')) state.openTabs.unshift({ id: 'overview', kind: 'overview', label: 'Overview' });
+  if (!state.openTabs.some(tab => tab.id === 'glados-chat')) state.openTabs.unshift({ id: 'glados-chat', kind: 'chat', label: 'GLaDOS Chat' });
   const savedCurrent = localStorage.getItem('glados-dash.current-tab');
-  state.currentTab = state.openTabs.some(tab => tab.id === savedCurrent) ? savedCurrent : 'overview';
+  state.currentTab = state.openTabs.some(tab => tab.id === savedCurrent) ? savedCurrent : 'glados-chat';
   renderTabs();
   renderAgentList();
   updateWorkspaceNav();
@@ -6664,5 +6974,6 @@ Promise.all([loadInvestigationSessions(), loadOperatorProfile().catch(() => stat
 });
 
 wirePersistentLayout();
+setInterval(updateAgentActivityTimes, 10_000);
 renderNotifications();
 setupDesktopUpdateNotifications();

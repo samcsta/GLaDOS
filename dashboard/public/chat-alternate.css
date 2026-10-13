@@ -736,3 +736,43 @@ html[data-theme="classic"] .chat-visual-chamber .composer-send-button { border-r
   html[data-theme="quantum"] .chat-visual-chamber .composer-select select { max-width: min(40vw, 170px); }
   html[data-theme="quantum"] .chat-visual-chamber .composer-effort select { max-width: 95px; }
 }
+
+/* Reading and navigation controls apply to chat surfaces only. */
+.chat-visual-chamber { --chat-reading-size: calc(13px * var(--chat-text-scale, 1)); }
+html[data-theme="quantum"] .chat-visual-chamber { --chat-reading-size: calc(15px * var(--chat-text-scale, 1)); }
+.chat-visual-chamber .agent-last-activity { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--fg-dim); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.chat-visual-chamber .agent-runtime-status.quiet { color: var(--warn); border-color: rgba(250,204,21,.25); background: rgba(250,204,21,.07); }
+.chat-visual-chamber .agent-runtime-status.done { color: var(--fg-dim); border-color: var(--border); background: var(--bg); }
+.chat-visual-chamber .chat-find-bar { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; padding: 7px 16px; border-bottom: 1px solid var(--border); background: var(--bg-alt); }
+.chat-visual-chamber .chat-find-bar[hidden] { display: none; }
+.chat-visual-chamber .chat-find-bar label { display: flex; flex: 1; align-items: center; gap: 9px; color: var(--fg-dim); font-size: 10px; white-space: nowrap; }
+.chat-visual-chamber .chat-find-bar input { flex: 1; max-width: 430px; min-width: 0; height: 30px; padding: 5px 9px; border: 1px solid var(--control-border); border-radius: 6px; outline: 0; color: var(--fg); background: var(--bg); font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.chat-visual-chamber .chat-find-bar input:focus { border-color: var(--accent); }
+.chat-visual-chamber .chat-find-count { min-width: 64px; color: var(--fg-dim); font-size: 10px; text-align: right; white-space: nowrap; }
+.chat-visual-chamber .chat-find-bar button { width: 28px; height: 28px; padding: 2px; font-size: 14px; }
+.chat-visual-chamber .entry.find-current, html[data-theme="quantum"] .chat-visual-chamber .entry.find-current { outline: 2px solid var(--accent); outline-offset: 3px; scroll-margin-block: 80px; }
+.chat-visual-chamber .entry .tool-details { width: 100%; }
+.chat-visual-chamber .entry .tool-details summary { display: flex; align-items: center; gap: 12px; cursor: pointer; list-style: none; color: var(--fg-dim); }
+.chat-visual-chamber .entry .tool-details summary::-webkit-details-marker { display: none; }
+.chat-visual-chamber .entry .tool-details summary::before { content: '▸'; color: var(--fg-dim); font-size: 10px; }
+.chat-visual-chamber .entry .tool-details[open] summary::before { content: '▾'; }
+.chat-visual-chamber .entry .tool-details summary .ts { margin: 0 0 0 auto; font-size: 9px; white-space: nowrap; }
+.chat-visual-chamber .entry .tool-details-body { max-width: min(75vw, 900px); padding-top: 10px; }
+.chat-visual-chamber .entry.tool-result:not(.error) { color: var(--fg-dim); }
+.chat-visual-chamber .entry.tool-result:not(.error) .tool-name { color: var(--fg-dim); }
+body.debug-off .chat-visual-chamber .entry.tool-result:not(.error),
+html[data-theme="quantum"] body.debug-off .chat-visual-chamber .entry.tool-result:not(.error) { margin-block: 2px; padding: 5px 10px; border-color: transparent; background: transparent; }
+.chat-visual-chamber .entry { font-size: var(--chat-reading-size); }
+.chat-visual-chamber .entry pre { font-size: calc(12px * var(--chat-text-scale, 1)); }
+.chat-visual-chamber .entry .md-content, html[data-theme="quantum"] .chat-visual-chamber .entry .md-content { font-size: var(--chat-reading-size); }
+.chat-visual-chamber .entry .ts, html[data-theme="quantum"] .chat-visual-chamber .entry .ts { font-size: calc(9px * var(--chat-text-scale, 1)); }
+.chat-visual-chamber .chat-input textarea, html[data-theme="quantum"] .chat-visual-chamber .chat-input textarea { font-size: calc(14px * var(--chat-text-scale, 1)); }
+
+@media (max-width: 900px) {
+  .chat-visual-chamber .agent-last-activity { display: none; }
+}
+@media (max-width: 610px) {
+  .chat-visual-chamber .agent-view-toolbar { flex-wrap: wrap; }
+  .chat-visual-chamber .chat-find-bar { padding-inline: 9px; }
+  .chat-visual-chamber .chat-find-bar label { font-size: 0; }
+}

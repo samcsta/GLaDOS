@@ -256,14 +256,21 @@ test('v4 desktop UI keeps app operations in Settings and agent operations in con
   assert.equal(fs.existsSync(path.join(ROOT, 'dashboard/public/chat-alternate.css')), true);
 });
 
-test('v4 operator workspace exposes overview, search, provenance, notifications, and persistent layout controls', () => {
+test('operator workspace exposes chat navigation, provenance, notifications, and persistent layout controls', () => {
   const html = fs.readFileSync(path.join(ROOT, 'dashboard/public/index.html'), 'utf8');
   const app = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
   const styles = fs.readFileSync(path.join(ROOT, 'dashboard/public/styles.css'), 'utf8');
   const server = fs.readFileSync(path.join(ROOT, 'dashboard/server.js'), 'utf8');
-  for (const id of ['open-overview', 'projects-section', 'sessions-section', 'agent-search', 'security-review-list', 'notifications-toggle', 'notification-drawer', 'sidebar-splitter', 'events-splitter']) {
+  for (const id of ['open-glados', 'command-palette', 'projects-section', 'sessions-section', 'agent-search', 'security-review-list', 'notifications-toggle', 'notification-drawer', 'sidebar-splitter', 'events-splitter']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
+  assert.doesNotMatch(html, /id="(?:command-open|focus-toggle|system-status)"/);
+  assert.doesNotMatch(app, /function setFocusMode\(/);
+  assert.doesNotMatch(app, /data-chat-zoom="(?:in|out)"|data-chat-find/);
+  assert.match(app, /openCommandPalette\(\)/);
+  assert.match(app, /openChatFind\(chat\)/);
+  assert.match(app, /setChatTextScale\(state\.chatTextScale \+ 0\.1\)/);
+  assert.doesNotMatch(html, /id="open-overview"/);
   assert.doesNotMatch(html, /investigation-session-select|new-investigation-session|session-picker/);
   assert.match(app, /function renderInvestigationNavigation\(/);
   assert.match(app, /data-project-toggle/);
@@ -276,7 +283,7 @@ test('v4 operator workspace exposes overview, search, provenance, notifications,
   assert.match(app, /data-session-delete/);
   assert.match(app, /function showNameInput\(/);
   assert.match(styles, /\.overview-session-popover/);
-  assert.match(styles, /body\.debug-off \.entry\.prompt-error/);
+  assert.doesNotMatch(styles, /body\.debug-off \.entry\.prompt-error/);
   assert.doesNotMatch(styles, /body\.debug-off \.entry\.tool-result\.error \{ display: block; \}/);
   assert.match(server, /app\.get\('\/api\/overview'/);
   assert.match(server, /getLiteLlmUsage/);
