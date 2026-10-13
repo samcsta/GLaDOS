@@ -81,14 +81,14 @@ function renderDownloadPage(installerRoot, installerBasePath = '/installers') {
   const logoPath = `${installerBasePath.replace(/\/$/, '')}/linux/glados.png`;
   const releaseNotes = [{
     version: 'v4.6.1',
-    label: 'macOS release · October 12, 2026',
+    label: 'macOS release · October 13, 2026',
     title: 'A quieter GLaDOS workspace',
     notes: [
       'Removed the Overview tab and made GLaDOS Chat the default workspace.',
       'Removed Focus mode and the Ready, Jump, zoom, and Find toolbar controls while keeping sidebar, jump, text-size, and conversation-search keyboard shortcuts.',
       'Improved agent activity details and kept tool activity easier to read in conversations.',
     ],
-    footnote: 'The macOS download is v4.6.1. Linux remains at v4.6.0; Windows remains a source build.',
+    footnote: 'The macOS download is v4.6.1. Use the DMG to install this release; the in-app upgrade from v4.6.0 did not pass pilot verification. Linux remains at v4.6.0; Windows remains a source build.',
   }, {
     version: 'v4.6.0',
     label: 'macOS and Linux release · October 12, 2026',
