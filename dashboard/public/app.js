@@ -455,6 +455,10 @@ function openNotificationDrawer(open = true) {
 
 errorsOnlyEl.addEventListener('change', () => {
   document.body.classList.toggle('errors-only', errorsOnlyEl.checked);
+  if (errorsOnlyEl.checked) {
+    document.querySelectorAll('.entry.tool-result.error .tool-details')
+      .forEach(details => { details.open = true; });
+  }
 });
 
 // Debug off shows the conversation without internal thinking or tool activity.
@@ -3502,7 +3506,7 @@ function appendEntry(container, ev, rec) {
     const truncNote = isTruncated
       ? `<div class="truncation-note"><button class="truncation-load-btn" type="button">[body truncated at 8KB — click to load full ${fullText.length.toLocaleString()} chars]</button></div>`
       : '';
-    el.innerHTML = `<details class="tool-details" ${debugModeEl.checked ? 'open' : ''}><summary><span class="tool-name">${header} ${escapeHtml(ev.toolName || '?')}${extra}</span><span class="ts">${ts}</span></summary><div class="tool-details-body">${renderCollapsible(displayed, 'out')}${truncNote}</div></details>`;
+    el.innerHTML = `<details class="tool-details" ${debugModeEl.checked || (errorsOnlyEl.checked && ev.isError) ? 'open' : ''}><summary><span class="tool-name">${header} ${escapeHtml(ev.toolName || '?')}${extra}</span><span class="ts">${ts}</span></summary><div class="tool-details-body">${renderCollapsible(displayed, 'out')}${truncNote}</div></details>`;
     if (isTruncated) {
       const btn = el.querySelector('.truncation-load-btn');
       btn?.addEventListener('click', () => {

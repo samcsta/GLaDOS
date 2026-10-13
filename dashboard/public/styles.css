@@ -516,6 +516,7 @@ body.debug-off .entry.liveness,
 body.debug-off .entry.result,
 body.debug-off .entry.session-start { display: none; }
 body.debug-off .entry.tool-call.provenance-focus { display: block; }
+body.debug-off.errors-only .entry.tool-result.error { display: block; }
 
 /* --- Proxy tab (native traffic history live view) --- */
 .proxy-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
