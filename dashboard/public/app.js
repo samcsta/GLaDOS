@@ -3546,7 +3546,7 @@ function appendEntry(container, ev, rec) {
 
   container.appendChild(el);
   if (rec?.agentId && ['assistant-text', 'tool-call', 'tool-result', 'prompt-error', 'permission-denied'].includes(kind)) {
-    const detail = kind === 'assistant-text' ? 'Responded'
+    const detail = kind === 'assistant-text' ? ''
       : kind === 'tool-call' ? `Used ${ev.toolName || 'a tool'}`
       : kind === 'tool-result' ? (ev.isError ? `Tool error: ${ev.toolName || 'unknown'}` : `Tool finished: ${ev.toolName || 'unknown'}`)
       : kind === 'permission-denied' ? 'Permission denied' : 'Prompt failed';
