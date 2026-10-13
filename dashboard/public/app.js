@@ -728,7 +728,7 @@ function agentActivityView(agentId) {
     const age = record?.startedAt ? formatElapsed(Date.now() - record.startedAt) : '';
     return { status: quiet ? 'quiet' : 'running', detail: last || (age ? `Active for ${age}` : 'Working') };
   }
-  if (record?.status === 'done') return { status: 'done', detail: last };
+  if (record?.status === 'done') return { status: 'done', detail: '' };
   return { status: '', detail: '' };
 }
 
