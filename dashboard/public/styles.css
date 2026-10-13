@@ -448,7 +448,7 @@ button.secondary:hover:not(:disabled) { color: var(--fg); border-color: var(--wa
 .entry.tool-call .args { color: var(--fg-dim); white-space: pre-wrap; margin-top: 4px; font-size: 11px; }
 .entry.tool-result { border-color: var(--ok); background: rgba(74, 222, 128, 0.04); }
 .entry.tool-result .tool-name { color: var(--ok); font-weight: 600; }
-.entry.tool-result .out { white-space: pre-wrap; margin-top: 4px; max-height: 200px; overflow: auto; font-size: 11px; }
+.entry.tool-result .out { white-space: pre-wrap; margin-top: 4px; overflow: auto; font-size: 11px; }
 .entry.tool-result.error { border-color: var(--err); background: rgba(255, 107, 107, 0.06); }
 .entry.tool-result.error .tool-name { color: var(--err); }
 .entry.user-message { border-color: #777; background: rgba(255,255,255,0.03); }
@@ -509,6 +509,7 @@ body.errors-only .entry:not(.tool-result.error):not(.prompt-error):not(.operator
 /* Debug off: show only operator messages and final assistant output. */
 body.debug-off .entry.thinking,
 body.debug-off .entry.tool-call,
+body.debug-off .entry.tool-result,
 body.debug-off .entry.meta,
 body.debug-off .entry.harness-init,
 body.debug-off .entry.liveness,

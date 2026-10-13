@@ -457,10 +457,14 @@ errorsOnlyEl.addEventListener('change', () => {
   document.body.classList.toggle('errors-only', errorsOnlyEl.checked);
 });
 
-// Debug off = hide thinking + intermediate tool calls. Keep user input,
-// tool results, and final assistant output visible.
+// Debug off shows the conversation without internal thinking or tool activity.
+// When enabled, open tool details so the current work is visible immediately.
 function applyDebugMode() {
   document.body.classList.toggle('debug-off', !debugModeEl.checked);
+  if (debugModeEl.checked) {
+    document.querySelectorAll('.entry.tool-call .tool-details, .entry.tool-result .tool-details')
+      .forEach(details => { details.open = true; });
+  }
   try { localStorage.setItem('glados-dash.debug-mode', debugModeEl.checked ? '1' : '0'); } catch {}
 }
 try { debugModeEl.checked = localStorage.getItem('glados-dash.debug-mode') === '1'; } catch {}
@@ -475,6 +479,12 @@ function setAgentHaltedState(agentId, halted) {
   syncAgentViewToolbars(agentId);
 }
 
+function agentStatusLabel(status, compact = false) {
+  if (status === 'quiet') return compact ? 'No updates' : 'No recent activity';
+  if (!status) return compact ? '' : 'Idle';
+  return compact ? status : status[0].toUpperCase() + status.slice(1);
+}
+
 function syncAgentViewToolbars(agentId = null) {
   document.querySelectorAll('.agent-view-toolbar').forEach(toolbar => {
     const id = toolbar.dataset.agentId;
@@ -485,7 +495,8 @@ function syncAgentViewToolbars(agentId = null) {
     const status = toolbar.querySelector('.agent-runtime-status');
     if (status) {
       status.className = `agent-runtime-status ${view.status || 'idle'}`;
-      status.textContent = view.status ? view.status[0].toUpperCase() + view.status.slice(1) : 'Idle';
+      status.textContent = agentStatusLabel(view.status);
+      status.title = view.status === 'quiet' ? 'Still running; no agent activity for over 2 minutes.' : '';
     }
     const lastActivity = toolbar.querySelector('.agent-last-activity');
     if (lastActivity) lastActivity.textContent = view.detail;
@@ -737,17 +748,20 @@ function updateAgentActivityTimes() {
     const view = agentActivityView(row.dataset.id);
     const stateElement = row.querySelector('.agent-row-state');
     const detailElement = row.querySelector('.agent-row-last');
-    if (stateElement) stateElement.textContent = view.status;
+    if (stateElement) stateElement.textContent = agentStatusLabel(view.status, true);
     if (detailElement) detailElement.textContent = view.detail;
     row.classList.toggle('quiet', view.status === 'quiet');
-    row.title = view.detail ? `${row.dataset.id}: ${view.status || 'available'} · ${view.detail}` : row.dataset.id;
+    row.title = view.status === 'quiet'
+      ? `${row.dataset.id}: still running; no agent activity for over 2 minutes. ${view.detail}`
+      : (view.detail ? `${row.dataset.id}: ${view.status || 'available'} · ${view.detail}` : row.dataset.id);
   });
   document.querySelectorAll('.agent-view-toolbar').forEach(toolbar => {
     const view = agentActivityView(toolbar.dataset.agentId);
     const status = toolbar.querySelector('.agent-runtime-status');
     if (status) {
       status.className = `agent-runtime-status ${view.status || 'idle'}`;
-      status.textContent = view.status ? view.status[0].toUpperCase() + view.status.slice(1) : 'Idle';
+      status.textContent = agentStatusLabel(view.status);
+      status.title = view.status === 'quiet' ? 'Still running; no agent activity for over 2 minutes.' : '';
     }
     const detail = toolbar.querySelector('.agent-last-activity');
     if (detail) detail.textContent = view.detail;
@@ -791,10 +805,12 @@ function renderAgentList() {
     const li = document.createElement('li');
     li.dataset.id = a.id;
     li.tabIndex = 0;
-    li.className = (state.active.has(a.id) ? 'live ' : '') + (a.halted ? 'halted ' : '') + (state.currentTab === a.id ? 'active' : '');
+    li.className = (state.active.has(a.id) ? 'live ' : '') + (a.halted ? 'halted ' : '') + (state.currentTab === a.id ? 'active ' : '');
     const activity = agentActivityView(a.id);
+    li.classList.toggle('quiet', activity.status === 'quiet');
+    if (activity.status === 'quiet') li.title = `${a.id}: still running; no agent activity for over 2 minutes. ${activity.detail}`;
     li.innerHTML = `<span class="dot"></span><span class="agent-row-main"><span class="name">${escapeHtml(a.id)}</span><small class="agent-row-model">${escapeHtml(a.model || a.name || 'Ready')}</small><small class="agent-row-last">${escapeHtml(activity.detail)}</small></span>` +
-      `<span class="agent-row-state">${escapeHtml(activity.status)}</span>`;
+      `<span class="agent-row-state">${escapeHtml(agentStatusLabel(activity.status, true))}</span>`;
     li.addEventListener('click', () => openAgentTab(a.id));
     li.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') openAgentTab(a.id); });
     agentListEl.appendChild(li);
@@ -3457,7 +3473,7 @@ function appendEntry(container, ev, rec) {
     const args = ev.arguments !== undefined
       ? JSON.stringify(ev.arguments, null, 2)
       : (ev.toolInput !== undefined ? JSON.stringify(ev.toolInput, null, 2) : '');
-    el.innerHTML = `<details class="tool-details"><summary><span class="tool-name">→ ${escapeHtml(ev.toolName || '?')}</span><span class="ts">${ts}</span></summary><div class="tool-details-body">${renderCollapsible(args, 'args')}</div></details>`;
+    el.innerHTML = `<details class="tool-details" ${debugModeEl.checked ? 'open' : ''}><summary><span class="tool-name">→ ${escapeHtml(ev.toolName || '?')}</span><span class="ts">${ts}</span></summary><div class="tool-details-body">${renderCollapsible(args, 'args')}</div></details>`;
     const targetUrl = extractEventUrl(ev);
     if (targetUrl && rec?.agentId) {
       const traffic = document.createElement('button');
@@ -3486,7 +3502,7 @@ function appendEntry(container, ev, rec) {
     const truncNote = isTruncated
       ? `<div class="truncation-note"><button class="truncation-load-btn" type="button">[body truncated at 8KB — click to load full ${fullText.length.toLocaleString()} chars]</button></div>`
       : '';
-    el.innerHTML = `<details class="tool-details" ${ev.isError ? 'open' : ''}><summary><span class="tool-name">${header} ${escapeHtml(ev.toolName || '?')}${extra}</span><span class="ts">${ts}</span></summary><div class="tool-details-body">${renderCollapsible(displayed, 'out')}${truncNote}</div></details>`;
+    el.innerHTML = `<details class="tool-details" ${debugModeEl.checked ? 'open' : ''}><summary><span class="tool-name">${header} ${escapeHtml(ev.toolName || '?')}${extra}</span><span class="ts">${ts}</span></summary><div class="tool-details-body">${renderCollapsible(displayed, 'out')}${truncNote}</div></details>`;
     if (isTruncated) {
       const btn = el.querySelector('.truncation-load-btn');
       btn?.addEventListener('click', () => {

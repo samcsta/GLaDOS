@@ -760,8 +760,6 @@ html[data-theme="quantum"] .chat-visual-chamber { --chat-reading-size: calc(15px
 .chat-visual-chamber .entry .tool-details-body { max-width: min(75vw, 900px); padding-top: 10px; }
 .chat-visual-chamber .entry.tool-result:not(.error) { color: var(--fg-dim); }
 .chat-visual-chamber .entry.tool-result:not(.error) .tool-name { color: var(--fg-dim); }
-body.debug-off .chat-visual-chamber .entry.tool-result:not(.error),
-html[data-theme="quantum"] body.debug-off .chat-visual-chamber .entry.tool-result:not(.error) { margin-block: 2px; padding: 5px 10px; border-color: transparent; background: transparent; }
 .chat-visual-chamber .entry { font-size: var(--chat-reading-size); }
 .chat-visual-chamber .entry pre { font-size: calc(12px * var(--chat-text-scale, 1)); }
 .chat-visual-chamber .entry .md-content, html[data-theme="quantum"] .chat-visual-chamber .entry .md-content { font-size: var(--chat-reading-size); }
