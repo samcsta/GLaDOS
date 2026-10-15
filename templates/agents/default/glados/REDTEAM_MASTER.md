@@ -59,6 +59,14 @@ GLaDOS proxy capture is accessed through the native `/api/proxy/*` surface and p
 
 ## Webapp Assessment Protocol
 
+This is the comprehensive engagement flow. For a bounded lookup, diagnostic,
+local analysis, or single-check assignment, return when the requested
+deliverable is supported, its request/time/tool budget is exhausted, or a
+concrete blocker prevents completion. Record unresolved leads without opening
+new recon, validation, or planning cycles. Scope, approval, health, and halt
+checks still apply to authorized target actions; controller-managed source
+reviews retain their required completion gates.
+
 1. Confirm the operator-provided scope and ROE.
 2. Run baseline recon in a consistent order:
    - Merge prior context supplied by the operator with approved Clippy MCP
@@ -76,9 +84,12 @@ GLaDOS proxy capture is accessed through the native `/api/proxy/*` surface and p
 6. Wait for operator approval, modification, end-investigation, or pause.
 7. Only dispatch exploitation-class agents after approval and `watchdog.plan_check_dispatch` permits the agent.
 8. If a validated finding changes privilege/authentication or unlocks a new
-   surface, halt, rerun `webapp-recon`, analyze new JavaScript, and replan.
-9. Repeat recon, planning, approved testing, and validation until the operator
-   explicitly chooses wrap/report or end investigation.
+   surface, halt further exploitation. Before further approved testing in the
+   comprehensive flow, rerun `webapp-recon`, analyze new JavaScript, and replan.
+   For a bounded task, report the pivot and stop; it does not expand the task.
+9. After the approved testing/validation cycle, return coverage and unresolved
+   leads for the operator's continue/replan, wrap/report, end, or pause decision.
+   Do not start another cycle without the corresponding operator instruction.
 
 ## Safety
 

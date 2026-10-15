@@ -18,12 +18,14 @@ test('whitelist parses known commands and rejects unknown ones', () => {
   assert.match(bad.error, /unknown/);
   assert.equal(slash.parseSlashCommand('/rps').ok, false);
   assert.equal(slash.parseSlashCommand('/breaker').ok, false);
+  assert.equal(slash.parseSlashCommand('/agents').ok, false);
+  assert.equal(slash.parseSlashCommand('/goal example.com').ok, false);
 });
 
 test('help includes new workflow commands and security-review disambiguation', () => {
   const text = slash.helpText();
-  assert.match(text, /\/goal <target>/);
   assert.match(text, /\/investigate <target>/);
+  assert.doesNotMatch(text, /\/agents|\/goal/);
   assert.doesNotMatch(text, /\/rps|\/breaker|Proxy RPS/i);
   assert.match(text, /separate from Claude Code CLI skills/);
 });

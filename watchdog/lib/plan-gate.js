@@ -43,6 +43,20 @@ const META_AGENTS = new Set([
 ]);
 
 const dbHandles = new Map();
+
+function installedPackageAgentIds() {
+  try {
+    // The capability collection is durable runtime data, separate from shipped
+    // templates. Validation and enable state come from its package store; an
+    // arbitrary name in a tool request never classifies itself as installed.
+    const appRoot = process.env.GLADOS_REPO_ROOT || path.resolve(__dirname, '..', '..');
+    const { listPackageRuntimeEntries } = require(path.join(appRoot, 'dashboard', 'lib', 'agent-packages'));
+    return new Set(listPackageRuntimeEntries({
+      env: process.env,
+      builtInIds: [...PHASE1_AGENTS, ...EXPLOITATION_AGENTS, ...META_AGENTS],
+    }).map(row => row.id));
+  } catch { return new Set(); }
+}
 function getDb(dbPath = BLACKBOARD_DB) {
   const resolved = path.resolve(dbPath);
   if (dbHandles.has(resolved)) return dbHandles.get(resolved);
@@ -148,7 +162,13 @@ function planCheckDispatch(agentId, engagementId, options = {}) {
   if (PHASE1_AGENTS.has(agentId)) {
     return { allowed: true, reason: 'phase 1 recon — always permitted (SOUL I3)', phase: 'phase1' };
   }
-  if (!EXPLOITATION_AGENTS.has(agentId)) {
+  const packageAgents = options.managedPackageAgents instanceof Set
+    ? options.managedPackageAgents : installedPackageAgentIds();
+  const managedPackage = packageAgents.has(agentId);
+  if (managedPackage && options.dispatchOnly === true) {
+    return { allowed: true, reason: 'managed package dispatch; target operations still require exact approved plan membership', phase: 'package' };
+  }
+  if (!EXPLOITATION_AGENTS.has(agentId) && !managedPackage) {
     // Unknown agent: treat like exploitation-class to be safe, but flag it.
     // Unknown names should never silently pass the gate.
     return { allowed: false, reason: `unknown agent_id '${agentId}' — refusing by default`, phase: 'unknown' };

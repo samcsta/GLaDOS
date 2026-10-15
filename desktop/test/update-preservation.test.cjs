@@ -24,6 +24,9 @@ test('update preservation snapshots databases and user configuration without mov
     fs.writeFileSync(path.join(runtimeDir, 'model-overrides.json'), '{"glados":"opus"}\n');
     fs.mkdirSync(path.join(runtimeDir, 'preferences'), { recursive: true });
     fs.writeFileSync(path.join(runtimeDir, 'preferences', 'chat.json'), '{"efforts":{"glados":"xhigh"}}\n');
+    fs.mkdirSync(path.join(runtimeDir, 'agent-teams'), { recursive: true });
+    const teamAssignments = '{"schemaVersion":1,"teams":[{"id":"glados","assignedAgentIds":["pkg-private--reviewer"]}]}\n';
+    fs.writeFileSync(path.join(runtimeDir, 'agent-teams', 'collection.json'), teamAssignments);
     fs.mkdirSync(path.join(runtimeDir, 'reports'), { recursive: true });
     const report = path.join(runtimeDir, 'reports', 'operator-report.md');
     fs.writeFileSync(report, '# durable report\n');
@@ -39,12 +42,15 @@ test('update preservation snapshots databases and user configuration without mov
     assert.equal(fs.readFileSync(report, 'utf8'), '# durable report\n');
     assert.equal(fs.readFileSync(path.join(result.snapshotDir, 'config', 'model-overrides.json'), 'utf8'), '{"glados":"opus"}\n');
     assert.equal(fs.readFileSync(path.join(result.snapshotDir, 'config', 'preferences', 'chat.json'), 'utf8'), '{"efforts":{"glados":"xhigh"}}\n');
+    assert.equal(fs.readFileSync(path.join(result.snapshotDir, 'config', 'agent-teams', 'collection.json'), 'utf8'), teamAssignments);
+    assert.equal(fs.readFileSync(path.join(runtimeDir, 'agent-teams', 'collection.json'), 'utf8'), teamAssignments);
     for (const [name, value] of [['blackboard.db', 'blackboard-ok'], ['watchdog.db', 'watchdog-ok']]) {
       const db = new Database(path.join(result.snapshotDir, name), { readonly: true });
       assert.equal(db.prepare('SELECT value FROM state').get().value, value);
       db.close();
     }
     assert.equal(result.manifest.protectedInPlace.find(row => row.path === 'reports').exists, true);
+    assert.equal(result.manifest.protectedInPlace.find(row => row.path === 'agent-teams').exists, true);
     assert.equal(fs.existsSync(path.join(result.snapshotDir, 'config', 'reports')), false);
   } finally { fs.rmSync(runtimeDir, { recursive: true, force: true }); }
 });

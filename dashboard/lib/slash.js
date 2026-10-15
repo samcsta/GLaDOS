@@ -2,11 +2,9 @@ const path = require('node:path');
 
 const SLASH_COMMANDS = [
   { cmd: '/help', desc: 'List dashboard slash commands' },
-  { cmd: '/goal <target>', desc: 'Start an approval-gated webapp investigation goal' },
-  { cmd: '/investigate <target>', desc: 'Alias for /goal <target>' },
+  { cmd: '/investigate <target>', desc: 'Start an approval-gated webapp investigation' },
   { cmd: '/security-review', desc: 'Choose a repository and start the expedited review; add --full for comprehensive depth' },
   { cmd: '/status', desc: 'Show active goals, jobs, agents, plans, and target health' },
-  { cmd: '/agents', desc: 'Show live subagents (curl /api/agents)' },
   { cmd: '/halt <agent>', desc: 'Halt one agent and interrupt its owning SDK turn' },
   { cmd: '/resume <agent>', desc: 'Resume a halted agent' },
   { cmd: '/probe <url>', desc: 'Run watchdog target_probe against a URL' },
@@ -25,9 +23,9 @@ function parseSlashCommand(raw) {
 
 function helpText() {
   const groups = [
-    ['Workflow', ['/goal <target>', '/investigate <target>', '/security-review', '/status']],
+    ['Workflow', ['/investigate <target>', '/security-review', '/status']],
     ['Safety', ['/halt <agent>', '/resume <agent>']],
-    ['Diagnostics', ['/agents', '/probe <url>', '/help', '/clear']],
+    ['Diagnostics', ['/probe <url>', '/help', '/clear']],
   ];
   const byCmd = new Map(SLASH_COMMANDS.map(c => [c.cmd, c.desc]));
   const lines = [];
@@ -42,7 +40,7 @@ function helpText() {
   return lines.join('\n');
 }
 
-function targetUsage(cmd = '/goal') {
+function targetUsage(cmd = '/investigate') {
   return `usage: ${cmd} <url-or-domain>`;
 }
 

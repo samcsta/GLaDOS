@@ -29,6 +29,48 @@ const SECURITY_REVIEW_REPORT_NAMES = new Set([
   'DELIVERABLES-MANIFEST.json',
 ]);
 
+const DOCUMENT_LABELS = {
+  'README.md': 'Report overview',
+  'EXECUTIVE-SUMMARY.md': 'Executive summary',
+  'SECURITY-REVIEW.md': 'Full report',
+  'security-review-report.html': 'Full report',
+  'security-review-report.pdf': 'Full report',
+  'OBSERVATIONS.md': 'Observations',
+  'COVERAGE-AND-LIMITATIONS.md': 'Coverage & limitations',
+  'REMEDIATION-PLAN.md': 'Remediation plan',
+  'completion-receipt.json': 'Completion receipt',
+  'scan-manifest.json': 'Scan manifest',
+  'DELIVERABLES-MANIFEST.json': 'Deliverables manifest',
+};
+const TECHNICAL_DOCUMENTS = new Set(['completion-receipt.json', 'scan-manifest.json', 'DELIVERABLES-MANIFEST.json']);
+const FULL_REPORT_NAMES = new Set(['SECURITY-REVIEW.md', 'security-review-report.html', 'security-review-report.pdf']);
+
+function readableName(value, { file = false } = {}) {
+  const original = String(value || '');
+  if (file && DOCUMENT_LABELS[original]) return DOCUMENT_LABELS[original];
+  let name = original;
+  if (file) name = name.replace(/\.[^.]+$/, '').replace(/^CWE-(?:\d+-)+/i, '');
+  else name = name.replace(/^Users-.+?-(?:GH-)?REPOS-/i, '').replace(/-\d{8}-[a-f0-9]{4,}$/i, '').replace(/-(?:main|master|dev)$/i, '');
+  const friendlyNames = { secops: 'SecOps', devsecops: 'DevSecOps', mcot: 'MCOT', epeo: 'EPEO' };
+  if (friendlyNames[name.toLowerCase()]) return friendlyNames[name.toLowerCase()];
+  // Keep hostnames and existing prose intact; normalize machine-generated slugs.
+  if (name.includes('.') || name.includes(' ')) return name;
+  const acronyms = new Set(['api', 'gcp', 'cvc', 'iam', 'sso', 'http', 'https', 'aws', 'ci', 'cd', 'sdk', 'ui', 'fnv3']);
+  return name.replace(/[_-]+/g, ' ').split(' ').filter(Boolean).map((word, index) => {
+    if (acronyms.has(word.toLowerCase())) return word.toUpperCase();
+    if (/^[A-Z0-9]+$/.test(word)) word = word.toLowerCase();
+    return index === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word;
+  }).join(' ') || original;
+}
+
+function readSmallJson(file) {
+  try {
+    assertRealPathWithin(INVESTIGATIONS_ROOT, file, 'investigations');
+    if (fs.statSync(file).size > 2 * 1024 * 1024) return {};
+    return JSON.parse(fs.readFileSync(file, 'utf8')) || {};
+  } catch { return {}; }
+}
+
 function securityReviewDirectories() {
   let entries = [];
   try { entries = fs.readdirSync(INVESTIGATIONS_ROOT, { withFileTypes: true }); } catch { return []; }
@@ -139,8 +181,13 @@ function completedSecurityReviews() {
     let children = walk(deliveryRoot, identity, 1);
     children = children.filter(node => node.type === 'dir' || SECURITY_REVIEW_REPORT_NAMES.has(node.name));
     const rawChildren = walk(reviewRoot, `${identity}/raw`, 1).filter(node => node.name !== 'deliverables');
-    if (rawChildren.length) children.push({ type: 'dir', name: 'Artifacts & Source Data', path: `${identity}/raw`, children: rawChildren });
-    if (children.length) nodes.push({ type: 'dir', name: engagement.directory, path: identity, children });
+    if (rawChildren.length) children.push({ type: 'dir', name: 'Artifacts & Source Data', displayName: 'Evidence & details', sourceData: true, path: `${identity}/raw`, children: rawChildren });
+    const run = readSmallJson(path.join(reviewRoot, 'run.json'));
+    const target = readableName(path.basename(String(run.repositoryPath || engagement.directory)));
+    if (children.length) nodes.push({
+      type: 'dir', name: engagement.directory, displayName: `${target} · Security review`, path: identity, children,
+      review: { target, completedAt: receipt.completed_at || run.deepScan?.completedAt || null, revision: receipt.repository_head || run.head || null, branch: run.branch || null, status: 'Completed' },
+    });
   }
   return nodes;
 }
@@ -155,6 +202,12 @@ function tree() {
   const applyLabels = nodes => nodes.map(node => ({
     ...node,
     name: labels[node.path] || node.name,
+    fileName: node.type === 'file' ? node.name : undefined,
+    displayName: node.review
+      ? `${readableName(labels[node.path] || node.review.target).replace(/\s*[·—-]?\s*security review$/i, '')} · Security review`
+      : labels[node.path] || node.displayName || readableName(node.name, { file: node.type === 'file' }),
+    documentKey: node.type === 'file' && /^security-reviews\/[^/]+\//.test(node.path) && !node.path.includes('/raw/') && FULL_REPORT_NAMES.has(node.name) ? 'full-report' : undefined,
+    technical: node.type === 'file' && /^security-reviews\/[^/]+\/[^/]+$/.test(node.path) && TECHNICAL_DOCUMENTS.has(node.name),
     children: node.children ? applyLabels(node.children) : undefined,
   }));
   const nodes = ROOTS.map(r => {
@@ -235,7 +288,7 @@ function validEntryName(value) {
 function isIdentityBoundPath(relPath) {
   return /^(?:reports|investigations|security-reviews)$/.test(String(relPath || ''))
     || /^(?:investigations|security-reviews)\/[^/]+$/.test(String(relPath || ''))
-    || /^security-reviews\/[^/]+\/raw$/.test(String(relPath || ''));
+    || /^security-reviews\/[^/]+(?:\/|$)/.test(String(relPath || ''));
 }
 
 function renamePath(relPath, requestedName) {
@@ -432,6 +485,7 @@ function writeMarkdown(relPath, content) {
 }
 
 module.exports = {
+  readableName,
   tree,
   readFile,
   sendRaw,

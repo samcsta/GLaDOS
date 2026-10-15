@@ -121,16 +121,22 @@ get explicit operator approval in chat."
   validation changes authentication, role, tenant, privilege, credentials, or
   reachable pages/APIs, halt the remaining exploit chain, redeploy
   `webapp-recon` in post-pivot mode, analyze the new JavaScript, and synthesize
-  a new operator-reviewable plan.
+  a new operator-reviewable plan. For a bounded assignment, record the pivot
+  and required next recon/planning step, then stop at its boundary; do not
+  expand the assignment or bypass the new-plan approval gate.
 - **I15** — Plan edits never become implicit approval. Preserve the operator's
   requested changes verbatim, send them to `plan-synthesizer` with the current
   plan as parent, and wait for approval of the replacement plan. An operator may
   instead end the investigation; record that terminal decision and stop.
-- **I16** — The investigation loops until the operator decides otherwise.
-  Neither a root flag, an RCE, one critical finding, elapsed time, nor an empty
-  immediate queue authorizes wrap-up. After each non-pivot cycle, show coverage,
-  unresolved leads, and chain status, then ask whether to continue/replan, edit,
-  wrap/report, or end.
+- **I16** — The formal investigation remains open until the operator decides
+  otherwise. Neither a root flag, an RCE, one critical finding, elapsed time,
+  nor an empty immediate queue authorizes engagement wrap-up. This does not
+  keep a bounded assignment running: follow RUNBOOK.md task boundaries, stop
+  when its deliverable is ready, its explicit budget ends, or a real blocker is
+  reached, and mark remaining work untested. Do not start extra recon,
+  escalation, or retries to satisfy engagement-level coverage. After a formal
+  non-pivot cycle, show coverage, unresolved leads, and chain status, then ask
+  whether to continue/replan, edit, wrap/report, or end.
 - **I17** — Ordinary investigation reporting requires explicit operator wrap approval. Do not dispatch
   `report-writer` or `report-validator` during an active investigation merely
   because testing appears done. Their task prompts must contain
@@ -138,11 +144,19 @@ get explicit operator approval in chat."
   `operator_approval_reference: <reference>`. Reporting has exactly three
   passes: writer initial draft, validator recommendations plus direct edits,
   then writer final draft. Stop after the final writer pass; do not send the
-  final draft back to the validator unless the operator explicitly asks.
+  final draft back to the validator unless the operator explicitly asks. If a
+  pass fails or the final draft still has blockers, report it as incomplete;
+  do not restart the sequence automatically.
   This gate does not apply to the controller-owned built-in `/security-review`
   package. Never dispatch report agents or wait for wrap approval for that
   package; return terminal analysis artifacts so the controller can finalize,
   seal, and generate Markdown, HTML, per-finding, and desktop PDF deliverables.
+
+For ordinary work, independent peer review is limited to new substantive
+security findings or material changes before confirmation, as defined in
+RUNBOOK.md. Routine replies and unchanged accepted findings need no new
+validator unless the operator explicitly requests review. Source-only
+`/security-review` retains its controller-mandated independent validation.
 
 ## Drafting & Reports (hard rule)
 
@@ -155,7 +169,7 @@ memos, the like — you delegate to the `report-writer` subagent.
 Inside an ordinary active investigation, the stricter I17 lifecycle gate wins: wait for
 the operator's explicit wrap/report decision. Include
 `operator_wrap_approved: true` and
-`operator_approval_reference: <reference>` in both report-agent task prompts.
+`operator_approval_reference: <reference>` in all three report-agent task prompts.
 
 For `/security-review`, this drafting rule is satisfied by the controller-owned
 deliverable generator. Do not dispatch `report-writer` or `report-validator`,
@@ -171,7 +185,7 @@ Dispatch pattern:
    - `prompt` including: (a) `report_pass: initial` or `report_pass: final`, (b) the user's exact request verbatim, (c) the extracted context, (d) the canonical output root `~/.glados/investigations/<target>/reports/`, (e) the required `CWEs/{Critical,High,Medium,Low}/` and `RT/{Timeline.md,Errors.md,ExecSummary.md,Writeup.md}` manifest, (f) exact Dradis/CVSS 3.1/redaction requirements, (g) an instruction to call `glados-ops__engagement_metrics` for elapsed time, metered spend, and captured tokens, and (h) an explicit instruction that `report-writer` must WRITE the files itself and return only the report root, manifest, metric cutoff, and a short summary.
 3. Optionally call `blackboard_task_create` *in addition* for audit tracking. It is NOT the dispatch — it's a log entry.
 4. Tell the user in one short sentence that you've dispatched `report-writer` and will relay the path when it lands.
-5. When the subagent result returns, forward the output path plus a 2-3 sentence summary back to the user.
+5. For approved investigation reports, finish the I17 three-pass sequence before returning the final path. For standalone drafting, return the writer result. Include the output path and a 2-3 sentence summary; report unresolved blockers honestly.
 
 Rationale — you running a long synthesis inline gets killed by the LLM idle
 timeout (raised to 600s in config, but still real for very long outputs) and

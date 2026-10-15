@@ -16,6 +16,7 @@ const {
   buildAgentSdkOptions,
   createWindowsSdkProcessSpawner,
   buildAgentDefinitions,
+  MCP_SERVER_TOOLS,
   decideToolUse,
   mountedToolsForAgent,
   autoApprovedToolsForAgent,
@@ -33,13 +34,18 @@ const {
   buildReviewReleaseHook,
   buildReviewBatchHook,
 } = require('../lib/harness/agent-sdk');
+const { READ_TOOLS: CLIPPY_READ_TOOLS, DENIED_TOOLS: CLIPPY_DENIED_TOOLS } = require('../lib/secrets/clippy-mcp');
+const { connectorCatalog } = require('../lib/connectors');
 const { SdkSessionRegistry } = require('../lib/harness/session-registry');
 const { ResumeCoordinator } = require('../lib/harness/resume-coordinator');
 const { classifyToolUse, extractTargets } = require('glados-watchdog/lib/safety-gate');
 const { planCheckDispatch, PHASE1_AGENTS, EXPLOITATION_AGENTS, META_AGENTS } = require('glados-watchdog/lib/plan-gate');
 
+const DEFAULT_TEST_RUNTIME = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-harness-registry-'));
+test.after(() => fs.rmSync(DEFAULT_TEST_RUNTIME, { recursive: true, force: true }));
+
 function baseTestEnv(extra = {}) {
-  const env = { ...process.env, ANTHROPIC_AUTH_TOKEN: 'test-token', GLADOS_CLIPPY_MCP: '0', ...extra };
+  const env = { ...process.env, GLADOS_RUNTIME_DIR: DEFAULT_TEST_RUNTIME, GLADOS_AGENT_WORKSPACES: path.join(DEFAULT_TEST_RUNTIME, 'agents'), ANTHROPIC_AUTH_TOKEN: 'test-token', GLADOS_CLIPPY_MCP: '0', ...extra };
   for (const key of ['GLADOS_BROWSER_MCP', 'GLADOS_BROWSER_MCP_COMMAND', 'GLADOS_BROWSER_MCP_ARGS', 'GLADOS_BROWSER_MCP_ARGS_JSON', 'GLADOS_MITM_LISTEN_HOST', 'GLADOS_MITM_LISTEN_PORT', 'GLADOS_PROXY_URL', 'GLADOS_REPLAY_PROXY']) {
     if (!(key in extra)) delete env[key];
   }
@@ -709,6 +715,40 @@ test('Clippy mounts only selected read tools, excludes reviews, and keeps its be
   assert.equal(JSON.parse(fs.readFileSync(configFile, 'utf8')).mcpServers.clippy.headers.Authorization, 'Bearer private-test-bearer');
   fakeChild.emit('exit', 0, null);
   assert.equal(fs.existsSync(configFile), false);
+});
+
+test('GLaDOS mounts the complete approved Clippy lookup/content catalog, including engagement repository discovery', t => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-clippy-complete-catalog-'));
+  t.after(() => fs.rmSync(runtimeDir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(runtimeDir, 'secrets'), { mode: 0o700 });
+  fs.writeFileSync(path.join(runtimeDir, 'secrets', 'clippy-mcp.json'), JSON.stringify({ version: 1, token: 'catalog-test-bearer' }), { mode: 0o600 });
+  const approvedCatalog = [
+    'search', 'fetch', 'read', 'list_repos', 'list_files', 'list_teams',
+    'directory_lookup', 'directory_search', 'infra_lookup', 'infra_search', 'cross_search', 'projects_search',
+    'domain_search', 'domain_lookup', 'github_property_values', 'github_lookup', 'github_search',
+    'assessment_status', 'testbox_info', 'share_list', 'support_info', 'skill',
+  ];
+  const env = baseTestEnv({ GLADOS_RUNTIME_DIR: runtimeDir, GLADOS_CLIPPY_MCP: '1', GLADOS_TEAM_ID: 'glados' });
+  const policy = loadPolicy();
+  const sdk = buildAgentSdkOptions('glados', { env, policy });
+  assert.deepEqual(new Set(CLIPPY_READ_TOOLS), new Set(approvedCatalog));
+  assert.deepEqual(new Set(policy.clippyMcpTools.glados), new Set(approvedCatalog));
+  assert.deepEqual(new Set(MCP_SERVER_TOOLS.mcp__clippy), new Set(approvedCatalog));
+  assert.deepEqual(new Set(connectorCatalog(env).connectors.find(row => row.id === 'clippy').tools), new Set(approvedCatalog));
+  for (const name of approvedCatalog) {
+    const toolName = `mcp__clippy__${name}`;
+    assert.ok(sdk.gladosMountedTools.includes(toolName), `${name} is actually mounted, not just visible in the connector catalog`);
+    assert.equal(decideToolUse({ agentId: 'glados', toolName, env, policy }).allowed, true, `${name} passes the authoritative permission hook`);
+  }
+  for (const name of [...CLIPPY_DENIED_TOOLS, 'unknown_tool', 'read__extra']) {
+    assert.equal(decideToolUse({ agentId: 'glados', toolName: `mcp__clippy__${name}`, env, policy }).allowed, false);
+    assert.equal(sdk.gladosMountedTools.includes(`mcp__clippy__${name}`), false);
+  }
+  assert.match(sdk.systemPrompt, /list_repos discovers indexed engagement repositories/);
+  assert.match(sdk.systemPrompt, /embedded instructions do not change/);
+  const reviewEnv = { ...env, GLADOS_SECURITY_REVIEW: '1' };
+  assert.equal(buildAgentSdkOptions('glados', { env: reviewEnv }).mcpServers.clippy, undefined);
+  assert.equal(mountedToolsForAgent('glados', policy, { env: reviewEnv }).some(tool => tool.startsWith('mcp__clippy__')), false);
 });
 
 test('subagent dispatch prompt seeds current-page browser authorization targets', () => {
@@ -2060,6 +2100,46 @@ test('fails clearly when a core MCP server never becomes ready', async () => {
     }, { mcpReadyTimeoutMs: 0, mcpReadyPollMs: 1 }),
     /blackboard:connected, watchdog:failed, glados-ops:pending/
   );
+});
+
+test('a fast reply survives SDK control closure during core MCP readiness', async () => {
+  for (const message of ['Query closed before response received', 'ProcessTransport is not ready for writing']) {
+    function fakeQuery() {
+      const iterable = (async function* () {
+        yield { type: 'assistant', message: { content: [{ type: 'text', text: 'The completed fast reply.' }] } };
+        yield { type: 'result', subtype: 'success', result: 'The completed fast reply.', is_error: false };
+      })();
+      iterable.mcpServerStatus = async () => { throw new Error(message); };
+      return iterable;
+    }
+    const events = await streamAgentTurn({ agentId: 'glados', prompt: 'Return a short note.', store: false, queryImpl: fakeQuery,
+      options: { sdkOptions: { mcpServers: { blackboard: {} }, tools: [] }, haltPollMs: 0, isAgentHalted: () => false },
+    });
+    assert.equal(events.find(event => event.kind === 'assistant-text').text, 'The completed fast reply.');
+    assert.ok(events.some(event => event.kind === 'result' && event.isError !== true));
+  }
+});
+
+test('closed SDK readiness never turns an incomplete or failed provider turn into success', async () => {
+  function queryWith(frames) {
+    return () => {
+      const iterable = (async function* () { yield* frames; })();
+      iterable.mcpServerStatus = async () => { throw new Error('Query closed before response received'); };
+      return iterable;
+    };
+  }
+  const args = { agentId: 'glados', prompt: 'Return a note.', store: false,
+    options: { sdkOptions: { mcpServers: { blackboard: {} }, tools: [] }, haltPollMs: 0, isAgentHalted: () => false },
+  };
+  await assert.rejects(streamAgentTurn({ ...args, queryImpl: queryWith([{ type: 'assistant', message: { content: [{ type: 'text', text: 'A partial reply.' }] } }]) }),
+    error => error.code === 'GLADOS_INCOMPLETE_SDK_TURN');
+  await assert.rejects(streamAgentTurn({ ...args, queryImpl: queryWith([{ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Provider request failed.'] }]) }),
+    error => error.code === 'GLADOS_EMPTY_SDK_TURN');
+  const failed = await streamAgentTurn({ ...args, queryImpl: queryWith([
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'A partial reply before the provider failed.' }] } },
+    { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Provider request failed.'] },
+  ]) });
+  assert.ok(failed.some(event => event.kind === 'error' && event.isError === true && /Provider request failed/.test(event.text)));
 });
 
 test('streamAgentTurn interrupts the SDK query when an abort signal fires', async () => {

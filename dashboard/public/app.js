@@ -17,6 +17,15 @@ function savedDashboardTheme() {
   } catch { return 'quantum'; }
 }
 
+function savedAgentFilter() {
+  try {
+    const value = localStorage.getItem('glados-dash.agent-filter');
+    if (['all', 'custom', 'halted'].includes(value)) return value;
+    if (value) localStorage.setItem('glados-dash.agent-filter', 'all');
+  } catch {}
+  return 'all';
+}
+
 const state = {
   agents: [],          // from /api/agents
   active: new Map(),   // agentId -> { sessionId }
@@ -27,16 +36,24 @@ const state = {
   agentsLoadedOnce: false,
   update: { lines: [], running: false, es: null, autoStart: false, availableVersion: null, dismissedVersion: null },
   reports: { query: '', scope: 'all', selectedPath: null, tree: [] },
+  agentLibrary: { view: 'built-in', catalog: null, selectedId: null, details: null, draft: null, selectedAgentId: null, selectedTeamId: null, query: '', testMessages: [], testBusy: false, testGeneration: 0, dirty: false, selectionGeneration: 0, loading: false },
+  connectorLibrary: { catalog: null },
+  clippyDashboard: { view: 'opportunities', query: '', severity: '', repo: '', category: '', offset: 0, repoQuery: '', opportunityQuery: '', opportunitySeverity: 'critical', coverage: 'missing', opportunityOffset: 0, chatOpen: true, chatSession: null },
   investigationSessions: [],
   investigationProjects: [],
   currentSessionId: null,
+  currentTeamId: 'glados',
+  teamCatalog: { teams: [{ id: 'glados', name: 'GLaDOS', coordinatorId: 'glados', source: 'builtin', memberIds: [], assignedAgentIds: [], available: true }], agents: [], directAgents: [] },
+  teamCatalogGeneration: 0,
+  teamChangeDraft: null,
+  sessionListProjectId: null,
   expandedProjectIds: (() => {
     try {
-      const raw = localStorage.getItem('glados-dash.expanded-projects');
-      if (raw === null) return null;
+      const raw = localStorage.getItem('glados-dash.expanded-projects.v2');
+      if (raw === null) return new Set();
       const stored = JSON.parse(raw);
       return new Set(Array.isArray(stored) ? stored : []);
-    } catch { return null; }
+    } catch { return new Set(); }
   })(),
   unreadCompletedSessionIds: (() => {
     try {
@@ -60,7 +77,7 @@ const state = {
   })(),
   overview: null,
   securityReviews: [],
-  agentFilter: (() => { try { return localStorage.getItem('glados-dash.agent-filter') || 'all'; } catch { return 'all'; } })(),
+  agentFilter: savedAgentFilter(),
   agentQuery: (() => { try { return localStorage.getItem('glados-dash.agent-query') || ''; } catch { return ''; } })(),
   notifications: (() => {
     try {
@@ -128,23 +145,122 @@ function persistWorkspaceState() {
 }
 
 function sessionQuery() {
-  return `session_id=${encodeURIComponent(state.currentSessionId || 'legacy')}`;
+  const session = `session_id=${encodeURIComponent(state.currentSessionId || 'draft')}`;
+  return state.currentSessionId ? session : `${session}&team_id=${encodeURIComponent(state.currentTeamId || 'glados')}`;
 }
 
-function withSession(url) {
-  return `${url}${url.includes('?') ? '&' : '?'}${sessionQuery()}`;
+function withSession(url, sessionId) {
+  const query = sessionId ? `session_id=${encodeURIComponent(sessionId)}` : sessionQuery();
+  return `${url}${url.includes('?') ? '&' : '?'}${query}`;
+}
+
+function allConversationContexts() {
+  return [...(state.teamCatalog?.teams || []), ...(state.teamCatalog?.directAgents || [])];
+}
+
+function activeTeam() {
+  return allConversationContexts().find(team => team.id === (state.currentTeamId || 'glados')) || null;
+}
+
+function activeCoordinatorId() {
+  const teamId = state.currentTeamId || 'glados';
+  return teamId === 'glados' ? 'glados' : activeTeam()?.coordinatorId || null;
+}
+
+function isSessionCoordinatorEvent(event) {
+  const session = state.investigationSessions.find(item => item.id === event.investigationSessionId);
+  const teamId = session?.teamId || (event.investigationSessionId === state.currentSessionId ? state.currentTeamId : 'glados') || 'glados';
+  const coordinatorId = teamId === 'glados' ? 'glados' : allConversationContexts().find(team => team.id === teamId)?.coordinatorId;
+  return event.agentId === coordinatorId;
+}
+
+function currentTeamName() {
+  return (state.currentTeamId || 'glados') === 'glados' ? 'GLaDOS' : activeTeam()?.name || 'Selected team';
+}
+
+async function loadAgentTeams() {
+  const generation = ++state.teamCatalogGeneration;
+  const catalog = await fetchJson('/api/agent-teams', { timeoutMs: 10000 });
+  if (generation === state.teamCatalogGeneration) {
+    state.teamCatalog = { teams: catalog.teams || [], agents: catalog.agents || [], directAgents: catalog.directAgents || [] };
+    if (state.currentTeamId && state.currentTeamId !== 'glados' && !allConversationContexts().some(team => team.id === state.currentTeamId)) clearUnavailableTeamRoster();
+  }
+  return state.teamCatalog;
+}
+
+function clearUnavailableTeamRoster() {
+  const removed = state.openTabs.filter(tab => tab.kind === 'agent');
+  for (const tab of removed) clearTranscriptTab(tab.id);
+  state.openTabs = state.openTabs.filter(tab => tab.kind !== 'agent');
+  state.agents = [];
+  state.active.clear();
+  if (removed.some(tab => tab.id === state.currentTab)) state.currentTab = 'glados-chat';
+  renderAgentList();
+  renderTabs();
+  updateWorkspaceNav();
+  if (state.currentTab === 'glados-chat') renderPane();
+}
+
+function draftContextOptions() {
+  const options = [...(state.teamCatalog?.teams || [])].sort((left, right) => left.id === 'glados' ? -1 : right.id === 'glados' ? 1 : String(left.name).localeCompare(String(right.name)));
+  const direct = (state.teamCatalog?.directAgents || []).find(agent => agent.id === state.currentTeamId);
+  if (direct) options.push(direct);
+  return options;
+}
+
+function draftContextOptionsMarkup() {
+  return draftContextOptions().map(context => `<option value="${escapeHtml(context.id)}"${context.id === (state.currentTeamId || 'glados') ? ' selected' : ''}${context.available === false ? ' disabled' : ''}>${escapeHtml(context.id === 'glados' ? 'GLaDOS' : context.name)}${context.available === false ? ' (unavailable)' : ''}</option>`).join('');
+}
+
+function newSessionTeamPickerMarkup() {
+  const direct = String(state.currentTeamId || '').startsWith('agent:');
+  return `<label class="new-session-team-picker"><span>${direct ? 'Agent' : 'Team'}</span><select data-new-session-team aria-label="${direct ? 'Agent or team' : 'Team'} for the new session">${draftContextOptionsMarkup()}</select></label>`;
+}
+
+async function selectDraftTeam(teamId) {
+  if (state.currentSessionId) throw new Error('An existing session keeps its team. Start a new session to choose another team.');
+  if (teamId === state.currentTeamId) return;
+  const team = allConversationContexts().find(item => item.id === teamId);
+  if (!team || team.available === false) throw new Error('This team is unavailable. Enable it and connect its required tools first.');
+  const composer = document.querySelector('[data-chat-composer][data-chat-tab="glados-chat"] textarea');
+  const record = state.transcripts.get('glados-chat');
+  const carry = { text: composer?.value || '', attachments: [...(record?.composerAttachments || [])] };
+  ++state.sessionActivationGeneration;
+  state.sessionActivationController?.abort();
+  state.sessionActivationPending = false;
+  state.sessionActivationController = null;
+  closeSessionStreams();
+  state.currentTeamId = teamId;
+  state.teamChangeDraft = carry;
+  await loadAgents();
+  openGladosChat();
+  subscribeLobby();
+}
+
+function refreshDraftTeamOptions() {
+  if (state.currentSessionId) return;
+  const picker = document.querySelector('[data-new-session-team]');
+  if (!picker) return;
+  picker.innerHTML = draftContextOptionsMarkup();
+}
+
+function rosterAgentIds(agents = state.agents) {
+  return new Set(agents.map(agent => agent.id));
 }
 
 function closeSessionStreams() {
   state.sessionGeneration++;
   try { state._lobbySource?.close(); } catch {}
   state._lobbySource = null;
-  for (const rec of state.transcripts.values()) {
+  for (const [tabId, rec] of state.transcripts) {
+    if (rec.independentSession) continue;
     try { rec.es?.close(); } catch {}
+    state.transcripts.delete(tabId);
   }
-  state.transcripts.clear();
   state.active.clear();
   state.agentActivity.clear();
+  state.securityReviews = [];
+  renderSecurityReviews();
 }
 
 async function loadInvestigationSessions() {
@@ -155,12 +271,14 @@ async function loadInvestigationSessions() {
   if (activationGeneration !== state.sessionActivationGeneration) return false;
   state.investigationSessions = body.sessions || [];
   state.investigationProjects = body.projects || [];
-  if (!state.sessionActivationPending) state.currentSessionId = body.activeId;
+  if (!state.sessionActivationPending && state.currentSessionId && !state.investigationSessions.some(session => session.id === state.currentSessionId)) {
+    await createInvestigationSession();
+  }
   const validSessions = new Set(state.investigationSessions.map(session => session.id));
-  state.unreadCompletedSessionIds = new Set([...state.unreadCompletedSessionIds].filter(id => validSessions.has(id) && id !== body.activeId));
+  state.unreadCompletedSessionIds = new Set([...state.unreadCompletedSessionIds].filter(id => validSessions.has(id) && id !== state.currentSessionId));
   persistUnreadCompletedSessions();
   const validProjects = new Set(state.investigationProjects.map(project => project.id));
-  if (!(state.expandedProjectIds instanceof Set)) state.expandedProjectIds = new Set(validProjects);
+  if (!(state.expandedProjectIds instanceof Set)) state.expandedProjectIds = new Set();
   else state.expandedProjectIds = new Set([...state.expandedProjectIds].filter(id => validProjects.has(id)));
   renderInvestigationNavigation();
   return true;
@@ -175,8 +293,10 @@ async function loadOperatorProfile() {
 }
 
 async function activateInvestigationSession(sessionId) {
-  if (!sessionId || sessionId === state.currentSessionId) return;
+  if (!sessionId) return;
+  if (sessionId === state.currentSessionId) { openGladosChat(); return; }
   const previousSessionId = state.currentSessionId;
+  const previousTeamId = state.currentTeamId;
   const previous = state.investigationSessions.find(session => session.id === previousSessionId);
   const continuesInBackground = Number(previous?.runningCount || 0) > 0 || state.active.size > 0;
   const activationGeneration = ++state.sessionActivationGeneration;
@@ -202,6 +322,7 @@ async function activateInvestigationSession(sessionId) {
   } catch (error) {
     if (error?.name === 'AbortError' || activationGeneration !== state.sessionActivationGeneration) return;
     state.currentSessionId = previousSessionId;
+    state.currentTeamId = previousTeamId;
     state.sessionActivationPending = false;
     renderInvestigationNavigation();
     throw error;
@@ -209,6 +330,7 @@ async function activateInvestigationSession(sessionId) {
   if (activationGeneration !== state.sessionActivationGeneration) return;
   if (!response.ok || !body.ok) {
     state.currentSessionId = previousSessionId;
+    state.currentTeamId = previousTeamId;
     state.sessionActivationPending = false;
     renderInvestigationNavigation();
     throw new Error(body.error || 'could not activate investigation');
@@ -217,41 +339,70 @@ async function activateInvestigationSession(sessionId) {
   state.sessionActivationController = null;
   closeSessionStreams();
   state.currentSessionId = body.activeId || body.session.id;
+  state.currentTeamId = body.session.teamId || 'glados';
+  state.teamChangeDraft = null;
   state.investigationSessions = body.sessions || [];
   state.investigationProjects = body.projects || state.investigationProjects;
   markSessionSeen(state.currentSessionId);
   clearPlanClientState();
   persistWorkspaceState();
   await Promise.all([loadAgents(), loadSecurityReviews()]);
-  renderPane();
+  openGladosChat();
   if (!state._lobbySource) subscribeLobby();
   if (continuesInBackground) showToast(`${previous?.name || 'The previous session'} is still working in the background.`, { kind: 'info', label: 'Sessions' });
 }
 
-async function createInvestigationSession() {
+async function createInvestigationSession({ teamId = 'glados' } = {}) {
   const current = state.investigationSessions.find(session => session.id === state.currentSessionId);
-  if (current?.metadata?.unassigned && !current.projectId) {
-    showToast('The current session is already unassigned and ready for a new GLaDOS prompt.', { kind: 'info', label: 'Investigation session' });
-    return current;
-  }
   const continuesInBackground = Number(current?.runningCount || 0) > 0 || state.active.size > 0;
+  ++state.sessionActivationGeneration;
+  state.sessionActivationController?.abort();
+  state.sessionActivationPending = false;
+  state.sessionActivationController = null;
+  closeSessionStreams();
+  state.currentSessionId = null;
+  state.currentTeamId = teamId;
+  state.teamChangeDraft = null;
+  state.securityReviews = [];
+  renderSecurityReviews();
+  clearPlanClientState();
+  renderInvestigationNavigation();
+  openGladosChat();
+  await loadAgents();
+  subscribeLobby();
+  if (continuesInBackground) showToast(`${current?.name || 'The previous session'} is still working in the background.`, { kind: 'info', label: 'Sessions' });
+  return null;
+}
+
+let draftSessionCreation = null;
+async function materializeDraftSession() {
+  if (state.currentSessionId) return state.currentSessionId;
+  if (draftSessionCreation) return draftSessionCreation;
+  const activationGeneration = state.sessionActivationGeneration;
+  draftSessionCreation = (async () => {
   const response = await fetch('/api/investigation-sessions', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Unassigned session', metadata: { unassigned: true }, projectId: null }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'New session', metadata: { unassigned: true }, projectId: null, ...(String(state.currentTeamId || '').startsWith('agent:') ? { agentId: state.currentTeamId.slice(6) } : { teamId: state.currentTeamId || 'glados' }) }),
   });
   const body = await response.json();
   if (!response.ok || !body.ok) throw new Error(body.error || 'could not create investigation');
-  closeSessionStreams();
+  if (activationGeneration !== state.sessionActivationGeneration) return null;
   state.currentSessionId = body.session.id;
+  state.currentTeamId = body.session.teamId || state.currentTeamId || 'glados';
   state.investigationSessions = body.sessions || [];
   state.investigationProjects = body.projects || state.investigationProjects;
   markSessionSeen(body.session.id);
   clearPlanClientState();
   persistWorkspaceState();
-  await Promise.all([loadAgents(), loadSecurityReviews()]);
-  renderPane();
-  if (!state._lobbySource) subscribeLobby();
-  if (continuesInBackground) showToast(`${current?.name || 'The previous session'} is still working in the background.`, { kind: 'info', label: 'Sessions' });
-  return body.session;
+  renderInvestigationNavigation();
+  for (const [tabId, rec] of state.transcripts) ensureTranscript(tabId, rec.agentId);
+  document.querySelector('.chat-new-session')?.classList.remove('chat-new-session');
+  document.querySelector('.new-session-welcome')?.remove();
+  await loadAgents();
+  subscribeLobby();
+  return body.session.id;
+  })();
+  try { return await draftSessionCreation; }
+  finally { draftSessionCreation = null; }
 }
 
 async function renameInvestigationSession(sessionId, name) {
@@ -318,20 +469,48 @@ async function deleteInvestigationProject(projectId) {
   return body.project;
 }
 
+function investigationSessionBusy(sessionId) {
+  const session = state.investigationSessions.find(item => item.id === sessionId);
+  return Number(session?.runningCount || 0) > 0 || (sessionId === state.currentSessionId && (state.active.size > 0 || [...state.transcripts.values()].some(record => record.sending && (!record.independentSession || record.sessionId === sessionId))));
+}
+
+async function confirmDeleteInvestigationSession(session) {
+  if (!session) return false;
+  if (investigationSessionBusy(session.id)) throw new Error('Finish or stop this session’s active agents before deleting it.');
+  const approved = await confirmAction({ title: 'Delete session', message: `Permanently delete "${session.name}" and its database records? Evidence and report files are preserved.`, confirmLabel: 'Delete session', danger: true });
+  if (!approved) return false;
+  await deleteInvestigationSession(session.id);
+  return true;
+}
+
 async function deleteInvestigationSession(sessionId) {
+  if (investigationSessionBusy(sessionId)) throw new Error('Finish or stop this session’s active agents before deleting it.');
   const response = await fetch(`/api/investigation-sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
   const body = await response.json();
   if (!response.ok || !body.ok) throw new Error(body.error || 'could not delete investigation');
-  closeSessionStreams();
-  state.currentSessionId = body.activeId;
   state.investigationSessions = body.sessions || [];
+  state.investigationProjects = body.projects || state.investigationProjects;
   state.unreadCompletedSessionIds.delete(sessionId);
   persistUnreadCompletedSessions();
-  clearPlanClientState();
-  persistWorkspaceState();
-  await Promise.all([loadAgents(), loadSecurityReviews()]);
-  renderPane();
-  subscribeLobby();
+  if (sessionId === state.currentSessionId) {
+    ++state.sessionActivationGeneration;
+    state.sessionActivationController?.abort();
+    state.sessionActivationPending = false;
+    state.sessionActivationController = null;
+    closeSessionStreams();
+    state.currentSessionId = null;
+    state.currentTeamId = 'glados';
+    state.teamChangeDraft = null;
+    clearPlanClientState();
+    persistWorkspaceState();
+    await loadAgents();
+    openGladosChat();
+    subscribeLobby();
+  } else {
+    renderInvestigationNavigation();
+    if (state.currentTab === 'sessions') renderPane();
+  }
+  return true;
 }
 
 function showNameInput({ title, value = '', confirmLabel = 'Save', label = 'Investigation name', placeholder = '' }) {
@@ -438,8 +617,8 @@ function showDialog({ title, message, confirmLabel = 'OK', cancelLabel = null, d
   });
 }
 
-function confirmAction({ title, message, confirmLabel = 'Continue', danger = false }) {
-  return showDialog({ title, message, confirmLabel, cancelLabel: 'Cancel', danger });
+function confirmAction({ title, message, confirmLabel = 'Continue', cancelLabel = 'Cancel', danger = false }) {
+  return showDialog({ title, message, confirmLabel, cancelLabel, danger });
 }
 
 function openNotificationDrawer(open = true) {
@@ -483,6 +662,13 @@ function setAgentHaltedState(agentId, halted) {
   syncAgentViewToolbars(agentId);
 }
 
+function agentDisplayName(agentOrId) {
+  const agent = typeof agentOrId === 'string' ? state.agents.find(item => item.id === agentOrId) : agentOrId;
+  const id = typeof agentOrId === 'string' ? agentOrId : agentOrId?.id || '';
+  if (id === 'glados') return 'GLaDOS';
+  return (agent?.packageId || id.startsWith('pkg-')) && agent?.name ? agent.name : id;
+}
+
 function agentStatusLabel(status, compact = false) {
   if (status === 'quiet') return compact ? 'No updates' : 'No recent activity';
   if (!status) return compact ? '' : 'Idle';
@@ -494,6 +680,8 @@ function syncAgentViewToolbars(agentId = null) {
     const id = toolbar.dataset.agentId;
     if (agentId && id !== agentId) return;
     const agent = state.agents.find(entry => entry.id === id);
+    const title = toolbar.querySelector('.agent-view-title strong');
+    if (title) { title.textContent = agentDisplayName(id); title.title = id; }
     const halted = !!agent?.halted;
     const view = agentActivityView(id);
     const status = toolbar.querySelector('.agent-runtime-status');
@@ -517,15 +705,15 @@ function createAgentViewToolbar(agentId) {
   toolbar.className = 'agent-view-toolbar';
   toolbar.dataset.agentId = agentId;
   const resetLabel = agentId === 'glados' ? 'Reset SDK conversations' : 'Reset SDK conversation';
-  const label = agentId === 'glados' ? 'GLaDOS' : agentId;
-  const role = agentId === 'glados' ? 'Coordinator' : 'Specialist agent';
+  const label = agentDisplayName(agentId);
+  const role = agentId === 'glados' ? 'Coordinator' : state.agents.find(agent => agent.id === agentId)?.teamCoordinator ? 'Agent team' : 'Specialist agent';
   const avatar = agentId === 'glados'
     ? '<img class="agent-avatar glados-avatar" src="/assets/glados-logo.png" alt="" />'
     : `<span class="agent-avatar" aria-hidden="true">${escapeHtml(label.slice(0, 1).toUpperCase())}</span>`;
   toolbar.innerHTML = `
     <div class="agent-view-identity">
       ${avatar}
-      <span class="agent-view-title"><strong>${escapeHtml(label)}</strong><small>${role}</small></span>
+      <span class="agent-view-title"><strong title="${escapeHtml(agentId)}">${escapeHtml(label)}</strong><small>${role}</small></span>
       <span class="agent-runtime-status idle">Idle</span>
     </div>
     <span class="agent-last-activity" aria-live="off"></span>
@@ -682,11 +870,17 @@ function wireOperationControls(root = document) {
 async function loadAgents() {
   const sessionId = state.currentSessionId;
   const generation = state.sessionGeneration;
-  const res = await fetch(`/api/agents?session_id=${encodeURIComponent(sessionId || 'legacy')}`);
+  const res = await fetch(withSession('/api/agents'));
   const j = await res.json();
   if (generation !== state.sessionGeneration || sessionId !== state.currentSessionId) return false;
   const previouslyActive = new Set(state.active.keys());
   state.agents = j.agents || [];
+  const rosterIds = rosterAgentIds();
+  const removedTabs = state.openTabs.filter(tab => tab.kind === 'agent' && (!rosterIds.has(tab.id) || tab.id === activeCoordinatorId()));
+  const removedCurrentTab = removedTabs.some(tab => tab.id === state.currentTab);
+  for (const tab of removedTabs) clearTranscriptTab(tab.id);
+  state.openTabs = state.openTabs.filter(tab => !removedTabs.includes(tab));
+  if (removedCurrentTab) state.currentTab = 'glados-chat';
   state.active.clear();
   for (const a of state.agents) {
     if (a.active) {
@@ -698,15 +892,19 @@ async function loadAgents() {
     if (!state.active.has(id)) noteAgentActivity(id, 'Session finished', { status: 'done' });
   }
   for (const a of state.agents) {
-    if (!a.active || a.id === 'glados' ) continue;
+    if (!a.active || a.id === activeCoordinatorId()) continue;
     if (state.openTabs.find(t => t.id === a.id)) continue;
     // If the lobby SSE missed session-started, polling still creates the live
     // agent's tab. Durable transcript backfill catches it up when opened.
     if (!state.agentsLoadedOnce || !previouslyActive.has(a.id)) ensureAgentTab(a.id);
   }
   state.agentsLoadedOnce = true;
+  for (const tab of state.openTabs) if (tab.kind === 'agent') tab.label = agentDisplayName(tab.id);
+  renderTabs();
   renderAgentList();
   syncAgentViewToolbars();
+  syncPackageInvocationControls();
+  if (removedCurrentTab) { updateWorkspaceNav(); renderPane(); persistWorkspaceState(); }
   return true;
 }
 
@@ -783,14 +981,19 @@ function scheduleAgentActivityRefresh() {
 }
 
 
+function agentMatchesSidebarFilter(agent, filter) {
+  if (filter === 'custom') return !!agent.packageId || String(agent.id).startsWith('pkg-');
+  if (filter === 'halted') return !!agent.halted;
+  return true;
+}
+
 function renderAgentList() {
   agentListEl.innerHTML = '';
   const query = state.agentQuery.trim().toLowerCase();
   const filtered = state.agents.filter(a => {
-    if (a.id === 'glados') return false;
+    if (a.id === activeCoordinatorId()) return false;
     if (query && !`${a.id} ${a.name || ''} ${a.model || ''}`.toLowerCase().includes(query)) return false;
-    if (state.agentFilter === 'active' && !state.active.has(a.id)) return false;
-    if (state.agentFilter === 'halted' && !a.halted) return false;
+    if (!agentMatchesSidebarFilter(a, state.agentFilter)) return false;
     return true;
   });
   const groups = [
@@ -813,7 +1016,7 @@ function renderAgentList() {
     const activity = agentActivityView(a.id);
     li.classList.toggle('quiet', activity.status === 'quiet');
     if (activity.status === 'quiet') li.title = `${a.id}: still running; no agent activity for over 2 minutes. ${activity.detail}`;
-    li.innerHTML = `<span class="dot"></span><span class="agent-row-main"><span class="name">${escapeHtml(a.id)}</span><small class="agent-row-model">${escapeHtml(a.model || a.name || 'Ready')}</small><small class="agent-row-last">${escapeHtml(activity.detail)}</small></span>` +
+    li.innerHTML = `<span class="dot"></span><span class="agent-row-main"><span class="name">${escapeHtml(agentDisplayName(a))}</span><small class="agent-row-model">${escapeHtml(a.model || a.name || 'Ready')}</small><small class="agent-row-last">${escapeHtml(activity.detail)}</small></span>` +
       `<span class="agent-row-state">${escapeHtml(agentStatusLabel(activity.status, true))}</span>`;
     li.addEventListener('click', () => openAgentTab(a.id));
     li.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') openAgentTab(a.id); });
@@ -907,16 +1110,17 @@ function openOverview() {
 function openGladosChat() {
   const id = 'glados-chat';
   if (!state.openTabs.find(t => t.id === id)) {
-    state.openTabs.unshift({ id, kind: 'chat', label: 'GLaDOS Chat' });
+    state.openTabs.unshift({ id, kind: 'chat', label: 'Chat' });
   }
   setCurrentTab(id);
 }
 
 function openAgentTab(agentId) {
-  if (agentId === 'glados') {
+  if (agentId === activeCoordinatorId()) {
     openGladosChat();
     return;
   }
+  if (!state.agents.some(agent => agent.id === agentId)) { showToast('Add this agent to the selected team before opening its conversation.', { kind: 'info', label: 'Agents' }); return; }
   ensureAgentTab(agentId);
   setCurrentTab(agentId);
 }
@@ -924,8 +1128,8 @@ function openAgentTab(agentId) {
 // Runtime events may create a work tab, but must never steal focus from an
 // operator reading Overview, Reports, Proxy, or another agent transcript.
 function ensureAgentTab(agentId) {
-  if (!agentId || agentId === 'glados' || state.openTabs.find(t => t.id === agentId)) return;
-  state.openTabs.push({ id: agentId, kind: 'agent', label: agentId });
+  if (!agentId || agentId === activeCoordinatorId() || !state.agents.some(agent => agent.id === agentId) || state.openTabs.find(t => t.id === agentId)) return;
+  state.openTabs.push({ id: agentId, kind: 'agent', label: agentDisplayName(agentId) });
   renderTabs();
   persistWorkspaceState();
 }
@@ -944,7 +1148,7 @@ function closeTab(id) {
 }
 
 function tabIdForAgent(agentId) {
-  return agentId === 'glados' ? 'glados-chat' : agentId;
+  return agentId === activeCoordinatorId() ? 'glados-chat' : agentId;
 }
 
 function clearTranscriptTab(tabId) {
@@ -957,7 +1161,7 @@ function clearTranscriptTab(tabId) {
 }
 
 function clearRuntimeTranscriptState(agentIds = []) {
-  const ids = agentIds.length ? agentIds.map(tabIdForAgent) : [...state.transcripts.keys()];
+  const ids = agentIds.length ? agentIds.map(tabIdForAgent) : [...state.transcripts].filter(([, rec]) => !rec.independentSession).map(([id]) => id);
   for (const id of ids) clearTranscriptTab(id);
   state.active.clear();
   for (const tab of state.openTabs) {
@@ -989,10 +1193,16 @@ function updateWorkspaceNav() {
     reports: 'open-reports',
     terminal: 'open-terminal',
     proxy: 'open-proxy',
+    'agent-library': 'open-agent-library',
+    clippy: 'open-clippy',
+    connectors: 'open-connectors',
     settings: 'open-settings',
   };
-  document.querySelectorAll('.workspace-links a').forEach(link => link.classList.remove('nav-active'));
-  document.getElementById(mapping[state.currentTab])?.classList.add('nav-active');
+  document.querySelectorAll('.workspace-links a').forEach(link => { link.classList.remove('nav-active'); link.removeAttribute('aria-current'); });
+  const selectedLink = document.getElementById(mapping[state.currentTab]);
+  selectedLink?.classList.add('nav-active');
+  selectedLink?.setAttribute('aria-current', 'page');
+  document.getElementById('workspace-tools')?.classList.toggle('nav-active', ['agent-library', 'clippy', 'connectors', 'proxy', 'reports', 'terminal'].includes(state.currentTab));
 }
 
 function renderTabs() {
@@ -1000,9 +1210,11 @@ function renderTabs() {
   for (const t of state.openTabs) {
     const el = document.createElement('div');
     el.className = 'tab' + (state.currentTab === t.id ? ' active' : '');
-    // All tabs except the sticky GLaDOS Chat are closable. No icons — cleaner.
+    // Chat stays first; the remaining workspace tabs can be closed.
     const closable = t.kind !== 'chat';
-    el.innerHTML = `<span class="label">${t.label}</span>` +
+    const label = t.kind === 'agent' ? agentDisplayName(t.id) : t.label;
+    if (t.kind === 'agent') el.title = t.id;
+    el.innerHTML = `<span class="label">${escapeHtml(label)}</span>` +
       (closable ? `<span class="close" data-close="${t.id}">×</span>` : '');
     el.addEventListener('click', ev => {
       if (ev.target.dataset.close) {
@@ -1034,6 +1246,18 @@ function openSettings() {
   setCurrentTab(id);
 }
 
+function openAgentsLibrary() {
+  const id = 'agent-library';
+  if (!state.openTabs.find(t => t.id === id)) state.openTabs.push({ id, kind: 'agent-library', label: 'Agents' });
+  setCurrentTab(id);
+}
+
+function openConnectors() {
+  const id = 'connectors';
+  if (!state.openTabs.find(t => t.id === id)) state.openTabs.push({ id, kind: 'connectors', label: 'Connectors' });
+  setCurrentTab(id);
+}
+
 function openTerminal() {
   const id = 'terminal';
   if (!state.openTabs.find(t => t.id === id)) state.openTabs.push({ id, kind: 'terminal', label: 'Terminal' });
@@ -1054,10 +1278,11 @@ function openUpdatePane({ autoStart = false } = {}) {
 }
 
 function renderPane() {
+  disposeClippyPane();
   paneEl.innerHTML = '';
   const id = state.currentTab;
   if (!id) {
-    paneEl.innerHTML = '<div class="pane-empty">Open GLaDOS to start chatting.</div>';
+    paneEl.innerHTML = '<div class="pane-empty">Open Chat to start a conversation.</div>';
     return;
   }
   const tab = state.openTabs.find(t => t.id === id);
@@ -1066,7 +1291,11 @@ function renderPane() {
   else if (tab.kind === 'chat') renderChatPane();
   else if (tab.kind === 'plans') renderPlansPane();
   else if (tab.kind === 'reports') renderReportsPane();
+  else if (tab.kind === 'sessions') renderSessionsPane();
   else if (tab.kind === 'settings') renderSettingsPane();
+  else if (tab.kind === 'agent-library') renderAgentsLibraryPane();
+  else if (tab.kind === 'clippy') renderClippyPane();
+  else if (tab.kind === 'connectors') renderConnectorsPane();
   else if (tab.kind === 'terminal') renderTerminalPane();
   else if (tab.kind === 'proxy') renderProxyPane();
   else if (tab.kind === 'update') renderUpdatePane();
@@ -1364,19 +1593,25 @@ function queueSidebarSessionMenuPosition() {
   });
 }
 
+function sessionActivityTime(session) {
+  const value = session.lastActivityAt || session.createdAt || '';
+  const utc = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value) ? `${value.replace(' ', 'T')}Z` : value;
+  return Date.parse(utc) || 0;
+}
+
+function compareSessionActivity(a, b) {
+  return sessionActivityTime(b) - sessionActivityTime(a) || b.id.localeCompare(a.id);
+}
+
 function renderInvestigationNavigation() {
   const projectsHost = document.getElementById('projects-section');
   const sessionsHost = document.getElementById('sessions-section');
   if (!projectsHost || !sessionsHost) return;
   const projects = state.investigationProjects || [];
   const sessions = state.investigationSessions || [];
-  if (!(state.expandedProjectIds instanceof Set)) state.expandedProjectIds = new Set(projects.map(project => project.id));
+  if (!(state.expandedProjectIds instanceof Set)) state.expandedProjectIds = new Set();
   const folderIcon = '<svg class="sidebar-project-folder" viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 5.75A1.75 1.75 0 0 1 4.25 4h3.1l1.5 1.65h6.9A1.75 1.75 0 0 1 17.5 7.4v6.35a1.75 1.75 0 0 1-1.75 1.75H4.25a1.75 1.75 0 0 1-1.75-1.75v-8Z"/></svg>';
-  const sortedSessions = list => [...list].sort((a, b) => {
-    if (a.id === state.currentSessionId) return -1;
-    if (b.id === state.currentSessionId) return 1;
-    return Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0);
-  });
+  const sortedSessions = list => [...list].sort(compareSessionActivity);
   const moveOptions = session => [
     `<option value=""${!session.projectId ? ' selected' : ''}>No project</option>`,
     ...projects.map(project => `<option value="${escapeHtml(project.id)}"${session.projectId === project.id ? ' selected' : ''}>${escapeHtml(project.name)}</option>`),
@@ -1417,7 +1652,8 @@ function renderInvestigationNavigation() {
             </div></details>
           </div>
           <div class="sidebar-project-sessions" ${expanded ? '' : 'hidden'}>
-            ${projectSessions.map(session => sessionMarkup(session, { nested: true })).join('') || '<div class="sidebar-project-empty">Drop sessions here</div>'}
+            ${projectSessions.slice(0, 3).map(session => sessionMarkup(session, { nested: true })).join('') || '<div class="sidebar-project-empty">Drop sessions here</div>'}
+            ${projectSessions.length > 3 ? `<button type="button" class="sidebar-view-all" data-project-sessions="${escapeHtml(project.id)}">View all ${projectSessions.length} sessions</button>` : ''}
           </div>
         </div>`;
       }).join('')}
@@ -1427,6 +1663,13 @@ function renderInvestigationNavigation() {
     try { await createInvestigationProject(); }
     catch (error) { pushNotification('error', error.message, { toast: true, label: 'Projects' }); }
   };
+  document.getElementById('sidebar-project-collapse').onclick = event => {
+    event.stopPropagation();
+    state.expandedProjectIds.clear();
+    persistExpandedProjects();
+    renderInvestigationNavigation();
+  };
+  projectsHost.querySelectorAll('[data-project-sessions]').forEach(button => button.addEventListener('click', () => openSessions(button.dataset.projectSessions)));
   projectsHost.querySelectorAll('[data-project-toggle]').forEach(button => button.addEventListener('click', () => {
     const projectId = button.dataset.projectToggle;
     if (state.expandedProjectIds.has(projectId)) state.expandedProjectIds.delete(projectId);
@@ -1454,16 +1697,18 @@ function renderInvestigationNavigation() {
     catch (error) { pushNotification('error', error.message, { toast: true, label: 'Projects' }); }
   }));
 
-  const unassigned = sortedSessions(sessions.filter(session => !session.projectId));
+  const recent = [...sessions].filter(session => !session.metadata?.unassigned || session.engagementCount > 0 || session.runningCount > 0)
+    .sort(compareSessionActivity).slice(0, 3);
   sessionsHost.innerHTML = `
     <div class="sidebar-session-list">
-      ${unassigned.map(session => sessionMarkup(session)).join('')}
+      ${recent.map(session => sessionMarkup(session)).join('') || '<div class="sidebar-project-empty">Your conversations will appear here.</div>'}
     </div>`;
   document.getElementById('sidebar-session-new').onclick = async event => {
     event.stopPropagation();
     try { await createInvestigationSession(); }
     catch (error) { pushNotification('error', error.message, { toast: true, label: 'Sessions' }); }
   };
+  document.getElementById('sidebar-sessions-all').onclick = event => { event.stopPropagation(); openSessions(); };
   const navigationHost = [projectsHost, sessionsHost];
   navigationHost.forEach(wireSidebarSessionMenus);
   navigationHost.forEach(host => host.querySelectorAll('[data-session-select]').forEach(button => button.addEventListener('click', async () => {
@@ -1484,19 +1729,8 @@ function renderInvestigationNavigation() {
     catch (error) { select.value = prior; pushNotification('error', error.message, { toast: true, label: 'Sessions' }); }
   })));
   navigationHost.forEach(host => host.querySelectorAll('[data-session-delete-id]').forEach(button => button.addEventListener('click', async () => {
-    const session = sessions.find(item => item.id === button.dataset.sessionDeleteId);
-    if (!session || !await confirmAction({ title: 'Delete session', message: `Permanently delete "${session.name}" and its database records? Evidence and report files are preserved.`, confirmLabel: 'Delete session', danger: true })) return;
-    try {
-      if (session.id === state.currentSessionId) await deleteInvestigationSession(session.id);
-      else {
-        const response = await fetch(`/api/investigation-sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
-        const body = await response.json();
-        if (!response.ok || !body.ok) throw new Error(body.error || 'could not delete session');
-        state.investigationSessions = body.sessions || [];
-        state.investigationProjects = body.projects || [];
-        renderInvestigationNavigation();
-      }
-    } catch (error) { pushNotification('error', error.message, { toast: true, label: 'Sessions' }); }
+    try { await confirmDeleteInvestigationSession(sessions.find(session => session.id === button.dataset.sessionDeleteId)); }
+    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Sessions' }); }
   })));
 
   navigationHost.forEach(host => host.querySelectorAll('[data-session-row]').forEach(row => {
@@ -1525,8 +1759,6 @@ function renderInvestigationNavigation() {
       const sessionId = event.dataTransfer.getData('text/plain');
       const projectId = target.dataset.projectDrop;
       if (!sessionId || sessions.find(session => session.id === sessionId)?.projectId === projectId) return;
-      state.expandedProjectIds.add(projectId);
-      persistExpandedProjects();
       try { await moveInvestigationSession(sessionId, projectId); }
       catch (error) { pushNotification('error', error.message, { toast: true, label: 'Projects' }); }
     });
@@ -1550,7 +1782,41 @@ function renderInvestigationNavigation() {
 }
 
 function persistExpandedProjects() {
-  try { localStorage.setItem('glados-dash.expanded-projects', JSON.stringify([...state.expandedProjectIds])); } catch {}
+  try { localStorage.setItem('glados-dash.expanded-projects.v2', JSON.stringify([...state.expandedProjectIds])); } catch {}
+}
+
+function openSessions(projectId = null) {
+  state.sessionListProjectId = projectId;
+  if (!state.openTabs.some(tab => tab.id === 'sessions')) state.openTabs.push({ id: 'sessions', kind: 'sessions', label: 'Sessions' });
+  setCurrentTab('sessions');
+}
+
+function renderSessionsPane() {
+  const project = state.investigationProjects.find(project => project.id === state.sessionListProjectId);
+  const sessions = [...state.investigationSessions]
+    .filter(session => !session.metadata?.unassigned || session.engagementCount > 0 || session.runningCount > 0)
+    .filter(session => !project || session.projectId === project.id)
+    .sort(compareSessionActivity);
+  const wrap = document.createElement('div');
+  wrap.className = 'sessions-pane';
+  const searchIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4.5 4.5"/></svg>';
+  const trashIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>';
+  wrap.innerHTML = `<header><div><h1>${escapeHtml(project?.name || 'Sessions')}</h1><p>${project ? 'Project conversations' : 'All conversations'}</p></div><button type="button" data-new-session>＋ New session</button></header>
+    <label class="sessions-search"><span class="sr-only">Search sessions</span><span class="sessions-search-control">${searchIcon}<input type="search" placeholder="Find a conversation…" aria-label="Search sessions" /></span></label>
+    <div class="sessions-directory">${sessions.map(session => `<div class="session-directory-row" data-directory-session="${escapeHtml(session.id)}"><button type="button" class="session-directory-open" data-session-select="${escapeHtml(session.id)}"><span><strong>${escapeHtml(session.name)}</strong><small>${escapeHtml(session.projectName || 'No project')}</small></span><span class="session-directory-activity">${session.runningCount > 0 ? 'Working' : formatReportDate(sessionActivityTime(session))}</span></button><button type="button" class="session-directory-delete" data-directory-session-delete="${escapeHtml(session.id)}" aria-label="Delete ${escapeHtml(session.name)}" title="${investigationSessionBusy(session.id) ? 'Finish or stop this session before deleting it' : 'Delete this session'}"${investigationSessionBusy(session.id) ? ' disabled' : ''}>${trashIcon}<span>Delete</span></button></div>`).join('') || '<div class="pane-empty">No sessions yet.</div>'}</div>`;
+  paneEl.appendChild(wrap);
+  wrap.querySelector('[data-new-session]').onclick = () => createInvestigationSession().catch(error => pushNotification('error', error.message, { toast: true, label: 'Sessions' }));
+  wrap.querySelectorAll('[data-session-select]').forEach(button => button.onclick = () => activateInvestigationSession(button.dataset.sessionSelect).catch(error => pushNotification('error', error.message, { toast: true, label: 'Sessions' })));
+  wrap.querySelectorAll('[data-directory-session-delete]').forEach(button => button.addEventListener('click', async () => {
+    button.disabled = true;
+    try { await confirmDeleteInvestigationSession(sessions.find(session => session.id === button.dataset.directorySessionDelete)); }
+    catch (error) { pushNotification('error', error.message, { toast: true, label: 'Sessions' }); }
+    finally { if (button.isConnected) button.disabled = investigationSessionBusy(button.dataset.directorySessionDelete); }
+  }));
+  wrap.querySelector('input').addEventListener('input', event => {
+    const query = event.target.value.trim().toLowerCase();
+    wrap.querySelectorAll('.session-directory-row').forEach(row => { row.hidden = !row.textContent.toLowerCase().includes(query); });
+  });
 }
 
 function persistUnreadCompletedSessions() {
@@ -1869,11 +2135,21 @@ function pruneTranscriptEvents(rec) {
 // Ensure a transcript record exists for this tabId and is subscribed to the
 // agent's SSE transcript. The SSE handler always appends to rec.el — which
 // gets reassigned on every render — so switching tabs never orphans events.
-function ensureTranscript(tabId, agentId) {
+function ensureTranscript(tabId, agentId, options = {}) {
+  const sessionId = options.sessionId || state.currentSessionId;
   let rec = state.transcripts.get(tabId);
-  if (rec) return rec;
+  if (rec && options.sessionId && rec.sessionId !== sessionId) {
+    try { rec.es?.close(); } catch {}
+    state.transcripts.delete(tabId);
+    rec = null;
+  }
+  if (rec && (rec.es || !sessionId)) return rec;
+  if (!rec) {
   rec = {
     agentId,
+    sessionId,
+    independentSession: !!options.sessionId,
+    viewTabId: options.viewTabId || tabId,
     es: null,
     el: null,
     events: [],
@@ -1894,11 +2170,13 @@ function ensureTranscript(tabId, agentId) {
 	    completedAt: null,
 	  };
   state.transcripts.set(tabId, rec);
+  }
+  if (!sessionId) return rec;
+  rec.sessionId = sessionId;
   const generation = state.sessionGeneration;
-  const sessionId = state.currentSessionId;
-  const es = new EventSource(withSession(`/api/agents/${encodeURIComponent(agentId)}/transcript?stream=v4`));
+  const es = new EventSource(withSession(`/api/agents/${encodeURIComponent(agentId)}/transcript?stream=v4`, sessionId));
   es.onmessage = e => {
-    if (generation !== state.sessionGeneration || sessionId !== state.currentSessionId) return;
+    if (state.transcripts.get(tabId) !== rec || (!rec.independentSession && (generation !== state.sessionGeneration || sessionId !== state.currentSessionId))) return;
     let ev;
     try { ev = JSON.parse(e.data); } catch { return; }
     ev = normalizeIncomingTranscriptEvent(ev);
@@ -2350,9 +2628,9 @@ function ackOptimisticUserMessage(rec, ev) {
 
 async function refreshChatTurnStatus(tabId, agentId) {
   const rec = state.transcripts.get(tabId);
-  if (!rec) return;
+  if (!rec || !(rec.sessionId || state.currentSessionId)) return;
   try {
-    const r = await fetch(withSession(`/api/chat/status/${encodeURIComponent(agentId)}`));
+    const r = await fetch(withSession(`/api/chat/status/${encodeURIComponent(agentId)}`, rec.sessionId));
     if (!r.ok) return;
     const status = await r.json();
     if (status.active) {
@@ -2721,7 +2999,7 @@ function wireChatComposerControls(chat, { agentId, tabId, coordinator, rec }) {
   const modelSelect = root.querySelector('[data-chat-model]');
   const effortSelect = root.querySelector('[data-chat-effort]');
   const accessButton = root.querySelector('[data-chat-full-access]');
-  const selectedAttachments = [];
+  const selectedAttachments = rec.composerAttachments || (rec.composerAttachments = []);
   let config = null;
   let busy = false;
   rec.tabId = tabId;
@@ -2873,7 +3151,7 @@ function wireChatComposerControls(chat, { agentId, tabId, coordinator, rec }) {
     busy = true;
     effortSelect.disabled = true;
     try {
-      const response = await fetch(withSession(`/api/chat/${encodeURIComponent(agentId)}/composer`), {
+      const response = await fetch(withSession(`/api/chat/${encodeURIComponent(agentId)}/composer`, rec.sessionId), {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ effort: effortSelect.value }),
       });
       const body = await response.json().catch(() => ({}));
@@ -2889,8 +3167,9 @@ function wireChatComposerControls(chat, { agentId, tabId, coordinator, rec }) {
     }
   });
 
+  renderAttachments();
   Promise.all([
-    fetchJson(withSession(`/api/chat/${encodeURIComponent(agentId)}/composer`), { timeoutMs: 8000 }),
+    fetchJson(withSession(`/api/chat/${encodeURIComponent(agentId)}/composer`, rec.sessionId), { timeoutMs: 8000 }),
     loadComposerModels(),
   ]).then(([nextConfig, catalog]) => {
     config = nextConfig;
@@ -2898,6 +3177,11 @@ function wireChatComposerControls(chat, { agentId, tabId, coordinator, rec }) {
     modelSelect.innerHTML = models.map(model => `<option value="${escapeHtml(model)}"${model === config.model ? ' selected' : ''}>${escapeHtml(model)}</option>`).join('');
     modelSelect.disabled = !catalog.available || !models.length;
     modelSelect.title = catalog.available ? `Model for ${agentId}` : (catalog.message || 'Model catalog unavailable');
+    if (Array.isArray(config.effortLevels)) {
+      const labels = { none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max' };
+      effortSelect.innerHTML = config.effortLevels.filter(value => Object.hasOwn(labels, value))
+        .map(value => `<option value="${value}">${labels[value]}</option>`).join('');
+    }
     effortSelect.value = config.effort || 'high';
     renderAccess(config.fullAccess);
   }).catch(error => {
@@ -3082,14 +3366,20 @@ function openChatFind(chat) {
   refreshChatFind(chat);
 }
 
-function renderAgentChatSurface(agentId, tabId, coordinator) {
-  const label = agentId === 'glados' ? 'GLaDOS' : agentId;
+function renderAgentChatSurface(agentId, tabId, coordinator, options = {}) {
+  const label = options.label || (coordinator ? currentTeamName() : agentDisplayName(agentId));
   const chat = document.createElement('div');
   chat.className = 'chat-pane chat-visual-chamber';
+  if (coordinator && !state.currentSessionId) {
+    chat.classList.add('chat-new-session');
+    const draftHeader = document.createElement('div');
+    draftHeader.className = 'draft-conversation-header';
+    draftHeader.innerHTML = newSessionTeamPickerMarkup();
+    chat.appendChild(draftHeader);
+  }
   chat.dataset.agent = agentId;
-  chat.style.setProperty('--agent-feed-label', `"${String(label).toUpperCase()} / CHAMBER FEED"`);
-  const toolbar = createAgentViewToolbar(agentId);
-  chat.appendChild(toolbar);
+  chat.style.setProperty('--agent-feed-label', JSON.stringify(`${String(label).toUpperCase()} / CHAMBER FEED`));
+  if (!options.hideToolbar) chat.appendChild(createAgentViewToolbar(agentId));
 
   const findBar = document.createElement('div');
   findBar.className = 'chat-find-bar';
@@ -3099,15 +3389,17 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
 
   const transcript = document.createElement('div');
   transcript.className = 'transcript';
+  if (coordinator && !state.currentSessionId) transcript.innerHTML = '<div class="new-session-welcome"><h1>What are we working on?</h1></div>';
   const sendingEl = document.createElement('div');
   sendingEl.className = 'sending-indicator';
   sendingEl.dataset.chatTab = tabId;
   sendingEl.style.display = 'none';
   const inputRow = document.createElement('div');
   inputRow.className = 'chat-input';
-  inputRow.innerHTML = chatComposerMarkup(tabId, label, { coordinator });
+  inputRow.innerHTML = chatComposerMarkup(tabId, label, { coordinator: coordinator && agentId === 'glados' });
   chat.append(transcript, sendingEl, inputRow);
-  paneEl.appendChild(chat);
+  (options.container || paneEl).appendChild(chat);
+  chat.querySelector('[data-new-session-team]')?.addEventListener('change', event => selectDraftTeam(event.target.value).catch(error => showToast(error.message, { kind: 'warning', label: 'Teams' })));
   findBar.querySelector('input').addEventListener('input', () => { findBar.dataset.findIndex = '0'; refreshChatFind(chat); });
   findBar.querySelector('input').addEventListener('keydown', event => {
     if (event.key === 'Enter') { event.preventDefault(); refreshChatFind(chat, { advance: event.shiftKey ? -1 : 1 }); }
@@ -3118,7 +3410,8 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
   findBar.querySelector('[data-find-close]').addEventListener('click', () => closeChatFind(chat));
   syncAgentViewToolbars(agentId);
 
-  const rec = ensureTranscript(tabId, agentId);
+  const rec = ensureTranscript(tabId, agentId, options);
+  if (coordinator && !state.currentSessionId && state.teamChangeDraft) rec.composerAttachments = state.teamChangeDraft.attachments || [];
   rec.el = transcript;
   rec.autoScroll = true;
   attachScrollTracker(transcript, rec);
@@ -3129,17 +3422,32 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
   refreshChatTurnStatus(tabId, agentId);
 
   const ta = chatElement(chat, 'textarea', tabId);
+  if (rec.composerDraft) ta.value = rec.composerDraft;
+  ta.addEventListener('input', () => { rec.composerDraft = ta.value; });
+  if (coordinator && !state.currentSessionId && state.teamChangeDraft) { ta.value = state.teamChangeDraft.text || ''; state.teamChangeDraft = null; }
   const composer = wireChatComposerControls(chat, { agentId, tabId, coordinator, rec });
-  const dispatch = override => {
+  let dispatching = false;
+  const dispatch = async override => {
     const msg = override !== undefined ? override : (ta.value.trim() || (composer.hasAttachments() ? 'Please review the attached screenshot.' : ''));
-    if (!msg) return;
-    if (coordinator && msg.startsWith('/')) {
+    if (!msg || dispatching || rec.sending || (!options.sessionId && state.sessionActivationPending)) return;
+    if (coordinator && activeTeam()?.available === false) { showToast('Enable this agent or team before sending a message.', { kind: 'info', label: 'Agents' }); return; }
+    dispatching = true;
+    try {
+      const sessionId = options.sessionId || await materializeDraftSession();
+      if (!sessionId || (!options.sessionId && sessionId !== state.currentSessionId) || state.transcripts.get(tabId) !== rec) return;
+    } catch (error) {
+      pushNotification('error', error.message, { toast: true, label: 'New session' });
+      return;
+    } finally { dispatching = false; }
+    const sessionId = options.sessionId || state.currentSessionId;
+    if (coordinator && agentId === 'glados' && msg.startsWith('/')) {
       if (override === undefined) { ta.value = ''; ta.focus(); }
       runSlashCommand(msg, rec);
       return;
     }
     if (override === undefined) {
       ta.value = '';
+      rec.composerDraft = '';
       ta.focus();
       ta._gladosHistoryReset?.();
       ta._gladosAutoGrow?.();
@@ -3162,7 +3470,7 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
     fetch(`/api/chat/${encodeURIComponent(agentId)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, attachments, client_id: clientId, session_id: state.currentSessionId }),
+      body: JSON.stringify({ message: msg, attachments, client_id: clientId, session_id: sessionId }),
     }).then(async response => ({ response, body: await response.json().catch(() => ({})) })).then(({ response, body }) => {
       if (!response.ok || !body.ok) {
         pushNotification('error', body.error || `${label} could not start`, { toast: true, label: 'Agent chat' });
@@ -3173,20 +3481,23 @@ function renderAgentChatSurface(agentId, tabId, coordinator) {
       finishTranscriptTurn(rec, tabId);
     });
   };
-  chatRetriers.set(agentId, msg => dispatch(msg));
+  chatRetriers.set(tabId, msg => dispatch(msg));
   chat.querySelector('[data-chat-send]').addEventListener('click', () => dispatch());
   chat.querySelector('[data-chat-stop]').addEventListener('click', () => stopChatTurnFromUi(tabId, agentId));
   attachChatHistoryNav(ta, agentId);
   attachAutoGrow(ta, {});
-  if (coordinator) attachSlashMenu(ta, inputRow, line => { ta.value = line; dispatch(); });
+  if (coordinator && agentId === 'glados') attachSlashMenu(ta, inputRow, line => { ta.value = line; dispatch(); });
   ta.addEventListener('keydown', event => {
     if (event.defaultPrevented) return;
     if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); dispatch(); }
   });
+  return chat;
 }
 
 function renderChatPane() {
-  renderAgentChatSurface('glados', 'glados-chat', true);
+  const coordinatorId = activeCoordinatorId();
+  if (!coordinatorId) { paneEl.innerHTML = '<div class="pane-empty">This session’s team is unavailable. Start a new session to choose another team.</div>'; return; }
+  renderAgentChatSurface(coordinatorId, 'glados-chat', true);
 }
 
 async function stopChatTurnFromUi(tabId, agentId) {
@@ -3200,10 +3511,10 @@ async function stopChatTurnFromUi(tabId, agentId) {
     btn.textContent = '…';
   }
   try {
-    const r = await fetch(withSession(`/api/chat/${encodeURIComponent(agentId)}/stop`), {
+    const r = await fetch(withSession(`/api/chat/${encodeURIComponent(agentId)}/stop`, rec.sessionId), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason: 'dashboard stop button', session_id: state.currentSessionId }),
+      body: JSON.stringify({ reason: 'dashboard stop button', session_id: rec.sessionId || state.currentSessionId }),
     });
     const j = await r.json().catch(() => ({}));
     logEvent(j.stopped ? 'ended' : 'meta', j.stopped ? `stopped ${agentId}` : `${agentId} was not running`);
@@ -3215,8 +3526,8 @@ async function stopChatTurnFromUi(tabId, agentId) {
 }
 
 function updateChatInputControls(tabId) {
-  if (state.currentTab !== tabId) return;
   const rec = state.transcripts.get(tabId);
+  if (state.currentTab !== (rec?.viewTabId || tabId)) return;
   const stopBtn = document.querySelector(`[data-chat-stop][data-chat-tab="${CSS.escape(tabId)}"]`);
   const sendBtn = document.querySelector(`[data-chat-send][data-chat-tab="${CSS.escape(tabId)}"]`);
   if (!stopBtn) return;
@@ -3224,18 +3535,20 @@ function updateChatInputControls(tabId) {
   stopBtn.disabled = !rec?.sending || stopping;
   stopBtn.textContent = stopping ? '…' : '■';
   if (sendBtn) {
-    sendBtn.disabled = !!rec?.sending;
+    const unavailable = tabId === 'glados-chat' && activeTeam()?.available === false;
+    sendBtn.disabled = !!rec?.sending || unavailable;
+    sendBtn.title = unavailable ? 'Enable this agent or team before sending a message' : 'Send';
     sendBtn.hidden = !!rec?.sending;
   }
 }
 
 function updateSendingIndicator(tabId) {
-  if (state.currentTab !== tabId) return;
+  const rec = state.transcripts.get(tabId);
+  if (state.currentTab !== (rec?.viewTabId || tabId)) return;
   const el = document.querySelector(`.sending-indicator[data-chat-tab="${CSS.escape(tabId)}"]`);
   if (!el) return;
-  const rec = state.transcripts.get(tabId);
   el.style.display = rec?.sending ? 'block' : 'none';
-  if (rec?.sending) el.textContent = transcriptStatusText(rec, rec.agentId === 'glados' ? 'GLaDOS' : rec.agentId);
+  if (rec?.sending) el.textContent = transcriptStatusText(rec, agentDisplayName(rec.agentId));
   updateChatInputControls(tabId);
 }
 
@@ -3332,7 +3645,7 @@ function addAskGladosAction(entry, responseText, rec) {
   button.addEventListener('click', () => {
     const excerpt = String(responseText || '').trim().slice(0, 12_000);
     if (!excerpt) return;
-    chatRetriers.get('glados')?.(
+    (chatRetriers.get('glados-chat') || chatRetriers.get('glados'))?.(
       `Please elaborate on the response below and explain it in a more understandable way. Preserve the important technical details.\n\n${excerpt}`
     );
   });
@@ -3404,7 +3717,7 @@ function openAgentProvenance(row) {
     return;
   }
   state.provenanceFocus = { agentId, url: row.url || '', ts: Number(row.ts) || Date.parse(row.ts || '') || Date.now(), proxyId: row.id };
-  if (agentId === 'glados') openGladosChat();
+  if (agentId === activeCoordinatorId()) openGladosChat();
   else openAgentTab(agentId);
   for (const delay of [100, 500, 1500]) {
     setTimeout(() => focusTranscriptProvenance(state.transcripts.get(tabIdForAgent(agentId))), delay);
@@ -3418,6 +3731,7 @@ function openAgentProvenance(row) {
 
 function appendEntry(container, ev, rec) {
   if (ev.kind === 'result' && !ev.isError) return;
+  if (rec?.independentSession) container.querySelector?.('.clippy-chat-welcome')?.remove();
   const el = document.createElement('div');
   const kind = ev.kind;
   const classes = ['entry', kind];
@@ -3470,8 +3784,9 @@ function appendEntry(container, ev, rec) {
     // v4: right-click a user message to retry. Only on surfaces that
     // registered a retrier (GLaDOS chat) — agent transcripts
     // don't have a retrier because they're not user-driven.
-    if (kind === 'user-message' && rec?.agentId && chatRetriers.has(rec.agentId)) {
-      installChatRetryContextMenu(el, rec.agentId, ev.text || '');
+    const retryKey = rec?.tabId || rec?.agentId;
+    if (kind === 'user-message' && retryKey && chatRetriers.has(retryKey)) {
+      installChatRetryContextMenu(el, retryKey, ev.text || '');
     }
   } else if (kind === 'tool-call') {
     const args = ev.arguments !== undefined
@@ -3723,12 +4038,48 @@ function subscribeLobby() {
   es.addEventListener('investigation-session-changed', async () => {
     try { await loadInvestigationSessions(); } catch {}
   });
+  es.addEventListener('agent-library-changed', async () => {
+    try {
+      await loadAgentTeams();
+      await Promise.all([loadAgents(), refreshAgentLibraryCatalog()]);
+      refreshDraftTeamOptions();
+      const wrap = document.querySelector('.agent-library-pane');
+      if (wrap && state.agentLibrary.view === 'collection') {
+        const list = wrap.querySelector('[data-package-list]');
+        if (list) { list.innerHTML = agentCollectionCards(state.agentLibrary.catalog); wirePackageCollection(list, wrap); }
+        const count = wrap.querySelector('[data-package-count]');
+        if (count) count.textContent = state.agentLibrary.catalog.packages.length || '';
+      }
+    } catch {}
+  });
+  es.addEventListener('agent-teams-changed', async () => {
+    try { await loadAgentTeams(); await loadAgents(); syncPackageInvocationControls(); refreshDraftTeamOptions(); } catch {}
+  });
+  es.addEventListener('connectors-changed', async () => {
+    try {
+      const [catalog] = await Promise.all([fetchJson('/api/connectors'), loadAgents()]);
+      state.connectorLibrary.catalog = catalog;
+      if (state.agentLibrary.catalog) state.agentLibrary.catalog.connectors = catalog.connectors;
+      syncPackageInvocationControls();
+      state.clippyDashboard.repoOptions = null;
+      state.clippyDashboard.repoOptionsAt = 0;
+      if (state.currentTab === 'clippy') renderPane();
+      const wrap = document.querySelector('.connectors-pane');
+      if (wrap) drawConnectorCollection(wrap, catalog.connectors || [], async () => {
+        const fresh = await fetchJson('/api/connectors');
+        state.connectorLibrary.catalog = fresh;
+        if (wrap.isConnected) drawConnectorCollection(wrap, fresh.connectors || [], () => renderPane());
+      });
+    } catch {}
+  });
   es.addEventListener('snapshot', e => {
+    if (!state.currentSessionId) return;
     const arr = JSON.parse(e.data);
     for (const a of arr) {
+      if (a.investigationSessionId && a.investigationSessionId !== state.currentSessionId) continue;
       state.active.set(a.agentId, { sessionId: a.sessionId });
       if (state.agentActivity.get(a.agentId)?.status !== 'running') noteAgentActivity(a.agentId, 'Session active', { startedAt: a.startedAt });
-      if (a.agentId !== 'glados' && !state.openTabs.find(t => t.id === a.agentId)) {
+      if (a.agentId !== activeCoordinatorId() && !state.openTabs.find(t => t.id === a.agentId)) {
         ensureAgentTab(a.agentId);
       }
     }
@@ -3742,7 +4093,7 @@ function subscribeLobby() {
     noteAgentActivity(info.agentId, 'Session started', { startedAt: info.startedAt });
     logEvent('started', `${info.agentId} session-started`);
     renderAgentList();
-    if (info.agentId !== 'glados' && !state.openTabs.find(t => t.id === info.agentId)) {
+    if (info.agentId !== activeCoordinatorId() && !state.openTabs.find(t => t.id === info.agentId)) {
       ensureAgentTab(info.agentId);
     }
   });
@@ -3782,7 +4133,7 @@ function subscribeLobby() {
     if (info.live) {
       state.active.set(info.agentId, { sessionId: info.sessionId || info.state || 'live' });
       if (state.agentActivity.get(info.agentId)?.status !== 'running') noteAgentActivity(info.agentId, 'Agent active', { startedAt: info.startedAt });
-      if (info.agentId !== 'glados' && !state.openTabs.find(t => t.id === info.agentId)) {
+      if (info.agentId !== activeCoordinatorId() && !state.openTabs.find(t => t.id === info.agentId)) {
         ensureAgentTab(info.agentId);
       }
     } else {
@@ -3808,7 +4159,7 @@ function subscribeLobby() {
     if (data.investigationSessionId && state.unreadCompletedSessionIds.delete(data.investigationSessionId)) persistUnreadCompletedSessions();
     refreshInvestigationNavigationSoon();
     if (data.investigationSessionId && data.investigationSessionId !== state.currentSessionId) return;
-    const tabId = data.agentId === 'glados' ? 'glados-chat' : null;
+    const tabId = data.agentId === activeCoordinatorId() ? 'glados-chat' : null;
     if (!tabId) return;
     state.active.set(data.agentId, { sessionId: data.turnId || 'chat-turn' });
     noteAgentActivity(data.agentId, 'Thinking', { startedAt: data.startedAt });
@@ -3827,10 +4178,10 @@ function subscribeLobby() {
   });
   es.addEventListener('chat-turn-ended', e => {
     let data = {}; try { data = JSON.parse(e.data); } catch {}
-    if (data.agentId === 'glados') markBackgroundSessionCompleted(data.investigationSessionId);
+    if (isSessionCoordinatorEvent(data)) markBackgroundSessionCompleted(data.investigationSessionId);
     refreshInvestigationNavigationSoon();
     if (data.investigationSessionId && data.investigationSessionId !== state.currentSessionId) return;
-    const tabId = data.agentId === 'glados' ? 'glados-chat' : null;
+    const tabId = data.agentId === activeCoordinatorId() ? 'glados-chat' : null;
     if (!tabId) return;
     state.active.delete(data.agentId);
     noteAgentActivity(data.agentId, 'Turn complete', { status: 'done' });
@@ -3982,7 +4333,7 @@ async function renderReportsPane() {
 
     if (state.reports.selectedPath) {
       const selectedEl = [...treeEl.querySelectorAll('.file')]
-        .find(el => el.dataset.path === state.reports.selectedPath);
+        .find(el => el.dataset.path === state.reports.selectedPath || JSON.parse(el.dataset.formats || '[]').includes(state.reports.selectedPath));
       loadReport(state.reports.selectedPath, selectedEl);
     }
   } catch (e) {
@@ -4008,7 +4359,7 @@ function filterReportTree(nodes, query, scope = 'all') {
   const scoped = scope === 'all' ? nodes : nodes.filter(node => node.path === scope);
 
   function visit(node) {
-    const ownMatch = !needle || `${node.name} ${node.path || ''}`.toLowerCase().includes(needle);
+    const ownMatch = !needle || `${node.name} ${node.displayName || ''} ${node.path || ''}`.toLowerCase().includes(needle);
     if (node.type === 'file') return ownMatch ? node : null;
     if (!needle || ownMatch) return node;
     const children = (node.children || []).map(visit).filter(Boolean);
@@ -4019,8 +4370,9 @@ function filterReportTree(nodes, query, scope = 'all') {
 }
 
 function reportFileType(node) {
-  const ext = String(node.name || '').split('.').pop();
-  if (!ext || ext === node.name) return 'FILE';
+  const fileName = node.fileName || node.path?.split('/').at(-1) || node.name || '';
+  const ext = String(fileName).split('.').pop();
+  if (!ext || ext === fileName) return 'FILE';
   return ext.slice(0, 4).toUpperCase();
 }
 
@@ -4032,7 +4384,7 @@ function formatReportSize(bytes) {
 }
 
 function formatReportDate(value) {
-  const date = new Date(Number(value || 0));
+  const date = new Date(typeof value === 'string' && !/^\d+$/.test(value) ? value : Number(value || 0));
   if (!Number.isFinite(date.getTime()) || !value) return 'Date unavailable';
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(date);
 }
@@ -4202,9 +4554,37 @@ function reportTreeActionMenu(node, type, openEntry) {
   return wrap;
 }
 
-function buildTreeNodes(nodes, { depth = 0, forceOpen = false } = {}) {
+function reportPresentationNodes(nodes) {
+  const fullReport = nodes.filter(node => node.documentKey === 'full-report');
+  const details = nodes.filter(node => node.technical || node.sourceData);
+  const result = nodes.filter(node => !node.documentKey && !node.technical && !node.sourceData);
+  if (fullReport.length) {
+    const priority = { HTML: 0, MD: 1, PDF: 2 };
+    const formats = [...fullReport].sort((a, b) => (priority[reportFileType(a)] ?? 3) - (priority[reportFileType(b)] ?? 3));
+    result.push({ ...formats[0], displayName: formats[0].displayName || 'Full report', formats });
+  }
+  if (fullReport.length || details.length) {
+    const priority = { 'Executive summary': 0, 'Full report': 1, Findings: 2 };
+    result.sort((a, b) => (priority[a.displayName] ?? 3) - (priority[b.displayName] ?? 3));
+  }
+  if (details.length) result.push({ type: 'dir', name: 'Evidence & details', displayName: 'Evidence & details', virtualGroup: true, path: '__report_details', children: details.flatMap(node => node.sourceData ? node.children || [] : [node]) });
+  return result;
+}
+
+function reportLineage(relPath, nodes = state.reports.tree) {
+  for (const node of nodes) {
+    if (node.path === relPath) return [node];
+    if (node.children && relPath.startsWith(`${node.path}/`)) {
+      const descendants = reportLineage(relPath, node.children);
+      if (descendants.length) return [node, ...descendants];
+    }
+  }
+  return [];
+}
+
+function buildTreeNodes(nodes, { depth = 0, forceOpen = false, groupDocuments = true } = {}) {
   const frag = document.createDocumentFragment();
-  for (const n of nodes) {
+  for (const n of groupDocuments ? reportPresentationNodes(nodes) : nodes) {
     const li = document.createElement('li');
     li.className = n.type === 'dir' ? 'report-dir-node' : 'report-file-node';
     if (n.type === 'dir') {
@@ -4214,12 +4594,13 @@ function buildTreeNodes(nodes, { depth = 0, forceOpen = false } = {}) {
       head.type = 'button';
       head.className = `dir${depth === 0 ? ' collection' : ''}`;
       const itemCount = depth === 0 ? reportCollectionRecordCount(n) : countReportFiles(n.children || []);
-      head.innerHTML = `<span class="tree-caret" aria-hidden="true">›</span><span class="dir-name">${escapeHtml(n.name)}</span><span class="dir-count">${itemCount.toLocaleString()}</span>`;
+      const reviewMeta = n.review ? [n.review.completedAt ? formatReportDate(n.review.completedAt) : '', n.review.branch || (n.review.revision ? n.review.revision.slice(0, 8) : ''), n.review.status].filter(Boolean).join(' · ') : '';
+      head.innerHTML = `<span class="tree-caret" aria-hidden="true">›</span><span class="dir-copy"><span class="dir-name">${escapeHtml(n.displayName || n.name)}</span>${reviewMeta ? `<small>${escapeHtml(reviewMeta)}</small>` : ''}</span><span class="dir-count">${itemCount.toLocaleString()}</span>`;
       const childUl = document.createElement('ul');
       let populated = false;
       const populate = () => {
         if (populated) return;
-        childUl.appendChild(buildTreeNodes(n.children || [], { depth: depth + 1, forceOpen }));
+        childUl.appendChild(buildTreeNodes(n.children || [], { depth: depth + 1, forceOpen, groupDocuments: !n.virtualGroup }));
         populated = true;
       };
       const initiallyOpen = depth === 0 || forceOpen;
@@ -4234,22 +4615,37 @@ function buildTreeNodes(nodes, { depth = 0, forceOpen = false } = {}) {
         if (open) populate();
       });
       const toggleDirectory = () => head.click();
-      row.append(head, reportTreeActionMenu(n, 'dir', toggleDirectory));
+      row.appendChild(head);
+      if (!n.virtualGroup) row.appendChild(reportTreeActionMenu(n, 'dir', toggleDirectory));
       li.appendChild(row);
       li.appendChild(childUl);
     } else {
       const fileEl = document.createElement('button');
       fileEl.type = 'button';
-      fileEl.className = `file${state.reports.selectedPath === n.path ? ' active' : ''}`;
+      fileEl.className = `file${state.reports.selectedPath === n.path || n.formats?.some(format => format.path === state.reports.selectedPath) ? ' active' : ''}`;
       fileEl.dataset.path = n.path;
+      if (n.formats) fileEl.dataset.formats = JSON.stringify(n.formats.map(format => format.path));
       fileEl.title = n.path;
-      fileEl.innerHTML = `<span class="file-kind">${escapeHtml(reportFileType(n))}</span><span class="file-copy"><span class="file-name">${escapeHtml(n.name)}</span><span class="file-details"><span>${escapeHtml(formatReportDate(n.mtime))}</span><span>${escapeHtml(formatReportSize(n.size))}</span></span></span>`;
+      fileEl.innerHTML = `<span class="file-kind">${n.formats ? 'DOC' : escapeHtml(reportFileType(n))}</span><span class="file-copy"><span class="file-name">${escapeHtml(n.displayName || n.name)}</span><span class="file-details"><span>${escapeHtml(formatReportDate(n.mtime))}</span><span>${escapeHtml(formatReportSize(n.size))}</span></span></span>`;
       const openFile = async edit => {
         await loadReport(n.path, fileEl);
         if (edit) document.getElementById('report-edit')?.click();
       };
       fileEl.addEventListener('click', () => openFile(false));
       li.append(fileEl, reportTreeActionMenu(n, 'file', openFile));
+      if (n.formats) {
+        const formats = document.createElement('div');
+        formats.className = 'report-format-actions';
+        for (const format of n.formats) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = reportFileType(format) === 'MD' ? 'Markdown' : reportFileType(format);
+          button.setAttribute('aria-label', `Open full report as ${button.textContent}`);
+          button.onclick = () => loadReport(format.path, fileEl);
+          formats.appendChild(button);
+        }
+        li.appendChild(formats);
+      }
     }
     frag.appendChild(li);
   }
@@ -4266,9 +4662,11 @@ async function loadReport(relPath, clickedEl) {
   const reviewMatch = relPath.match(/^security-reviews\/([^/]+)\//);
   const pathParts = relPath.split('/');
   const fileName = pathParts.at(-1);
-  const parentPath = pathParts.slice(0, -1).join(' / ');
+  const lineage = reportLineage(relPath);
+  const node = lineage.at(-1);
+  const parentPath = lineage.length ? lineage.slice(0, -1).map(node => node.displayName || node.name).join(' / ') : pathParts.slice(0, -1).join(' / ');
   const header = `<div class="report-header">
-    <div class="report-header-copy"><span>Report</span><strong>${escapeHtml(fileName)}</strong><small title="${escapeHtml(relPath)}">${escapeHtml(parentPath)}</small></div>
+    <div class="report-header-copy"><span>Report</span><strong>${escapeHtml(node?.displayName || fileName)}</strong><small>${escapeHtml(parentPath)}</small><details class="report-file-details"><summary>File details</summary><small>${escapeHtml(relPath)}</small></details></div>
     <div class="report-actions">
       <a class="report-action-button primary" href="/api/reports/raw?path=${encodeURIComponent(relPath)}" target="_blank" rel="noopener">Open file <span aria-hidden="true">↗</span></a>
       ${isMd && !reviewMatch ? `<button class="report-action-button" id="report-edit">Edit</button>` : ''}
@@ -5604,117 +6002,6 @@ async function wireFullAccessControl(wrap) {
   }
 }
 
-async function wireClippySettings(wrap) {
-  const card = wrap.querySelector('#clippy-connection-card');
-  if (!card) return;
-  const field = card.querySelector('#clippy-token');
-  const status = card.querySelector('#clippy-connection-status');
-  const detail = card.querySelector('#clippy-connection-detail');
-  const save = card.querySelector('#clippy-save');
-  const test = card.querySelector('#clippy-test');
-  const remove = card.querySelector('#clippy-remove');
-  const reveal = card.querySelector('#clippy-reveal');
-  let configured = false;
-  let enabled = false;
-  let busy = false;
-
-  const render = (message = '') => {
-    const hasDraft = Boolean(field.value.trim());
-    card.classList.toggle('connected', configured && enabled);
-    status.textContent = configured ? (enabled ? 'Credential saved on this computer' : 'Saved, but disabled by environment') : 'Not connected';
-    detail.textContent = message || (configured
-      ? 'The saved token is hidden. New agent turns use this connection after GLaDOS restarts.'
-      : 'Enter your own Clippy bearer token to add read-only knowledge to GLaDOS.');
-    save.disabled = busy || !hasDraft;
-    test.disabled = busy || (!hasDraft && !configured);
-    remove.disabled = busy || !configured;
-    reveal.disabled = busy || !hasDraft;
-    field.disabled = busy;
-  };
-
-  const request = async (method, path, token) => {
-    const response = await fetch(path, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      ...(token === undefined ? {} : { body: JSON.stringify({ token }) }),
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`);
-    return body;
-  };
-
-  reveal.addEventListener('click', () => {
-    const showing = field.type === 'text';
-    field.type = showing ? 'password' : 'text';
-    reveal.textContent = showing ? 'Show' : 'Hide';
-    reveal.setAttribute('aria-label', showing ? 'Show entered token' : 'Hide entered token');
-  });
-  field.addEventListener('input', () => render());
-
-  test.addEventListener('click', async () => {
-    if (busy) return;
-    busy = true;
-    render('Checking Clippy…');
-    try {
-      const result = await request('POST', '/api/settings/clippy/test', field.value.trim() || undefined);
-      render(`Connected to Clippy. ${result.toolCount} tools advertised; GLaDOS uses its read-only selection.`);
-      showToast('Clippy connection verified.', { kind: 'success', label: 'Clippy MCP' });
-    } catch (error) {
-      render(`Connection check failed: ${error.message}`);
-      showToast(error.message, { kind: 'warning', label: 'Clippy MCP' });
-    } finally { busy = false; render(detail.textContent); }
-  });
-
-  save.addEventListener('click', async () => {
-    if (busy || !field.value.trim()) return;
-    busy = true;
-    render('Saving credential…');
-    try {
-      const result = await request('PUT', '/api/settings/clippy', field.value);
-      configured = result.configured;
-      enabled = result.enabled;
-      field.value = '';
-      field.type = 'password';
-      reveal.textContent = 'Show';
-      render('Saved locally. Restart GLaDOS to use the connection in new agent turns.');
-      showToast('Clippy credential saved on this computer.', { kind: 'success', label: 'Clippy MCP' });
-    } catch (error) {
-      render(`Could not save: ${error.message}`);
-      pushNotification('error', error.message, { toast: true, label: 'Clippy MCP' });
-    } finally { busy = false; render(detail.textContent); }
-  });
-
-  remove.addEventListener('click', async () => {
-    if (busy || !configured) return;
-    const approved = await confirmAction({
-      title: 'Disconnect Clippy MCP?',
-      message: 'This deletes the credential saved on this computer. Active agent turns may finish with their current connection; restart GLaDOS afterward.',
-      confirmLabel: 'Disconnect',
-    });
-    if (!approved) return;
-    busy = true;
-    render('Removing credential…');
-    try {
-      const result = await request('DELETE', '/api/settings/clippy');
-      configured = result.configured;
-      enabled = result.enabled;
-      field.value = '';
-      render('Disconnected locally. Restart GLaDOS to clear existing agent connections.');
-      showToast('Clippy credential removed.', { kind: 'success', label: 'Clippy MCP' });
-    } catch (error) {
-      render(`Could not disconnect: ${error.message}`);
-      pushNotification('error', error.message, { toast: true, label: 'Clippy MCP' });
-    } finally { busy = false; render(detail.textContent); }
-  });
-
-  try {
-    const result = await fetchJson('/api/settings/clippy', { timeoutMs: 5000 });
-    configured = result.configured;
-    enabled = result.enabled;
-    render();
-  } catch (error) { render(`Could not load Clippy status: ${error.message}`); }
-}
-
 function setupResultRow(label, ok, message) {
   return `<div class="setup-result ${ok ? 'pass' : 'fail'}"><span>${ok ? '✓' : '×'}</span><div><strong>${escapeHtml(label)}</strong><small>${escapeHtml(message)}</small></div></div>`;
 }
@@ -5860,15 +6147,6 @@ async function renderSettingsPane() {
       <div class="settings-section-heading"><div><h2>Setup Assistant</h2><p class="settings-section-copy">Configure the workstation from start to finish: LiteLLM, optional local credentials, the unique proxy CA, and live verification.</p></div><button id="launch-setup-assistant" type="button" class="safe">Open Setup Assistant</button></div>
       <div id="setup-summary" class="setup-summary"><div class="setup-summary-loading">Checking setup…</div></div>
     </section>
-    <section class="settings-section clippy-settings-section">
-      <div class="settings-section-heading"><div><h2>Clippy MCP</h2><p class="settings-section-copy">Connect your own credential for prior assessments and asset context. GLaDOS uses approved read-only lookups during investigations.</p></div></div>
-      <div id="clippy-connection-card" class="clippy-connection-card">
-        <div class="clippy-connection-heading"><span class="clippy-status-dot" aria-hidden="true"></span><div><strong id="clippy-connection-status">Checking connection…</strong><small id="clippy-connection-detail" role="status" aria-live="polite">Reading your local settings.</small></div></div>
-        <div class="clippy-credential-row"><label for="clippy-token">Bearer token</label><div class="clippy-token-input"><input id="clippy-token" type="password" placeholder="Paste your Clippy token" autocomplete="off" spellcheck="false" aria-describedby="clippy-token-note" /><button id="clippy-reveal" type="button" aria-label="Show entered token" disabled>Show</button></div></div>
-        <p id="clippy-token-note" class="clippy-token-note">Saved only in your local GLaDOS secrets folder. Updates keep it; the saved value is never shown here.</p>
-        <div class="clippy-connection-actions"><button id="clippy-save" type="button" class="safe" disabled>Save credential</button><button id="clippy-test" type="button" disabled>Test connection</button><button id="clippy-remove" type="button" class="clippy-disconnect" disabled>Disconnect</button></div>
-      </div>
-    </section>
     <section class="settings-section full-access-section">
       <div class="settings-section-heading"><div><h2>Computer Use</h2><p class="settings-section-copy">Choose whether GLaDOS stays inside its normal safety boundary or may operate this workstation directly when supported. Full Access is always off by default and requires an explicit confirmation.</p></div></div>
       <div id="full-access-card" class="full-access-card">
@@ -5914,29 +6192,10 @@ async function renderSettingsPane() {
         <button id="refresh-runtime" title="Refresh local Agent SDK runtime state">Refresh runtime</button>
       </div>
     </section>
-    <section class="settings-section">
-      <h2>Agents</h2>
-      <div id="settings-version" class="settings-version">Version loading…</div>
-      <div id="settings-model-catalog" class="settings-version">LiteLLM model catalog loading…</div>
-      <p class="settings-section-copy">Choose models directly in the list. Nothing needs to expand or load before you make changes; save all assignments once when you are done.</p>
-      <div class="settings-agent-controls">
-        <input id="settings-agent-search" type="search" placeholder="Search agents or models…" aria-label="Search agent settings" />
-        <div class="segmented" role="group" aria-label="Filter agent settings">
-          <button type="button" data-settings-filter="all" class="active">All</button>
-          <button type="button" data-settings-filter="enabled">Enabled</button>
-          <button type="button" data-settings-filter="disabled">Disabled</button>
-        </div>
-      </div>
-      <div class="settings-save-bar">
-        <span id="settings-pending-models">No pending model changes</span>
-        <button id="settings-save-models" type="button" class="safe" disabled>Save Changes</button>
-      </div>
-      <div id="settings-list">loading…</div>
-    </section>`;
+    <section class="settings-section"><h2>About</h2><div id="settings-version" class="settings-version">Version loading…</div></section>`;
   paneEl.appendChild(wrap);
   wireOperationControls(wrap);
   wireSetupAssistant(wrap);
-  wireClippySettings(wrap);
   wireFullAccessControl(wrap);
   const operatorName = wrap.querySelector('#operator-name');
   const operatorPreview = wrap.querySelector('#operator-initials-preview');
@@ -5968,25 +6227,63 @@ async function renderSettingsPane() {
   });
   applyDashboardTheme(state.theme, { persist: false });
 
+  fetchJson('/api/version', { timeoutMs: 5000 }).then(renderSettingsVersion).catch(error => renderSettingsVersion({ error: error.message }));
+}
+
+function clippyConnectorMarkup() {
+  return '<span class="clippy-logo" aria-hidden="true">C</span>';
+}
+
+function gladosTeamSettingsAgents(agents, { catalog = state.agentLibrary.catalog, teams = state.teamCatalog.teams } = {}) {
+  const builtInIds = new Set((catalog?.builtInAgents || []).map(agent => agent.id));
+  const assigned = new Set((teams || []).find(team => team.id === 'glados')?.assignedAgentIds || []);
+  return (agents || []).filter(agent => assigned.has(agent.id) || (builtInIds.size ? builtInIds.has(agent.id) : !agent.packageId && !String(agent.id || '').startsWith('pkg-')));
+}
+
+function builtInAgentsMarkup() {
+  return `    <section class="settings-section">
+      <h2>Team agents</h2>
+      <div id="settings-model-catalog" class="settings-version">LiteLLM model catalog loading…</div>
+      <p class="settings-section-copy">Choose one model for the whole GLaDOS team, or adjust agents individually. Save Changes applies your pending assignments.</p>
+      <label class="team-model-selector editor-field"><span>Model for all team agents</span><select data-all-agent-model disabled><option value="">Loading models…</option></select></label>
+      <div class="settings-agent-controls">
+        <input id="settings-agent-search" type="search" placeholder="Search agents or models…" aria-label="Search agent settings" />
+        <div class="segmented" role="group" aria-label="Filter agent settings">
+          <button type="button" data-settings-filter="all" class="active">All</button>
+          <button type="button" data-settings-filter="enabled">Enabled</button>
+          <button type="button" data-settings-filter="disabled">Disabled</button>
+        </div>
+      </div>
+      <div class="settings-save-bar">
+        <span id="settings-pending-models">No pending model changes</span>
+        <button id="settings-save-models" type="button" class="safe" disabled>Save Changes</button>
+      </div>
+      <div id="settings-list">loading…</div>
+    </section>`;
+}
+
+async function loadBuiltInAgentSettings(wrap) {
   try {
-    const [versionInfo, modelsResp, settingsResp] = await Promise.all([
-      fetchJson('/api/version', { timeoutMs: 5000 }).catch(e => ({ error: e.message })),
+    const [modelsResp, settingsResp] = await Promise.all([
       fetchJson('/api/models', { timeoutMs: 8000 }),
       fetchJson('/api/settings/agents', { timeoutMs: 8000 }),
     ]);
-    renderSettingsVersion(versionInfo);
+    if (!wrap.isConnected) return;
     const models = modelsResp.models || [];
-    const modelCatalogEl = document.getElementById('settings-model-catalog');
+    const modelCatalogEl = wrap.querySelector('#settings-model-catalog');
     if (modelsResp.available) {
       modelCatalogEl.innerHTML = `<span class="settings-version-label">LiteLLM Models</span><code>${models.length}</code><span class="settings-version-hint">live catalog</span>`;
     } else {
       modelCatalogEl.innerHTML = `<span class="settings-version-label">LiteLLM Models</span><code>unavailable</code><span class="settings-version-hint">${escapeHtml(modelsResp.message || 'model discovery failed')}</span>`;
     }
-    const settingsAgents = settingsResp.agents || [];
-    const listEl = document.getElementById('settings-list');
-    const settingsSearch = document.getElementById('settings-agent-search');
-    const saveModels = document.getElementById('settings-save-models');
-    const pendingModels = document.getElementById('settings-pending-models');
+    const settingsAgents = gladosTeamSettingsAgents(settingsResp.agents || []);
+    const listEl = wrap.querySelector('#settings-list');
+    const settingsSearch = wrap.querySelector('#settings-agent-search');
+    const saveModels = wrap.querySelector('#settings-save-models');
+    const pendingModels = wrap.querySelector('#settings-pending-models');
+    const allAgentModel = wrap.querySelector('[data-all-agent-model]');
+    allAgentModel.innerHTML = '<option value="">Keep individual models</option>' + models.map(model => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join('');
+    allAgentModel.disabled = !modelsResp.available;
     const modelDrafts = new Map();
     let savingModels = false;
 
@@ -5994,6 +6291,7 @@ async function renderSettingsPane() {
       const count = modelDrafts.size;
       pendingModels.textContent = count ? `${count} pending model change${count === 1 ? '' : 's'}` : 'No pending model changes';
       saveModels.disabled = !count || savingModels;
+      allAgentModel.disabled = savingModels || !modelsResp.available;
       saveModels.textContent = savingModels ? 'Saving...' : `Save Changes${count ? ` (${count})` : ''}`;
     };
 
@@ -6007,6 +6305,16 @@ async function renderSettingsPane() {
       refreshModelSaveBar();
     };
 
+    allAgentModel.addEventListener('change', () => {
+      if (!allAgentModel.value) return;
+      for (const agent of settingsAgents) {
+        const card = listEl.querySelector(`.agent-card[data-agent-id="${CSS.escape(agent.id)}"]`);
+        const select = card?.querySelector('[data-model-select]');
+        if (!card || !select) continue;
+        select.value = allAgentModel.value;
+        stageModelChange(agent.id, card.dataset.committedModel, allAgentModel.value, card, select);
+      }
+    });
     saveModels.addEventListener('click', async () => {
       const submitted = [...modelDrafts.values()].map(change => ({ ...change }));
       if (!submitted.length || savingModels) return;
@@ -6139,7 +6447,8 @@ async function renderSettingsPane() {
     }
     applySettingsFilter();
   } catch (e) {
-    document.getElementById('settings-list').textContent = 'error: ' + e.message;
+    const list = wrap.querySelector('#settings-list');
+    if (list) list.textContent = 'Could not load agents: ' + e.message;
   }
 }
 
@@ -6178,7 +6487,7 @@ async function hydrateAgentCard(agentId, body, models, { draft = null, onModelCh
           ${d.dispatch ? ` · ${escapeHtml(d.dispatch)}` : ''}
           ${d.subagent === false ? ' · not dispatchable as subagent' : ''}
         </span>
-        <button data-toggle-enabled ${agentId === 'glados' ? 'disabled title="GLaDOS cannot be disabled from Settings"' : ''}>
+        <button data-toggle-enabled ${agentId === 'glados' ? 'disabled title="GLaDOS cannot be disabled"' : ''}>
           ${d.enabled ? 'Disable' : 'Enable'}
         </button>
       </div>
@@ -6235,6 +6544,1708 @@ async function hydrateAgentCard(agentId, body, models, { draft = null, onModelCh
   } catch (e) {
     body.textContent = 'error: ' + e.message;
   }
+}
+
+// --- Durable agent and connector collections ---
+
+function newPackageDraft(kind = 'agent') {
+  const token = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const agentId = `agent-${token.slice(0, 8)}`;
+  const agent = { id: agentId, name: '', description: '', instructions: '', model: '', effort: 'high', connectors: [], tools: [], deliverables: [], skills: [] };
+  return {
+    schemaVersion: 1, id: `custom-${token}`, version: '1.0.0', name: '', description: '', agents: [agent], resources: [],
+    teams: kind === 'team' ? [{ id: `team-${token.slice(0, 8)}`, name: '', description: '', coordinator: agentId, members: [agentId] }] : [],
+  };
+}
+
+function packageLineItems(value) {
+  return [...new Set(String(value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean))];
+}
+
+function agentPackageIssues(manifest) {
+  const issues = [];
+  if (!String(manifest?.name || '').trim()) issues.push('Give the package a name.');
+  if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(manifest?.id || '') || manifest.id.length > 64) issues.push('Use a lowercase package ID with letters, numbers, and hyphens.');
+  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[a-zA-Z0-9.-]+)?$/.test(manifest?.version || '')) issues.push('Use a version such as 1.0.0.');
+  if (!(manifest?.agents || []).length) issues.push('Add at least one agent.');
+  const ids = new Set();
+  for (const agent of manifest?.agents || []) {
+    if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(agent.id || '') || agent.id.length > 64) issues.push('Use lowercase letters, numbers, and hyphens for agent IDs.');
+    if (ids.has(agent.id)) issues.push(`Each agent needs its own ID: ${agent.id}.`);
+    ids.add(agent.id);
+    if (!String(agent.name || '').trim()) issues.push('Give each agent a name.');
+    if (!String(agent.instructions || '').trim()) issues.push(`Add instructions for ${agent.name || 'each agent'}.`);
+    if (!String(agent.model || '').trim()) issues.push(`Choose a model for ${agent.name || 'each agent'}.`);
+  }
+  for (const team of manifest?.teams || []) {
+    if (!String(team.name || '').trim()) issues.push('Give each team a name.');
+    if (!ids.has(team.coordinator) || !(team.members || []).includes(team.coordinator)) issues.push('Choose a member of the team as its coordinator.');
+    if (!(team.members || []).length || team.members.some(id => !ids.has(id))) issues.push('Choose team members from this package.');
+  }
+  return issues;
+}
+
+function agentPackageSummary(item) {
+  const manifest = item?.manifest || item?.package || item || {};
+  return {
+    id: item?.id || manifest.id || '',
+    name: item?.name || manifest.name || item?.id || 'Unnamed package',
+    description: item?.description || manifest.description || '',
+    version: item?.version || manifest.version || item?.latestVersion || '1.0.0',
+    revision: item?.revision || item?.latestRevision || null,
+    source: item?.source || item?.origin || 'custom',
+    managedIntegration: item?.managedIntegration === true || item?.integrated === true || item?.source === 'integrated',
+    editableIntegration: item?.editableIntegration === true,
+    managedSource: item?.managedSource || '',
+    enabled: item?.enabled !== false,
+    active: item?.active || item?.activeVersion || null,
+    agentCount: item?.agentCount ?? manifest.agents?.length ?? 0,
+    teamCount: item?.teamCount ?? manifest.teams?.length ?? 0,
+  };
+}
+
+function portablePackageManifest(details) {
+  const candidate = details?.selectedManifest || details?.manifest || details?.portableManifest || details?.package?.manifest || details?.package || details;
+  if (!candidate?.schemaVersion || !Array.isArray(candidate.agents)) throw new Error('This package does not include a readable agent manifest.');
+  return JSON.parse(JSON.stringify(candidate));
+}
+
+async function packageApi(method, path, payload, { timeoutMs = 20000 } = {}) {
+  const response = await fetchJson(path, {
+    method, timeoutMs, headers: { 'Content-Type': 'application/json' },
+    ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+  });
+  if (response.ok === false) throw new Error(response.error || 'The request could not be completed.');
+  return response;
+}
+
+async function refreshAgentLibraryCatalog() {
+  const catalog = await fetchJson('/api/agent-packages', { timeoutMs: 10000 });
+  state.agentLibrary.catalog = catalog;
+  return catalog;
+}
+
+function agentCollectionCards(catalog) {
+  const query = state.agentLibrary.query.trim().toLowerCase();
+  const packages = (catalog?.packages || []).map(agentPackageSummary).filter(item => !query || `${item.name} ${item.description} ${item.id}`.toLowerCase().includes(query));
+  if (!packages.length) return `<div class="collection-empty"><strong>${query ? 'No matching packages' : 'Your collection is ready'}</strong><p>${query ? 'Try another name or description.' : 'Create a specialist or upload an agent. Your collection stays with you when GLaDOS updates.'}</p></div>`;
+  return packages.map(item => `<button type="button" class="agent-package-row${state.agentLibrary.selectedId === item.id ? ' selected' : ''}" data-package-open="${escapeHtml(item.id)}" aria-pressed="${state.agentLibrary.selectedId === item.id}">
+    <span class="package-row-title"><strong>${escapeHtml(item.name)}</strong>${!item.enabled ? '<span class="package-status muted">Disabled</span>' : item.active ? '<span class="package-status active">Active</span>' : ''}</span>
+    <span class="package-row-description">${escapeHtml(item.description || 'No description yet.')}</span>
+    <span class="package-row-meta">${escapeHtml(item.managedIntegration ? 'Installed integration' : item.source === 'imported' ? 'Uploaded' : 'Custom')} · v${escapeHtml(item.version)}${item.teamCount ? ` · ${item.teamCount} team${item.teamCount === 1 ? '' : 's'}` : ` · ${item.agentCount || 1} agent${item.agentCount === 1 ? '' : 's'}`}</span>
+  </button>`).join('');
+}
+
+async function renderAgentsLibraryPane() {
+  const wrap = document.createElement('div');
+  wrap.className = 'settings-pane agent-library-pane collection-pane';
+  wrap.innerHTML = `<div class="collection-page-heading"><div><span class="collection-eyebrow">Tools</span><h1>Agents</h1><p>Create specialists and teams, upload agents, and manage the tools they can use.</p></div><div class="collection-page-actions"><button type="button" data-import-package>Upload agent</button><button type="button" data-new-team>New team</button><button type="button" class="safe" data-new-agent>New agent</button></div></div>
+    <div class="collection-tabs" role="tablist" aria-label="Agent collection"><button type="button" role="tab" data-library-view="built-in" aria-selected="${state.agentLibrary.view === 'built-in'}">GLaDOS Agentic Team</button><button type="button" role="tab" data-library-view="collection" aria-selected="${state.agentLibrary.view === 'collection'}">Custom Agents <span data-package-count></span></button></div>
+    <div class="collection-loading" data-library-content>Loading your collection…</div>`;
+  paneEl.appendChild(wrap);
+  const startDraft = async kind => {
+    if (!await confirmAgentPackageDiscard()) return;
+    state.agentLibrary.selectionGeneration++;
+    state.agentLibrary.view = 'collection';
+    state.agentLibrary.selectedId = null;
+    state.agentLibrary.details = null;
+    state.agentLibrary.draft = newPackageDraft(kind);
+    state.agentLibrary.selectedAgentId = state.agentLibrary.draft.agents[0].id;
+    state.agentLibrary.selectedTeamId = state.agentLibrary.draft.teams[0]?.id || null;
+    resetAgentPackageTest();
+    state.agentLibrary.dirty = false;
+    drawAgentsLibrary(wrap);
+    wrap.querySelector('[data-package-field="name"]')?.focus();
+  };
+  wrap.querySelector('[data-new-agent]').addEventListener('click', () => startDraft('agent'));
+  wrap.querySelector('[data-new-team]').addEventListener('click', () => startDraft('team'));
+  wrap.querySelector('[data-import-package]').addEventListener('click', async () => {
+    if (!await confirmAgentPackageDiscard()) return;
+    openAgentPackageImport(async (id, selector) => {
+    await refreshAgentLibraryCatalog();
+    if (!wrap.isConnected) return;
+    state.agentLibrary.view = 'collection';
+    await selectAgentPackage(id, wrap, selector);
+    });
+  });
+  wrap.querySelectorAll('[data-library-view]').forEach(button => button.addEventListener('click', () => {
+    state.agentLibrary.view = button.dataset.libraryView;
+    drawAgentsLibrary(wrap);
+  }));
+  try {
+    await Promise.all([refreshAgentLibraryCatalog(), loadAgentTeams()]);
+    if (wrap.isConnected) drawAgentsLibrary(wrap);
+  } catch (error) {
+    wrap.querySelector('[data-library-content]').innerHTML = `<div class="collection-empty"><strong>Your agent collection could not load.</strong><p>${escapeHtml(error.message)}</p><button type="button" data-retry-library>Try again</button></div>`;
+    wrap.querySelector('[data-retry-library]').addEventListener('click', () => renderPane());
+  }
+}
+
+function teamAssignableAgents(team, { agents = state.teamCatalog.agents } = {}) {
+  const assigned = new Set(team?.assignedAgentIds || []);
+  const baseMembers = new Set((team?.memberIds || []).filter(id => !assigned.has(id)));
+  return (agents || []).filter(agent => agent.id !== 'glados' && !agent.teamCoordinator && agent.assignable !== false && !baseMembers.has(agent.id)
+    && (team?.id !== 'glados' || agent.packageId || String(agent.id).startsWith('pkg-')));
+}
+
+function teamAssignmentsMarkup(team) {
+  if (!team) return '<p class="field-note">Save this team before assigning additional specialists.</p>';
+  const agents = teamAssignableAgents(team);
+  const assigned = new Set(team.assignedAgentIds || []);
+  return `<div class="settings-section-heading"><div><h2>${team.id === 'glados' ? 'Custom agents in the GLaDOS team' : 'Additional team agents'}</h2><p class="settings-section-copy">${team.id === 'glados' ? 'Assign custom specialists GLaDOS can use alongside its built-in team.' : 'Add specialists from GLaDOS or another package. This changes this team’s roster while keeping each agent’s own capabilities.'}</p></div></div>
+    ${agents.length ? `<label class="team-assignment-search"><span class="sr-only">Find an assignable agent</span><input type="search" data-assignment-search placeholder="Find an agent to assign…" /></label><div class="team-assignment-list">${agents.map(agent => `<label class="team-assignment-choice" data-assignment-name="${escapeHtml(`${agent.name || ''} ${agent.id}`.toLowerCase())}" title="${escapeHtml(agent.id)}"><input type="checkbox" data-assigned-agent value="${escapeHtml(agent.id)}"${assigned.has(agent.id) ? ' checked' : ''}${agent.available === false && !assigned.has(agent.id) ? ' disabled' : ''} /><span><strong>${escapeHtml(agentDisplayName(agent))}</strong><small>${agent.packageId || String(agent.id).startsWith('pkg-') ? 'Custom agent' : 'GLaDOS agent'}${agent.available === false ? ' · Disabled' : ''}</small></span></label>`).join('')}</div><div class="team-assignment-save"><span data-assignment-status role="status">${assigned.size} added agent${assigned.size === 1 ? '' : 's'}</span><button type="button" class="safe" data-save-team-assignments disabled>Save assignments</button></div>` : '<p class="field-note">No additional specialists are available. Create or import a custom agent to add one here.</p>'}`;
+}
+
+function renderTeamAssignments(target, teamId) {
+  if (!target) return;
+  const team = (state.teamCatalog.teams || []).find(item => item.id === teamId);
+  target.innerHTML = teamAssignmentsMarkup(team);
+  if (!team) return;
+  const save = target.querySelector('[data-save-team-assignments]');
+  const status = target.querySelector('[data-assignment-status]');
+  if (!save || !status) return;
+  const committed = [...(team.assignedAgentIds || [])].sort().join('\n');
+  const selected = () => [...target.querySelectorAll('[data-assigned-agent]:checked')].map(field => field.value).sort();
+  target.querySelectorAll('[data-assigned-agent]').forEach(field => field.addEventListener('change', () => {
+    const draft = selected();
+    save.disabled = draft.join('\n') === committed;
+    status.textContent = save.disabled ? `${draft.length} assignment${draft.length === 1 ? '' : 's'}` : `${draft.length} selected · Unsaved changes`;
+  }));
+  target.querySelector('[data-assignment-search]')?.addEventListener('input', event => {
+    const query = event.target.value.trim().toLowerCase();
+    target.querySelectorAll('[data-assignment-name]').forEach(label => { label.hidden = !label.dataset.assignmentName.includes(query); });
+  });
+  save.addEventListener('click', async () => {
+    const assignedAgentIds = selected();
+    save.disabled = true;
+    status.textContent = 'Saving team assignments…';
+    try {
+      await packageApi('PATCH', `/api/agent-teams/${encodeURIComponent(teamId)}`, { assignedAgentIds, expectedRevision: team.revision });
+      await loadAgentTeams();
+      await loadAgents();
+      if (target.isConnected) renderTeamAssignments(target, teamId);
+      showToast('Team assignments saved.', { kind: 'success', label: 'Agents' });
+    } catch (error) { status.textContent = error.message; save.disabled = false; }
+  });
+}
+
+function drawAgentsLibrary(wrap) {
+  if (!wrap.isConnected) return;
+  const library = state.agentLibrary;
+  const content = wrap.querySelector('[data-library-content]');
+  content.className = 'collection-content';
+  wrap.querySelector('[data-package-count]').textContent = (library.catalog?.packages || []).length || '';
+  wrap.querySelectorAll('[data-library-view]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.libraryView === library.view)));
+  if (library.view === 'built-in') {
+    content.innerHTML = `<p class="collection-note">GLaDOS coordinates its built-in agents and the custom specialists you assign to this team.</p><section class="team-assignments-section" data-built-in-team-assignments></section>${builtInAgentsMarkup()}`;
+    renderTeamAssignments(content.querySelector('[data-built-in-team-assignments]'), 'glados');
+    loadBuiltInAgentSettings(content);
+    return;
+  }
+  content.innerHTML = `<div class="agent-library-grid"><aside class="agent-collection-rail" aria-label="Your agent packages"><label class="collection-search"><span class="sr-only">Find an agent package</span><input type="search" data-package-search placeholder="Find a package…" value="${escapeHtml(library.query)}" /></label><div data-package-list>${agentCollectionCards(library.catalog)}</div></aside><div class="agent-package-editor" data-package-editor></div></div>`;
+  const search = content.querySelector('[data-package-search]');
+  search.addEventListener('input', () => {
+    library.query = search.value;
+    content.querySelector('[data-package-list]').innerHTML = agentCollectionCards(library.catalog);
+    wirePackageCollection(content, wrap);
+  });
+  wirePackageCollection(content, wrap);
+  renderAgentPackageEditor(content.querySelector('[data-package-editor]'), wrap);
+}
+
+function wirePackageCollection(content, wrap) {
+  content.querySelectorAll('[data-package-open]').forEach(button => button.addEventListener('click', async () => {
+    button.disabled = true;
+    try { if (await confirmAgentPackageDiscard()) await selectAgentPackage(button.dataset.packageOpen, wrap); }
+    catch (error) { showToast(error.message, { kind: 'warning', label: 'Agents' }); }
+    finally { button.disabled = false; }
+  }));
+}
+
+async function selectAgentPackage(id, wrap, selector = null) {
+  if (!id) { drawAgentsLibrary(wrap); return; }
+  const generation = ++state.agentLibrary.selectionGeneration;
+  const selectionQuery = selector ? `?version=${encodeURIComponent(selector.version)}&revision=${encodeURIComponent(selector.revision)}` : '';
+  const details = await fetchJson(`/api/agent-packages/${encodeURIComponent(id)}${selectionQuery}`);
+  if (!wrap.isConnected || generation !== state.agentLibrary.selectionGeneration) return;
+  state.agentLibrary.selectedId = id;
+  state.agentLibrary.details = details.package || details;
+  const previousAgentId = state.agentLibrary.selectedAgentId;
+  const previousTeamId = state.agentLibrary.selectedTeamId;
+  state.agentLibrary.draft = portablePackageManifest(state.agentLibrary.details);
+  state.agentLibrary.selectedAgentId = state.agentLibrary.draft.agents.some(agent => agent.id === previousAgentId) ? previousAgentId : state.agentLibrary.draft.agents[0]?.id;
+  state.agentLibrary.selectedTeamId = state.agentLibrary.draft.teams.some(team => team.id === previousTeamId) ? previousTeamId : state.agentLibrary.draft.teams[0]?.id || null;
+  resetAgentPackageTest();
+  state.agentLibrary.dirty = false;
+  drawAgentsLibrary(wrap);
+}
+
+function packageCapabilityChoices(kind, selected, catalog) {
+  const available = kind === 'connectors'
+    ? (catalog?.connectors || []).map(item => ({ id: item.id || item.serverName, name: item.name || item.id || item.serverName, unavailable: item.available === false || item.enabled === false }))
+    : (catalog?.tools || []).map(item => typeof item === 'string' ? { id: item, name: item } : { id: item.id || item.name, name: item.name || item.id });
+  const known = new Set(available.map(item => item.id));
+  for (const id of selected || []) if (!known.has(id)) available.push({ id, name: id, unavailable: true });
+  if (!available.length) return `<p class="field-note">${kind === 'connectors' ? 'No connectors are available. Add them in Tools → Connectors.' : 'No tools are listed for this runtime.'}</p>`;
+  return available.filter(item => item.id).map(item => `<label class="capability-choice"><input type="checkbox" data-capability="${kind}" value="${escapeHtml(item.id)}" ${(selected || []).includes(item.id) ? 'checked' : ''} /><span>${escapeHtml(item.name)}${item.unavailable ? '<small>Not connected</small>' : ''}</span></label>`).join('');
+}
+
+function packageToolsMarkup(agent, catalog) {
+  const all = (catalog?.tools || []).map(item => typeof item === 'string' ? item : item.id || item.name).filter(Boolean);
+  const selected = new Set(agent.tools || []);
+  const connectors = catalog?.connectors || [];
+  const captured = new Set();
+  const choices = (tools, enabled = true) => tools.map(tool => {
+    captured.add(tool);
+    return `<label class="capability-choice" data-tool-choice="${escapeHtml(tool.toLowerCase())}"><input type="checkbox" data-capability="tools" value="${escapeHtml(tool)}"${selected.has(tool) ? ' checked' : ''}${!enabled && !selected.has(tool) ? ' disabled' : ''} /><span>${escapeHtml(tool)}</span></label>`;
+  }).join('');
+  const core = all.filter(tool => !tool.startsWith('mcp__'));
+  let groups = `<div class="package-core-tools">${choices(core)}</div>`;
+  for (const connector of connectors) {
+    const prefix = `mcp__${connector.serverName || connector.id}`;
+    const tools = all.filter(tool => tool === prefix || tool.startsWith(`${prefix}__`));
+    if (!tools.length) continue;
+    const enabled = (agent.connectors || []).includes(connector.id);
+    const selectedCount = tools.filter(tool => selected.has(tool)).length;
+    groups += `<details class="package-tool-group"${selectedCount ? ' open' : ''}><summary>${escapeHtml(connector.name || connector.id)} <small>${selectedCount ? `${selectedCount} selected · ` : ''}${tools.length} choices</small></summary>${!enabled ? '<p class="field-note">Select this connector above to add its tools.</p>' : ''}<div class="package-connector-tools">${choices(tools, enabled)}</div></details>`;
+  }
+  const other = [...new Set([...all.filter(tool => !captured.has(tool)), ...(agent.tools || []).filter(tool => !captured.has(tool))])];
+  if (other.length) groups += `<details class="package-tool-group" open><summary>Other selected tools</summary><div class="package-connector-tools">${choices(other)}</div></details>`;
+  return `<label class="package-tool-search"><span class="sr-only">Find an available tool</span><input type="search" data-package-tool-search placeholder="Find a tool…" /></label>${groups}<p class="field-note">A server name such as mcp__clippy enables every advertised tool for that connector. Select individual tools for a narrower set.</p>`;
+}
+
+function wirePackageToolSearch(editor) {
+  const field = editor.querySelector('[data-package-tool-search]');
+  field?.addEventListener('input', () => {
+    const query = field.value.trim().toLowerCase();
+    const target = editor.querySelector('[data-package-tools]');
+    target.querySelectorAll('[data-tool-choice]').forEach(label => { label.hidden = !label.dataset.toolChoice.includes(query); });
+    target.querySelectorAll('.package-tool-group').forEach(group => {
+      group.hidden = ![...group.querySelectorAll('[data-tool-choice]')].some(label => !label.hidden);
+      if (query && !group.hidden) group.open = true;
+    });
+  });
+}
+
+function agentEditorMarkup(agent, catalog) {
+  const models = [...new Set([agent.model, ...(catalog?.models || [])].filter(Boolean))];
+  return `<div class="editor-field-grid"><label class="editor-field"><span>Name</span><input data-agent-field="name" maxlength="120" value="${escapeHtml(agent.name || '')}" placeholder="Agent name" /></label><label class="editor-field"><span>Agent ID</span><input data-agent-field="id" value="${escapeHtml(agent.id)}" spellcheck="false" /></label></div>
+    <label class="editor-field"><span>Description</span><textarea data-agent-field="description" rows="2" placeholder="What does this agent help with?">${escapeHtml(agent.description || '')}</textarea></label>
+    <label class="editor-field"><span>Instructions</span><textarea class="agent-instructions-input" data-agent-field="instructions" rows="8" placeholder="Describe the role, how it should work, and when it should ask for input.">${escapeHtml(agent.instructions || '')}</textarea></label>
+    <div class="editor-field-grid"><label class="editor-field"><span>Model</span><input data-agent-field="model" list="package-model-options" value="${escapeHtml(agent.model || '')}" placeholder="Choose or enter a model" autocomplete="off" /><datalist id="package-model-options">${models.map(model => `<option value="${escapeHtml(model)}"></option>`).join('')}</datalist></label><label class="editor-field"><span>Reasoning</span><select data-agent-field="effort">${['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(effort => `<option value="${effort}"${agent.effort === effort ? ' selected' : ''}>${effort === 'max' ? 'Maximum' : effort === 'xhigh' ? 'Extra high' : effort[0].toUpperCase() + effort.slice(1)}</option>`).join('')}</select></label></div>
+    <fieldset class="capability-fieldset"><legend>Connectors</legend><div class="capability-choices">${packageCapabilityChoices('connectors', agent.connectors, catalog)}</div><button type="button" class="text-action" data-manage-connectors>Manage connectors</button></fieldset>
+    <fieldset class="capability-fieldset"><legend>Tools</legend><div data-package-tools>${packageToolsMarkup(agent, catalog)}</div></fieldset>
+    <label class="editor-field"><span>Expected deliverables</span><textarea data-agent-field="deliverables" rows="3" placeholder="One deliverable per line">${escapeHtml((agent.deliverables || []).join('\n'))}</textarea></label>
+    <fieldset class="capability-fieldset package-skills"><legend>Skills</legend><div>${(agent.skills || []).map((skill, index) => `<div class="package-skill-row"><span><strong>${escapeHtml(typeof skill === 'string' ? skill : skill.name || skill.id)}</strong><small>${escapeHtml(typeof skill === 'string' ? `skills/${skill}/SKILL.md` : skill.path || '')}</small></span><button type="button" class="text-action" data-remove-package-skill="${index}">Remove</button></div>`).join('') || '<p class="field-note">Add a skill instruction file to teach this agent a repeatable workflow.</p>'}</div><label class="skill-file-upload text-action">Add skill file<input type="file" data-package-skill-file accept=".md,.markdown,text/markdown" /></label></fieldset>`;
+}
+
+function packageEditorCatalog(details, catalog) {
+  const limits = details?.editableIntegration && details.integrationCapabilities;
+  if (!limits) return catalog;
+  const tools = new Set(limits.tools || []);
+  const connectors = new Set(limits.connectors || []);
+  return { ...catalog, tools: (catalog?.tools || []).filter(item => tools.has(typeof item === 'string' ? item : item.id || item.name)), connectors: (catalog?.connectors || []).filter(item => connectors.has(item.id || item.serverName)) };
+}
+
+function teamEditorMarkup(team, agents, { saved = false, disabled = false } = {}) {
+  return `<section class="team-editor"><div class="editor-subsection-heading"><h3>Team</h3>${saved ? `<button type="button" class="text-action danger-text" data-delete-package-entry="team" data-delete-local-id="${escapeHtml(team.id)}"${disabled ? ' disabled' : ''}>Delete team</button>` : ''}</div><div class="editor-field-grid"><label class="editor-field"><span>Team name</span><input data-team-field="name" value="${escapeHtml(team.name || '')}" placeholder="Team name" /></label><label class="editor-field"><span>Coordinator</span><select data-team-field="coordinator">${agents.map(agent => `<option value="${escapeHtml(agent.id)}"${team.coordinator === agent.id ? ' selected' : ''}>${escapeHtml(agent.name || agent.id)}</option>`).join('')}</select></label></div><label class="editor-field"><span>Team description</span><textarea data-team-field="description" rows="2">${escapeHtml(team.description || '')}</textarea></label><fieldset class="capability-fieldset"><legend>Members</legend><div class="capability-choices">${agents.map(agent => `<label class="capability-choice"><input type="checkbox" data-team-member value="${escapeHtml(agent.id)}"${(team.members || []).includes(agent.id) ? ' checked' : ''} /><span>${escapeHtml(agent.name || agent.id)}</span></label>`).join('')}</div></fieldset></section>`;
+}
+
+function packageInvocationState(details, entry, { team = false, dirty = false, catalog = state.agentLibrary.catalog, agents = state.agents } = {}) {
+  const id = details?.id && entry?.id ? `pkg-${details.id}--${entry.id}` : null;
+  if (!details || !id) return { id, available: false, reason: 'Save this package before opening a conversation.' };
+  if (dirty) return { id, available: false, reason: 'Save your changes before opening this version.' };
+  if (details.enabled === false || entry.enabled === false) return { id, available: false, reason: 'Enable this package and agent first.' };
+  const selectedRevision = details.selectedRevision || details.revision;
+  if (selectedRevision !== (details.activeRevision || details.revision)) return { id, available: false, reason: 'Activate this saved revision first.' };
+  const manifest = details.manifest || details.selectedManifest || {};
+  const members = team ? (manifest.agents || []).filter(agent => (entry.members || []).includes(agent.id)) : [entry];
+  const required = [...new Set(members.flatMap(agent => agent.requiredConnectors || agent.connectors || []))];
+  const missing = required.filter(connectorId => {
+    const connector = (catalog?.connectors || []).find(item => item.id === connectorId);
+    return !connector || connector.available === false || connector.enabled === false;
+  });
+  if (missing.length) return { id, available: false, reason: `Connect the required connector${missing.length === 1 ? '' : 's'} first: ${missing.join(', ')}.` };
+  const globalTeam = team ? (state.teamCatalog?.teams || []).find(item => item.id === id) : null;
+  const runtime = [...(state.teamCatalog?.agents || []), ...agents].find(agent => agent.id === id);
+  if ((team && globalTeam?.available === false) || (!runtime && !globalTeam) || runtime?.available === false || runtime?.enabled === false) return { id, available: false, reason: team ? 'This saved team is unavailable.' : 'Enable this agent before starting a direct conversation.' };
+  return { id, available: true, reason: team ? 'Open this team’s conversation to give it a task.' : 'Open this agent’s conversation to give it a task.' };
+}
+
+function packageInvocationMarkup(details, agent, team) {
+  if (!details) return '';
+  const currentAgent = packageInvocationState(details, agent, { dirty: state.agentLibrary.dirty });
+  const currentTeam = team ? packageInvocationState(details, team, { team: true, dirty: state.agentLibrary.dirty }) : null;
+  return `<div class="package-invocation-actions">${team ? `<button type="button" data-package-team-enabled data-team-local-id="${escapeHtml(team.id)}"${state.agentLibrary.dirty || (details.selectedRevision || details.revision) !== details.activeRevision ? ' disabled' : ''}>${team.enabled === false ? 'Enable team' : 'Disable team'}</button>` : ''}<button type="button" data-invoke-package-agent data-invoke-local-id="${escapeHtml(agent.id)}" title="${escapeHtml(currentAgent.reason)}"${currentAgent.available ? '' : ' disabled'}>Chat with agent</button>${currentTeam ? `<button type="button" data-invoke-package-team data-invoke-local-id="${escapeHtml(team.id)}" title="${escapeHtml(currentTeam.reason)}"${currentTeam.available ? '' : ' disabled'}>Run team</button>` : ''}<button type="button" data-package-export>Export</button></div>`;
+}
+
+function syncPackageInvocationControls() {
+  const library = state.agentLibrary;
+  const details = library.details;
+  if (!details) return;
+  const manifest = library.draft || details.manifest;
+  document.querySelectorAll('[data-invoke-package-agent], [data-invoke-package-team]').forEach(button => {
+    const team = button.hasAttribute('data-invoke-package-team');
+    const entry = (team ? manifest.teams : manifest.agents)?.find(item => item.id === button.dataset.invokeLocalId);
+    const readiness = packageInvocationState(details, entry, { team, dirty: library.dirty });
+    button.disabled = !readiness.available;
+    button.title = readiness.reason;
+  });
+}
+
+function renderAgentPackageEditor(editor, wrap) {
+  const library = state.agentLibrary;
+  const draft = library.draft;
+  if (!draft) {
+    editor.innerHTML = `<div class="agent-editor-empty"><span class="collection-eyebrow">Your specialists</span><h2>Turn capabilities into an agent.</h2><p>Give it a role, choose the tools it can use, and try a conversation before saving. Create a team in GLaDOS or use an installed team integration.</p><div><button type="button" class="safe" data-empty-new>Create an agent</button><button type="button" data-empty-import>Upload an agent</button></div><p class="field-note">Built-in agents and your collection are managed separately. Saved versions and revisions stay available after updates.</p></div>`;
+    editor.querySelector('[data-empty-new]').addEventListener('click', () => wrap.querySelector('[data-new-agent]').click());
+    editor.querySelector('[data-empty-import]').addEventListener('click', () => wrap.querySelector('[data-import-package]').click());
+    return;
+  }
+  const agent = draft.agents.find(item => item.id === library.selectedAgentId) || draft.agents[0];
+  if (!agent) { editor.innerHTML = '<p>No agents are present in this package.</p>'; return; }
+  library.selectedAgentId = agent.id;
+  const details = library.details;
+  const summary = details ? agentPackageSummary(details) : null;
+  const revision = details?.selectedRevision || details?.revision || details?.latestRevision;
+  const active = details?.active || details?.activeVersion;
+  const revisions = details?.revisions || details?.versions || [];
+  const team = draft.teams?.find(item => item.id === library.selectedTeamId) || draft.teams?.[0];
+  editor.dataset.dirty = String(library.dirty);
+  editor.innerHTML = `<div class="package-editor-heading"><div><span class="collection-eyebrow">${details ? summary.managedIntegration ? 'Installed integration' : summary.source === 'imported' ? 'Uploaded agent' : 'Custom package' : team ? 'New team' : 'New specialist'}</span><h2>${escapeHtml(draft.name || (team ? 'Create a team' : 'Create an agent'))}</h2></div>${packageInvocationMarkup(details, agent, team)}</div>
+    ${summary?.managedIntegration ? `<p class="package-managed-note">${summary.editableIntegration ? 'Customize this integration’s instructions, model, reasoning, and tools. Saved revisions stay available and your changes are preserved when GLaDOS updates.' : `${team ? 'Enable a team above when you are ready to use it. ' : 'Enable this package when you are ready to use it. '}Its instructions and resources are managed by Codex. You can review them, manage enabled state, and choose additional team assignments.`}</p>` : ''}
+    <div class="editor-field-grid"><label class="editor-field"><span>Package name</span><input data-package-field="name" maxlength="120" value="${escapeHtml(draft.name || '')}" placeholder="Name your specialist or team" /></label><label class="editor-field version-field"><span>Version</span><input data-package-field="version" value="${escapeHtml(draft.version)}" placeholder="1.0.0" spellcheck="false" /></label></div>
+    <label class="editor-field"><span>Package description</span><textarea data-package-field="description" rows="2" placeholder="When should GLaDOS call on this package?">${escapeHtml(draft.description || '')}</textarea></label>
+    <details class="package-identity"><summary>Package identity & history</summary><label class="editor-field"><span>Stable package ID</span><input data-package-field="id" value="${escapeHtml(draft.id)}"${details ? ' readonly' : ''} spellcheck="false" /></label><p class="field-note">${revision ? `Saved revision: ${escapeHtml(String(revision).slice(0, 10))}. ` : ''}Saving creates and selects a new revision. Imported updates wait for you to activate them; previous revisions stay available.</p>${revisions.length ? `<div class="package-history">${revisions.map(item => `<button type="button" class="text-action" data-package-revision="${escapeHtml(item.revision)}" data-package-version="${escapeHtml(item.version)}">v${escapeHtml(item.version || draft.version)} · ${escapeHtml(String(item.revision).slice(0, 10))}${item.active ? ' · Active' : item.staged ? ' · Imported, awaiting activation' : ''}</button>`).join('')}</div>` : ''}</details>
+    ${draft.agents.length > 1 || team ? `<div class="package-agent-switch"><label class="editor-field"><span>Agent in this package</span><select data-select-package-agent>${draft.agents.map(item => `<option value="${escapeHtml(item.id)}"${item.id === agent.id ? ' selected' : ''}>${escapeHtml(item.name || item.id)}</option>`).join('')}</select></label><button type="button" data-add-package-agent>Add agent</button>${draft.agents.length > 1 ? '<button type="button" class="text-action" data-remove-package-agent>Remove from draft</button>' : ''}</div>` : ''}
+    <section class="package-agent-form"><div class="editor-subsection-heading"><h3>${team ? 'Agent instructions & capabilities' : 'Instructions & capabilities'}</h3>${details ? `<button type="button" class="text-action danger-text" data-delete-package-entry="agent" data-delete-local-id="${escapeHtml(agent.id)}"${library.dirty || revision !== details.activeRevision ? ' disabled' : ''}>Delete agent</button>` : ''}</div>${agentEditorMarkup(agent, packageEditorCatalog(details, library.catalog))}</section>
+    ${draft.teams?.length > 1 ? `<label class="editor-field"><span>Team in this package</span><select data-select-package-team>${draft.teams.map(item => `<option value="${escapeHtml(item.id)}"${item === team ? ' selected' : ''}>${escapeHtml(item.name || item.id)}</option>`).join('')}</select></label>` : ''}${team ? teamEditorMarkup(team, draft.agents, { saved: !!details, disabled: library.dirty || revision !== details?.activeRevision }) : ''}${team ? '<section class="team-assignments-section" data-custom-team-assignments></section>' : ''}
+    ${(draft.resources || []).length ? `<details class="package-resources"><summary>Supporting resources (${draft.resources.length})</summary><ul>${draft.resources.map(item => `<li><code>${escapeHtml(item.path)}</code><span>${String(item.text || '').length.toLocaleString()} characters</span></li>`).join('')}</ul></details>` : ''}
+    <section class="package-test"><div class="package-test-heading"><div><h3>Try a conversation</h3><p>Test this agent’s instructions and response before saving. Tools stay off during the test.</p></div><button type="button" class="text-action" data-clear-package-test>Clear</button></div><div class="package-test-messages" data-package-test-messages role="log" aria-label="Agent test conversation"></div><div class="package-test-composer"><textarea data-package-test-prompt rows="2" placeholder="Give this agent a sample task…" aria-label="Sample task"></textarea><button type="button" data-run-package-test>Test agent</button></div><p class="field-note" data-package-test-status role="status"></p></section>
+    <div class="package-editor-status" data-package-status role="status" aria-live="polite"></div>
+    <div class="package-save-bar"><p>${details ? `Saved ${escapeHtml(draft.version)}${revision ? ` · revision ${escapeHtml(String(revision).slice(0, 10))}` : ''}${revision === details?.activeRevision ? ' · Active revision' : ' · Ready to activate'}` : 'Save to your personal collection and make it available to GLaDOS.'}</p><div>${details ? `<button type="button" class="text-action danger-text" data-delete-package${library.dirty ? ' disabled' : ''}>Delete package</button><button type="button" data-package-enabled${library.dirty ? ' disabled' : ''}>${summary.enabled ? 'Disable' : 'Enable'}</button>${revision !== details.activeRevision ? `<button type="button" data-package-activate${library.dirty ? ' disabled' : ''}>Activate this revision</button>` : ''}` : ''}<button type="button" class="safe" data-save-package>${details ? 'Save new revision' : 'Save package'}</button></div></div>`;
+  if (summary?.managedIntegration && !summary.editableIntegration) makeManagedPackageReadOnly(editor);
+  if (summary?.editableIntegration) {
+    editor.querySelectorAll('[data-package-field="id"], [data-agent-field="id"]').forEach(field => { field.readOnly = true; });
+    editor.querySelectorAll('[data-add-package-agent], [data-remove-package-agent], [data-delete-package-entry], [data-delete-package]').forEach(control => { control.hidden = true; });
+  }
+  wireAgentPackageEditor(editor, wrap, agent, team);
+  if (team) {
+    const assignments = editor.querySelector('[data-custom-team-assignments]');
+    if (!details) assignments.innerHTML = '<p class="field-note">Save this team to assign additional specialists.</p>';
+    else if (revision !== details.activeRevision) assignments.innerHTML = '<p class="field-note">Activate this revision to manage its team assignments.</p>';
+    else renderTeamAssignments(assignments, `pkg-${draft.id}--${team.id}`);
+  }
+  renderPackageTestMessages(editor);
+  loadComposerModels().then(catalog => {
+    if (!editor.isConnected || library.selectedAgentId !== agent.id) return;
+    library.catalog.models = catalog.models || [];
+    const options = editor.querySelector('#package-model-options');
+    if (options) options.innerHTML = [...new Set([agent.model, ...(catalog.models || [])].filter(Boolean))].map(model => `<option value="${escapeHtml(model)}"></option>`).join('');
+  }).catch(() => {});
+}
+
+function makeManagedPackageReadOnly(editor) {
+  editor.dataset.managedIntegration = 'true';
+  editor.querySelectorAll('[data-package-field], [data-agent-field], [data-team-field], [data-capability], [data-team-member]').forEach(field => {
+    if (field.tagName === 'SELECT' || field.type === 'checkbox') field.disabled = true;
+    else field.readOnly = true;
+  });
+  editor.querySelectorAll('[data-save-package], [data-add-package-agent], [data-remove-package-agent], [data-remove-package-skill], .skill-file-upload').forEach(control => { control.hidden = true; });
+}
+
+function wireAgentPackageEditor(editor, wrap, agent, team) {
+  const library = state.agentLibrary;
+  const draft = library.draft;
+  const status = editor.querySelector('[data-package-status]');
+  const setStatus = (message, failed = false) => { status.textContent = message; status.classList.toggle('error', failed); };
+  const markChanged = () => {
+    library.dirty = true;
+    syncPackageInvocationControls();
+    resetAgentPackageTest();
+    renderPackageTestMessages(editor);
+    editor.dataset.dirty = 'true';
+    setStatus('Unsaved changes');
+    editor.querySelector('[data-package-activate]')?.setAttribute('disabled', '');
+    editor.querySelector('[data-package-enabled]')?.setAttribute('disabled', '');
+    editor.querySelector('[data-package-team-enabled]')?.setAttribute('disabled', '');
+    editor.querySelector('[data-delete-package]')?.setAttribute('disabled', '');
+    editor.querySelectorAll('[data-delete-package-entry]').forEach(button => { button.disabled = true; });
+  };
+  editor.querySelectorAll('[data-package-field]').forEach(field => field.addEventListener('input', () => {
+    draft[field.dataset.packageField] = field.value;
+    if (field.dataset.packageField === 'name' && draft.agents.length === 1 && !team && (!agent.name || agent.name === field.dataset.previousName)) {
+      agent.name = field.value;
+      editor.querySelector('[data-agent-field="name"]').value = field.value;
+    }
+    field.dataset.previousName = field.value;
+    markChanged();
+  }));
+  editor.querySelectorAll('[data-agent-field]').forEach(field => field.addEventListener(field.tagName === 'SELECT' ? 'change' : 'input', () => {
+    const key = field.dataset.agentField;
+    const oldId = agent.id;
+    agent[key] = ['deliverables', 'skills'].includes(key) ? packageLineItems(field.value) : field.value;
+    if (key === 'id') {
+      library.selectedAgentId = agent.id;
+      for (const currentTeam of draft.teams || []) {
+        if (currentTeam.coordinator === oldId) currentTeam.coordinator = agent.id;
+        currentTeam.members = (currentTeam.members || []).map(id => id === oldId ? agent.id : id);
+      }
+    }
+    markChanged();
+  }));
+  const wireCapabilities = kind => {
+    editor.querySelectorAll(`[data-capability="${kind}"]`).forEach(field => field.addEventListener('change', () => {
+      agent[kind] = [...editor.querySelectorAll(`[data-capability="${kind}"]:checked`)].map(item => item.value);
+      if (kind === 'connectors') {
+        agent.requiredConnectors = [...agent.connectors];
+        editor.querySelector('[data-package-tools]').innerHTML = packageToolsMarkup(agent, packageEditorCatalog(library.details, library.catalog));
+        wireCapabilities('tools');
+        wirePackageToolSearch(editor);
+      }
+      markChanged();
+    }));
+  };
+  wireCapabilities('connectors');
+  wireCapabilities('tools');
+  wirePackageToolSearch(editor);
+  editor.querySelectorAll('[data-invoke-package-agent], [data-invoke-package-team]').forEach(button => button.addEventListener('click', () => {
+    const isTeam = button.hasAttribute('data-invoke-package-team');
+    const entry = (isTeam ? draft.teams : draft.agents).find(item => item.id === button.dataset.invokeLocalId);
+    const readiness = packageInvocationState(library.details, entry, { team: isTeam, dirty: library.dirty });
+    if (!readiness.available) { setStatus(readiness.reason, true); syncPackageInvocationControls(); return; }
+    if (isTeam && (state.currentSessionId || state.currentTeamId !== readiness.id)) {
+      createInvestigationSession({ teamId: readiness.id }).catch(error => setStatus(error.message, true));
+    } else if (!isTeam) {
+      createInvestigationSession({ teamId: `agent:${readiness.id}` }).catch(error => setStatus(error.message, true));
+    } else openAgentTab(readiness.id);
+  }));
+  editor.querySelector('[data-manage-connectors]')?.addEventListener('click', () => openConnectors());
+  editor.querySelectorAll('[data-package-revision]').forEach(button => button.addEventListener('click', async () => {
+    if (!await confirmAgentPackageDiscard()) return;
+    try { await selectAgentPackage(library.selectedId, wrap, { version: button.dataset.packageVersion, revision: button.dataset.packageRevision }); }
+    catch (error) { setStatus(error.message, true); }
+  }));
+  editor.querySelectorAll('[data-remove-package-skill]').forEach(button => button.addEventListener('click', () => {
+    agent.skills.splice(Number(button.dataset.removePackageSkill), 1);
+    markChanged();
+    renderAgentPackageEditor(editor, wrap);
+  }));
+  editor.querySelector('[data-package-skill-file]')?.addEventListener('change', async event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      if (file.size > 512 * 1024) throw new Error('Choose a skill file smaller than 512 KB.');
+      const text = await file.text();
+      if (!text.trim()) throw new Error('The skill file is empty.');
+      const heading = text.match(/^#\s+(.+)$/m)?.[1] || file.name.replace(/\.(?:md|markdown)$/i, '');
+      const slug = heading.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48);
+      const id = /^[a-z]/.test(slug) ? slug : `skill-${slug || Date.now()}`;
+      if ((agent.skills || []).some(skill => (typeof skill === 'string' ? skill : skill.id) === id)) throw new Error('This agent already includes a skill with that name.');
+      const path = `skills/${id}/SKILL.md`;
+      const resource = draft.resources.find(item => item.path === path);
+      if (resource && resource.text !== text) throw new Error('This package already has a different file for that skill. Give the skill a different heading.');
+      if (!resource) draft.resources.push({ path, text });
+      agent.skills.push({ id, name: heading, description: '', path });
+      markChanged();
+      renderAgentPackageEditor(editor, wrap);
+    } catch (error) { setStatus(error.message, true); }
+  });
+  editor.querySelector('[data-select-package-team]')?.addEventListener('change', event => { library.selectedTeamId = event.target.value; renderAgentPackageEditor(editor, wrap); });
+  editor.querySelector('[data-select-package-agent]')?.addEventListener('change', event => {
+    library.selectedAgentId = event.target.value;
+    resetAgentPackageTest();
+    renderAgentPackageEditor(editor, wrap);
+  });
+  editor.querySelector('[data-add-package-agent]')?.addEventListener('click', () => {
+    const next = newPackageDraft().agents[0];
+    draft.agents.push(next);
+    if (team) team.members.push(next.id);
+    library.selectedAgentId = next.id;
+    resetAgentPackageTest();
+    renderAgentPackageEditor(editor, wrap);
+    library.dirty = true;
+    syncPackageInvocationControls();
+    editor.dataset.dirty = 'true';
+    editor.querySelector('[data-package-activate]')?.setAttribute('disabled', '');
+  });
+  editor.querySelector('[data-remove-package-agent]')?.addEventListener('click', async () => {
+    if (!await confirmAction({ title: 'Remove this agent?', message: `Remove ${agent.name || agent.id} from the draft package? Saved revisions stay available.`, confirmLabel: 'Remove agent' })) return;
+    draft.agents = draft.agents.filter(item => item !== agent);
+    for (const currentTeam of draft.teams || []) {
+      currentTeam.members = (currentTeam.members || []).filter(id => id !== agent.id);
+      if (currentTeam.coordinator === agent.id) currentTeam.coordinator = draft.agents[0].id;
+    }
+    library.selectedAgentId = draft.agents[0].id;
+    resetAgentPackageTest();
+    renderAgentPackageEditor(editor, wrap);
+    library.dirty = true;
+    syncPackageInvocationControls();
+    editor.dataset.dirty = 'true';
+    editor.querySelector('[data-package-activate]')?.setAttribute('disabled', '');
+  });
+  editor.querySelectorAll('[data-team-field]').forEach(field => field.addEventListener(field.tagName === 'SELECT' ? 'change' : 'input', () => { team[field.dataset.teamField] = field.value; markChanged(); }));
+  editor.querySelectorAll('[data-team-member]').forEach(field => field.addEventListener('change', () => { team.members = [...editor.querySelectorAll('[data-team-member]:checked')].map(item => item.value); markChanged(); }));
+  editor.querySelector('[data-save-package]').addEventListener('click', async event => {
+    const issues = agentPackageIssues(draft);
+    if (issues.length) { setStatus(issues.join(' '), true); return; }
+    const button = event.currentTarget;
+    button.disabled = true;
+    setStatus('Saving to your collection…');
+    try {
+      const method = library.selectedId ? 'PATCH' : 'POST';
+      const path = library.selectedId ? `/api/agent-packages/${encodeURIComponent(library.selectedId)}` : '/api/agent-packages';
+      const result = await packageApi(method, path, { package: draft, ...(library.details ? { expectedRevision: library.details.activeRevision || library.details.revision } : {}) });
+      await Promise.all([refreshAgentLibraryCatalog(), loadAgentTeams()]);
+      await loadAgents();
+      if (!wrap.isConnected || library.draft !== draft) return;
+      await selectAgentPackage(result.package?.id || result.id || draft.id, wrap);
+      showToast('Agent package saved and available to GLaDOS. Previous revisions are preserved.', { kind: 'success', label: 'Agents' });
+    } catch (error) { setStatus(error.message, true); }
+    finally { button.disabled = false; }
+  });
+  editor.querySelector('[data-package-activate]')?.addEventListener('click', async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await packageApi('POST', `/api/agent-packages/${encodeURIComponent(library.selectedId)}/activate`, { version: draft.version, revision: library.details.selectedRevision || library.details.revision, expectedRevision: library.details.activeRevision || library.details.revision });
+      await Promise.all([refreshAgentLibraryCatalog(), loadAgentTeams()]);
+      await loadAgents();
+      if (wrap.isConnected && library.draft === draft) await selectAgentPackage(draft.id, wrap);
+      showToast('This saved package is available to GLaDOS on new turns.', { kind: 'success', label: 'Agents' });
+    } catch (error) { setStatus(error.message, true); }
+    finally { button.disabled = false; }
+  });
+  editor.querySelector('[data-package-team-enabled]')?.addEventListener('click', async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await packageApi('PATCH', `/api/agent-packages/${encodeURIComponent(draft.id)}/teams/${encodeURIComponent(team.id)}/enabled`, { enabled: team.enabled === false, expectedRevision: library.details.activeRevision || library.details.revision });
+      await Promise.all([refreshAgentLibraryCatalog(), loadAgentTeams()]);
+      await loadAgents();
+      if (wrap.isConnected && library.draft === draft) await selectAgentPackage(draft.id, wrap);
+      showToast(`Team ${team.enabled === false ? 'enabled' : 'disabled'}.`, { kind: 'success', label: 'Agents' });
+    } catch (error) { setStatus(error.message, true); }
+    finally { button.disabled = false; }
+  });
+  editor.querySelector('[data-package-enabled]')?.addEventListener('click', async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await packageApi('PATCH', `/api/agent-packages/${encodeURIComponent(library.selectedId)}/enabled`, { enabled: library.details.enabled === false, expectedRevision: library.details.activeRevision || library.details.revision });
+      await Promise.all([refreshAgentLibraryCatalog(), loadAgentTeams()]);
+      await loadAgents();
+      if (wrap.isConnected && library.draft === draft) await selectAgentPackage(draft.id, wrap);
+    } catch (error) { setStatus(error.message, true); }
+    finally { button.disabled = false; }
+  });
+  const deleteSavedEntry = async (kind, localId, name) => {
+    const message = kind === 'package' ? `Delete ${name} from your custom collection? Its saved versions stay recoverable.` : `Delete ${name} from this package? Team membership will update and saved revisions stay available.`;
+    if (!await confirmAction({ title: `Delete ${kind}?`, message, confirmLabel: `Delete ${kind}`, danger: true })) return;
+    setStatus(`Deleting ${kind}…`);
+    try {
+      const path = kind === 'package' ? `/api/agent-packages/${encodeURIComponent(draft.id)}` : `/api/agent-packages/${encodeURIComponent(draft.id)}/${kind}s/${encodeURIComponent(localId)}`;
+      const result = await packageApi('DELETE', path, { expectedRevision: library.details.activeRevision || library.details.revision });
+      await Promise.all([refreshAgentLibraryCatalog(), loadAgentTeams(), loadAgents().catch(() => false)]);
+      if (!wrap.isConnected || library.draft !== draft) return;
+      if (kind === 'package' || result.archived) {
+        library.selectedId = null;
+        library.details = null;
+        library.draft = null;
+        library.dirty = false;
+        resetAgentPackageTest();
+        drawAgentsLibrary(wrap);
+      } else await selectAgentPackage(draft.id, wrap);
+      showToast(`${kind === 'package' ? 'Package' : kind === 'team' ? 'Team' : 'Agent'} deleted. Saved revisions are preserved.`, { kind: 'success', label: 'Agents' });
+    } catch (error) { setStatus(error.message, true); }
+  };
+  editor.querySelectorAll('[data-delete-package-entry]').forEach(button => button.addEventListener('click', () => {
+    const kind = button.dataset.deletePackageEntry;
+    const entry = (kind === 'team' ? draft.teams : draft.agents).find(item => item.id === button.dataset.deleteLocalId);
+    deleteSavedEntry(kind, entry.id, entry.name || entry.id);
+  }));
+  editor.querySelector('[data-delete-package]')?.addEventListener('click', () => deleteSavedEntry('package', null, draft.name));
+  editor.querySelector('[data-package-export]')?.addEventListener('click', async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const savedVersion = library.details.selectedVersion || library.details.version;
+      const savedRevision = library.details.selectedRevision || library.details.revision;
+      const response = await fetch(`/api/agent-packages/${encodeURIComponent(draft.id)}/export?version=${encodeURIComponent(savedVersion)}&revision=${encodeURIComponent(savedRevision)}`);
+      if (!response.ok) throw new Error('Could not export this agent package.');
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${draft.id}-${savedVersion}.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) { setStatus(error.message, true); }
+    finally { button.disabled = false; }
+  });
+  editor.querySelector('[data-clear-package-test]').addEventListener('click', () => { resetAgentPackageTest(); renderPackageTestMessages(editor); });
+  editor.querySelector('[data-run-package-test]').addEventListener('click', () => runAgentPackageTest(editor, agent));
+}
+
+function resetAgentPackageTest() {
+  state.agentLibrary.testGeneration++;
+  state.agentLibrary.testMessages = [];
+  state.agentLibrary.testBusy = false;
+}
+
+async function confirmAgentPackageDiscard() {
+  if (!state.agentLibrary.dirty) return true;
+  return confirmAction({ title: 'Discard unsaved edits?', message: 'Save your package first to keep these edits as a revision. Saved packages and earlier revisions stay available.', confirmLabel: 'Discard edits' });
+}
+
+function renderPackageTestMessages(editor) {
+  const testButton = editor.querySelector('[data-run-package-test]');
+  if (testButton && !state.agentLibrary.testBusy) { testButton.disabled = false; testButton.textContent = 'Test agent'; }
+  const target = editor.querySelector('[data-package-test-messages]');
+  if (!target) return;
+  target.innerHTML = state.agentLibrary.testMessages.map(message => `<div class="package-test-message ${message.role === 'user' ? 'user' : 'assistant'}"><strong>${message.role === 'user' ? 'You' : 'Agent'}</strong><p>${escapeHtml(message.content)}</p></div>`).join('');
+  target.scrollTop = target.scrollHeight;
+}
+
+async function runAgentPackageTest(editor, agent) {
+  const library = state.agentLibrary;
+  const field = editor.querySelector('[data-package-test-prompt]');
+  const button = editor.querySelector('[data-run-package-test]');
+  const status = editor.querySelector('[data-package-test-status]');
+  const prompt = field.value.trim();
+  if (!prompt || library.testBusy) return;
+  if (!agent.instructions.trim() || !agent.model.trim()) { status.textContent = 'Add instructions and choose a model first.'; return; }
+  const generation = ++library.testGeneration;
+  library.testBusy = true;
+  button.disabled = true;
+  button.textContent = 'Testing…';
+  status.textContent = 'Running a conversation test. Nothing is saved or activated.';
+  const snapshot = JSON.parse(JSON.stringify(agent));
+  const messages = [...library.testMessages, { role: 'user', content: prompt }];
+  library.testMessages = messages;
+  field.value = '';
+  renderPackageTestMessages(editor);
+  try {
+    const result = await packageApi('POST', '/api/agent-packages/test', { agent: snapshot, messages }, { timeoutMs: 180000 });
+    if (library.selectedAgentId !== snapshot.id || generation !== library.testGeneration) return;
+    library.testMessages.push({ role: 'assistant', content: result.reply || 'The agent returned no text.' });
+    renderPackageTestMessages(editor);
+    status.textContent = 'Test complete. Continue the conversation or save your package.';
+  } catch (error) {
+    if (generation !== library.testGeneration) return;
+    status.textContent = `Test could not complete: ${error.message}`;
+    if (library.testMessages === messages) library.testMessages = messages.slice(0, -1);
+    renderPackageTestMessages(editor);
+  } finally {
+    if (generation === library.testGeneration) library.testBusy = false;
+    button.disabled = false;
+    button.textContent = 'Test agent';
+  }
+}
+
+async function agentPackageImportPayload(files) {
+  if (!files?.length) throw new Error('Choose an agent package JSON, a Markdown instruction file, or a package folder.');
+  if (files.length > 251) throw new Error('Choose a package with no more than 251 files.');
+  let total = 0;
+  const rows = [];
+  for (const file of files) {
+    total += file.size || 0;
+    if (total > 5 * 1024 * 1024) throw new Error('Choose a package smaller than 5 MB.');
+    const content = await file.text();
+    const path = file.webkitRelativePath || file.name;
+    rows.push({ path, content });
+  }
+  if (rows.length === 1 && /\.json$/i.test(rows[0].path)) {
+    let parsed;
+    try { parsed = JSON.parse(rows[0].content); } catch { throw new Error('The selected JSON file could not be read.'); }
+    return { package: requireAgentOnlyUpload(parsed.package || parsed.manifest || parsed) };
+  }
+  if (rows.length === 1 && /\.(?:md|markdown)$/i.test(rows[0].path)) return { format: 'markdown', filename: rows[0].path, text: rows[0].content };
+  const manifestFile = rows.find(row => /(?:^|\/)(?:glados-agent|manifest)\.json$/.test(row.path) || row.path.endsWith('.glados-agent.json'));
+  if (manifestFile) {
+    try { requireAgentOnlyUpload(JSON.parse(manifestFile.content)); }
+    catch (error) { if (error instanceof SyntaxError) throw new Error('The folder manifest could not be read.'); throw error; }
+  }
+  return { files: rows };
+}
+
+function requireAgentOnlyUpload(manifest) {
+  if (Array.isArray(manifest?.teams) && manifest.teams.length) throw new Error('Team uploads are not supported. Use New team to create a team in GLaDOS.');
+  return manifest;
+}
+
+function openAgentPackageImport(onImported) {
+  const root = document.getElementById('modal-root');
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<div class="app-modal package-import-modal" role="dialog" aria-modal="true" aria-labelledby="package-import-title"><header><div><h2 id="package-import-title">Upload an agent</h2><small>Review its instructions, resources, and connector requirements.</small></div><button type="button" data-import-close aria-label="Close upload">×</button></header><div class="app-modal-copy"><div class="package-import-choices"><label class="package-file-choice"><strong>Agent file</strong><span>Agent JSON or Markdown instructions</span><input type="file" data-import-file accept=".json,.md,.markdown,application/json,text/markdown" /></label><label class="package-file-choice"><strong>Agent folder</strong><span>Agent manifest and supporting files</span><input type="file" data-import-folder webkitdirectory multiple /></label></div><p class="field-note">Uploaded agents stay in your collection. Team uploads are not supported; use New team to create a team.</p><div data-import-preview></div><p class="package-editor-status" data-import-status role="status" aria-live="polite"></p></div><footer><button type="button" data-import-cancel>Cancel</button><button type="button" class="safe" data-import-confirm disabled>Upload agent</button></footer></div>`;
+  root.appendChild(backdrop);
+  const close = prepareCollectionDialog(backdrop);
+  backdrop.querySelector('[data-import-close]').addEventListener('click', close);
+  backdrop.querySelector('[data-import-cancel]').addEventListener('click', close);
+  const target = backdrop.querySelector('[data-import-preview]');
+  const status = backdrop.querySelector('[data-import-status]');
+  const confirm = backdrop.querySelector('[data-import-confirm]');
+  let payload = null;
+  let packageId = null;
+  let willStage = false;
+  let importedSelector = null;
+  let previewGeneration = 0;
+  const previewFiles = async files => {
+    const generation = ++previewGeneration;
+    confirm.disabled = true;
+    payload = null;
+    target.innerHTML = '';
+    status.textContent = 'Reading the package…';
+    try {
+      const nextPayload = await agentPackageImportPayload([...files]);
+      const result = await packageApi('POST', '/api/agent-packages/import/preview', nextPayload);
+      if (generation !== previewGeneration || !backdrop.isConnected) return;
+      const preview = result.preview || result;
+      const manifest = requireAgentOnlyUpload(preview.manifest || preview.package?.manifest || nextPayload.package || {});
+      packageId = preview.id || manifest.id;
+      willStage = preview.willStage === true;
+      importedSelector = { version: preview.version || manifest.version, revision: preview.revision };
+      payload = nextPayload;
+      target.innerHTML = `<div class="package-import-preview"><div><span class="collection-eyebrow">Package preview</span><h3>${escapeHtml(preview.name || manifest.name || packageId)}</h3><p>${escapeHtml(preview.description || manifest.description || '')}</p></div><dl><div><dt>Identity</dt><dd><code>${escapeHtml(packageId || '')}</code></dd></div><div><dt>Version</dt><dd>${escapeHtml(preview.version || manifest.version || '')}</dd></div><div><dt>Provides</dt><dd>${preview.agentCount ?? preview.agents?.length ?? manifest.agents?.length ?? 0} agents · ${preview.resourceCount ?? preview.resources?.length ?? manifest.resources?.length ?? 0} resources</dd></div></dl><h4>Agents</h4><ul>${(manifest.agents || preview.agents || []).map(item => `<li><strong>${escapeHtml(item.name || item.id)}</strong>${item.description ? ` — ${escapeHtml(item.description)}` : ''}</li>`).join('')}</ul><h4>Required connectors</h4><ul>${(preview.requiredConnectors || preview.connectors || [...new Set((manifest.agents || []).flatMap(agent => agent.connectors || []))]).map(item => `<li>${escapeHtml(typeof item === 'string' ? item : item.name || item.id)}${(state.agentLibrary.catalog?.connectors || []).find(connector => connector.id === (typeof item === 'string' ? item : item.id))?.available ? ' — available' : ' — not connected'}</li>`).join('') || '<li>None required</li>'}</ul><h4>Tools</h4><p class="field-note">${escapeHtml((preview.tools || [...new Set((manifest.agents || []).flatMap(item => item.tools || []))]).join(', ') || 'No tools selected')}</p>${(manifest.resources || preview.resources || []).length ? `<details class="package-resources"><summary>Supporting resources</summary><ul>${(manifest.resources || preview.resources).map(item => `<li><code>${escapeHtml(item.path)}</code></li>`).join('')}</ul></details>` : ''}<details class="package-resources"><summary>Read agent instructions</summary>${(manifest.agents || []).map(item => `<h4>${escapeHtml(item.name || item.id)}</h4><pre>${escapeHtml(item.instructions || '')}</pre>`).join('')}</details>${(preview.warnings || []).length ? `<div class="import-review-notes">${preview.warnings.map(item => `<p>${escapeHtml(typeof item === 'string' ? item : item.message || '')}</p>`).join('')}</div>` : ''}</div>`;
+      status.textContent = willStage ? 'This identity is already in your collection. The import will save a separate revision for you to review and activate; your current edits stay selected.' : 'Ready to add to your collection and make this package available to GLaDOS.';
+      confirm.textContent = willStage ? 'Upload new revision' : 'Upload agent';
+      confirm.disabled = false;
+    } catch (error) { if (generation === previewGeneration) { status.textContent = error.message; status.classList.add('error'); } }
+  };
+  backdrop.querySelector('[data-import-file]').addEventListener('change', event => previewFiles(event.target.files));
+  backdrop.querySelector('[data-import-folder]').addEventListener('change', event => previewFiles(event.target.files));
+  confirm.addEventListener('click', async () => {
+    if (!payload) return;
+    confirm.disabled = true;
+    status.textContent = 'Uploading to your collection…';
+    try {
+      const result = await packageApi('POST', '/api/agent-packages/import', payload);
+      const id = result.package?.id || result.id || packageId;
+      close();
+      showToast(willStage ? 'New agent revision uploaded. Review it and activate when ready.' : 'Agent uploaded and ready for direct chat.', { kind: 'success', label: 'Agents' });
+      await loadAgents();
+      await onImported?.(id, willStage ? importedSelector : null);
+    } catch (error) { status.textContent = error.message; status.classList.add('error'); confirm.disabled = false; }
+  });
+}
+
+// --- Clippy intelligence workspace ---
+const CLIPPY_SEVERITIES = ['critical', 'high', 'medium', 'low', 'info', 'unknown'];
+let activeClippyView = null;
+
+function openClippy() {
+  if (!state.openTabs.some(tab => tab.id === 'clippy')) state.openTabs.push({ id: 'clippy', kind: 'clippy', label: 'Clippy' });
+  setCurrentTab('clippy');
+}
+
+function disposeClippyPane() {
+  if (!activeClippyView) return;
+  activeClippyView.disposed = true;
+  activeClippyView.controllers.forEach(controller => controller.abort());
+  clearTimeout(activeClippyView.searchTimer);
+  clearTimeout(activeClippyView.indexTimer);
+  const composer = activeClippyView.wrap.querySelector?.('[data-clippy-chat] textarea');
+  const record = state.transcripts?.get('clippy-chat');
+  if (record && composer) record.composerDraft = composer.value;
+  activeClippyView = null;
+}
+
+function clippyViewAlive(view) {
+  return !view.disposed && activeClippyView === view && view.wrap.isConnected;
+}
+
+async function clippyRead(view, endpoint, key = 'list') {
+  view.controllers.get(key)?.abort();
+  const controller = new AbortController();
+  view.controllers.set(key, controller);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 45000);
+  try {
+    const response = await fetch(`/api/clippy${endpoint}`, { signal: controller.signal });
+    const result = await response.json();
+    if (!clippyViewAlive(view) || view.controllers.get(key) !== controller) throw Object.assign(new Error('View changed'), { name: 'AbortError' });
+    if (!response.ok || result.ok === false) throw new Error(result.error || `Clippy request failed (${response.status})`);
+    return result;
+  } catch (error) {
+    if (error.name === 'AbortError' && timedOut && clippyViewAlive(view) && view.controllers.get(key) === controller) throw new Error('Clippy took too long to respond. Try again.');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    if (view.controllers.get(key) === controller) view.controllers.delete(key);
+  }
+}
+
+function clippyCollection(result, key) {
+  const rows = result?.[key] || result?.items || result?.results || (Array.isArray(result) ? result : []);
+  return Array.isArray(rows) ? rows : [];
+}
+
+function clippySeverity(value) {
+  const severity = String(value || 'unknown').toLowerCase();
+  return severity === 'informational' ? 'info' : CLIPPY_SEVERITIES.includes(severity) ? severity : 'unknown';
+}
+
+function clippyFindingSeverityMarkup(finding) {
+  if (finding.metadataPending) return '<span class="clippy-severity-badge pending" title="Severity is available when this finding’s metadata loads">Loading metadata</span>';
+  const severity = clippySeverity(finding.severity);
+  return `<span class="clippy-severity-badge ${severity}">${severity === 'unknown' ? 'Unspecified' : severity}</span>`;
+}
+
+function clippyFindingCountScope(result) {
+  if (!['indexed_findings', 'parsed_indexed_findings'].includes(result.countsScope)) return result.partial || result.countsScope === 'loaded_matches' ? 'Loaded matches' : 'Findings';
+  const pending = Number(result.metadataPending ?? result.index?.metadataPending ?? 0);
+  if (!pending) return 'Indexed findings';
+  const parsed = Number(result.metadataLoaded ?? result.index?.metadataLoaded ?? 0);
+  const total = Number(result.totalUnfiltered ?? result.index?.findings ?? parsed + pending);
+  return `Indexed findings · ${parsed.toLocaleString()}/${total.toLocaleString()} parsed · ${pending.toLocaleString()} pending`;
+}
+
+function clippyRepoId(repo) {
+  return typeof repo === 'string' ? repo : String(repo?.id || repo?.name || repo?.repo || '');
+}
+
+function clippyEmpty(title, copy, action = '') {
+  return `<div class="clippy-empty"><span class="clippy-empty-mark" aria-hidden="true">⌁</span><strong>${escapeHtml(title)}</strong><p>${escapeHtml(copy)}</p>${action}</div>`;
+}
+
+function clippyError(target, error, retry) {
+  target.innerHTML = clippyEmpty('Clippy could not load this', error.message, '<button type="button" data-clippy-retry>Try again</button>');
+  target.querySelector('[data-clippy-retry]')?.addEventListener('click', retry);
+}
+
+let clippyAgentConsent = null;
+
+async function offerClippyAgent(status = null) {
+  const availability = status || await packageApi('GET', '/api/clippy/status');
+  if (availability.agentAvailable === true) return availability;
+  if (clippyAgentConsent) return clippyAgentConsent;
+  clippyAgentConsent = (async () => {
+    const exists = availability.agentExists === true;
+    const approved = await confirmAction({
+      title: exists ? 'Enable Clippy Agent?' : 'Create Clippy Agent?',
+      message: exists
+        ? 'Enable your saved Clippy Agent to query findings and help choose engagement starting points. Your instructions and settings will be preserved. It uses read-only Clippy tools. The connector and intelligence dashboard work without the agent.'
+        : 'Add an optional Clippy Agent to query findings and help choose engagement starting points using read-only Clippy tools. You can edit it in Tools → Agents. The connector and intelligence dashboard work without the agent.',
+      confirmLabel: exists ? 'Enable agent' : 'Create agent',
+      cancelLabel: 'Not now',
+    });
+    if (!approved) return null;
+    await packageApi('POST', '/api/clippy/agent/start', { createAgent: true });
+    return { ...availability, agentExists: true, agentAvailable: true };
+  })().finally(() => { clippyAgentConsent = null; });
+  return clippyAgentConsent;
+}
+
+function renderClippyAgentPlaceholder(view, availability) {
+  const exists = availability.agentExists === true;
+  const target = view.wrap.querySelector('[data-clippy-chat]');
+  target.innerHTML = clippyEmpty(exists ? 'Clippy Agent is disabled' : 'Add Clippy Agent when you need it', 'Browse findings and engagement repos now, or add an optional agent to query this intelligence. Agent setup is a separate choice from connecting Clippy.', `<button type="button" class="safe" data-clippy-create-agent>${exists ? 'Enable Clippy Agent' : 'Create Clippy Agent'}</button>`);
+  wireClippyAgentButton(target.querySelector('[data-clippy-create-agent]'));
+}
+
+async function openClippyAgentChat(prompt = '', { askForAgent = true } = {}) {
+  const view = activeClippyView;
+  if (!view || !clippyViewAlive(view)) return;
+  const dashboard = state.clippyDashboard;
+  dashboard.chatOpen = true;
+  view.wrap.classList.add('clippy-chat-open');
+  const panel = view.wrap.querySelector('[data-clippy-chat-panel]');
+  panel.hidden = false;
+  view.wrap.querySelector('[data-clippy-agent]')?.setAttribute('aria-expanded', 'true');
+  const target = view.wrap.querySelector('[data-clippy-chat]');
+  let availability = askForAgent || typeof view.status?.agentAvailable !== 'boolean'
+    ? await packageApi('GET', '/api/clippy/status')
+    : view.status;
+  if (!clippyViewAlive(view)) return;
+  if (availability.agentAvailable !== true) {
+    renderClippyAgentPlaceholder(view, availability);
+    if (!askForAgent) return;
+    availability = await offerClippyAgent(availability);
+    if (!availability || !clippyViewAlive(view)) return;
+  }
+  view.status = { ...view.status, ...availability };
+  const editButton = view.wrap.querySelector('[data-clippy-edit-agent]');
+  if (editButton) editButton.hidden = !availability.agentExists;
+  if (!target.querySelector('.chat-pane')) {
+    if (!view.chatOpening) view.chatOpening = (async () => {
+      target.innerHTML = clippyEmpty('Opening Clippy Agent', 'Your conversation stays alongside the intelligence.');
+      const result = await packageApi('POST', '/api/clippy/chat-session', {});
+      if (!clippyViewAlive(view)) return;
+      if (!result.sessionId || !result.agentId) throw new Error('Clippy did not return a conversation.');
+      dashboard.chatSession = result;
+      target.innerHTML = '';
+      const chat = renderAgentChatSurface(result.agentId, 'clippy-chat', false, { container: target, sessionId: result.sessionId, viewTabId: 'clippy', label: 'Clippy Agent', hideToolbar: true });
+      chat.classList.add('clippy-agent-chat');
+      const record = state.transcripts.get('clippy-chat');
+      if (!record.events.length) chat.querySelector('.transcript').innerHTML = '<div class="clippy-chat-welcome"><span>✦</span><h2>Where should we start?</h2><p>Ask about critical findings, domains, engagement history, or gaps in reporting.</p></div>';
+    })().finally(() => { view.chatOpening = null; });
+    await view.chatOpening;
+  }
+  if (!clippyViewAlive(view)) return;
+  if (prompt) {
+    const composer = target.querySelector('[data-chat-composer] textarea');
+    if (composer && !composer.value.trim()) {
+      composer.value = prompt;
+      composer.dispatchEvent(new Event('input', { bubbles: true }));
+      composer.focus();
+    } else if (composer) showToast('Your unsent question is preserved. Send or clear it before asking about another item.', { kind: 'info', label: 'Clippy Agent' });
+  }
+}
+
+async function editClippyAgent() {
+  if (!await confirmAgentPackageDiscard()) return;
+  const status = await packageApi('GET', '/api/clippy/status');
+  if (!status.agentExists && !await offerClippyAgent(status)) return;
+  const packageId = 'clippy-intel';
+  state.agentLibrary.view = 'collection';
+  openAgentsLibrary();
+  const wrap = paneEl.querySelector('.agent-library-pane');
+  if (wrap) await selectAgentPackage(packageId, wrap);
+}
+
+function wireClippyAgentButton(button, prompt = '') {
+  button?.addEventListener('click', async () => {
+    if (button.disabled) return;
+    button.disabled = true;
+    const label = button.textContent;
+    button.textContent = 'Opening Clippy…';
+    try { await openClippyAgentChat(typeof prompt === 'function' ? prompt() : prompt); }
+    catch (error) { showToast(error.message, { kind: 'warning', label: 'Clippy Agent' }); }
+    finally { if (button.isConnected) { button.disabled = false; button.textContent = label; } }
+  });
+}
+
+async function renderClippyPane() {
+  const wrap = document.createElement('div');
+  wrap.className = 'clippy-pane';
+  const dashboard = state.clippyDashboard;
+  const view = { wrap, controllers: new Map(), disposed: false, selectedFinding: null, selectedRepo: null, selectedFile: null };
+  activeClippyView = view;
+  wrap.innerHTML = `<header class="clippy-page-heading"><div class="clippy-brand"><span class="clippy-logo" aria-hidden="true">C</span><div><span class="collection-eyebrow">Intelligence</span><h1>Clippy</h1></div><span class="clippy-server-status" data-clippy-status role="status">Checking connection…</span></div><div class="clippy-heading-actions"><button type="button" data-clippy-refresh>↻ Refresh</button><button type="button" class="clippy-chat-button" data-clippy-agent aria-expanded="false" disabled>✦ Clippy Agent</button></div></header><div class="clippy-index-status" data-clippy-index-status role="status"><span>Checking intelligence index…</span></div><div class="clippy-main-layout"><section class="clippy-intelligence"><nav class="clippy-view-tabs" aria-label="Clippy views"><button type="button" data-clippy-view="opportunities" aria-selected="${dashboard.view === 'opportunities'}">Where to start</button><button type="button" data-clippy-view="findings" aria-selected="${dashboard.view === 'findings'}">Security findings</button><button type="button" data-clippy-view="repos" aria-selected="${dashboard.view === 'repos'}">Engagement repos</button></nav><div class="clippy-workspace" data-clippy-workspace>${clippyEmpty('Connecting to Clippy', 'Loading your intelligence workspace…')}</div></section><aside class="clippy-chat-panel" data-clippy-chat-panel aria-label="Clippy Agent conversation" hidden><header><div><strong>✦ Clippy Agent</strong><small>Intelligence & engagement planning</small></div><button type="button" class="text-action" data-clippy-edit-agent hidden>Edit agent</button><button type="button" class="text-action" data-clippy-close-chat aria-label="Hide Clippy Agent">×</button></header><div data-clippy-chat></div></aside></div>`;
+  paneEl.appendChild(wrap);
+  const agentButton = wrap.querySelector('[data-clippy-agent]');
+  wireClippyAgentButton(agentButton);
+  wrap.querySelector('[data-clippy-close-chat]').addEventListener('click', () => {
+    dashboard.chatOpen = false;
+    wrap.classList.remove('clippy-chat-open');
+    wrap.querySelector('[data-clippy-chat-panel]').hidden = true;
+    agentButton.setAttribute('aria-expanded', 'false');
+  });
+  wrap.querySelector('[data-clippy-edit-agent]').addEventListener('click', () => editClippyAgent().catch(error => showToast(error.message, { kind: 'warning', label: 'Agents' })));
+  const load = async () => {
+    const target = wrap.querySelector('[data-clippy-workspace]');
+    const indicator = wrap.querySelector('[data-clippy-status]');
+    try {
+      const status = await clippyRead(view, '/status', 'status');
+      view.status = status;
+      const connected = status.connected === true || (status.configured === true && status.enabled !== false);
+      indicator.textContent = connected ? 'Connected' : 'Not connected';
+      indicator.classList.toggle('connected', connected);
+      agentButton.disabled = !connected;
+      if (!connected) {
+        target.innerHTML = clippyEmpty('Connect Clippy to get started', status.message || 'Browse security findings and engagement repositories, then ask Clippy Agent about what you find.', '<button type="button" class="safe" data-clippy-connect>Connect Clippy</button>');
+        target.querySelector('[data-clippy-connect]').addEventListener('click', () => openSmartConnectLibrary(async () => { if (clippyViewAlive(view)) await load(); }, { connect: true }));
+        return;
+      }
+      renderClippyWorkspace(view);
+      refreshClippyIndex(view);
+      wrap.querySelector('[data-clippy-edit-agent]').hidden = status.agentExists !== true;
+      if (dashboard.chatOpen) openClippyAgentChat('', { askForAgent: false }).catch(error => clippyError(wrap.querySelector('[data-clippy-chat]'), error, () => openClippyAgentChat()));
+    } catch (error) {
+      if (!clippyViewAlive(view) || error.name === 'AbortError') return;
+      indicator.textContent = 'Connection unavailable';
+      clippyError(target, error, load);
+    }
+  };
+  wrap.querySelector('[data-clippy-refresh]').addEventListener('click', load);
+  wrap.querySelectorAll('[data-clippy-view]').forEach(button => button.addEventListener('click', () => {
+    dashboard.view = button.dataset.clippyView;
+    wrap.querySelectorAll('[data-clippy-view]').forEach(tab => tab.setAttribute('aria-selected', String(tab === button)));
+    if (view.status?.connected || (view.status?.configured && view.status?.enabled !== false)) renderClippyWorkspace(view);
+  }));
+  await load();
+}
+
+function renderClippyWorkspace(view) {
+  for (const [key, controller] of view.controllers) if (!['status', 'index'].includes(key)) { controller.abort(); view.controllers.delete(key); }
+  clearTimeout(view.searchTimer);
+  view.selectedFinding = view.selectedRepo = view.selectedFile = null;
+  if (state.clippyDashboard.view === 'opportunities') renderClippyOpportunities(view);
+  else if (state.clippyDashboard.view === 'repos') renderClippyRepos(view);
+  else renderClippyFindings(view);
+}
+
+function clippyIndexSummary(index = {}) {
+  const count = Number(index.findings ?? index.findingCount ?? 0).toLocaleString();
+  const loaded = Number(index.metadataLoaded ?? 0).toLocaleString();
+  const pending = Number(index.metadataPending ?? 0).toLocaleString();
+  if (index.state === 'running' || index.running) return `Indexing intelligence · ${count} findings · ${loaded} parsed · ${pending} pending`;
+  if (index.complete) return `${count} indexed findings · discovery complete`;
+  return `${count} indexed findings · ${loaded} parsed · ${pending} pending · discovery incomplete`;
+}
+
+async function refreshClippyIndex(view) {
+  clearTimeout(view.indexTimer);
+  if (!clippyViewAlive(view)) return;
+  const target = view.wrap.querySelector('[data-clippy-index-status]');
+  try {
+    const response = await clippyRead(view, '/index', 'index');
+    const index = response.index || response;
+    const running = index.state === 'running' || index.running;
+    const previous = view.index;
+    view.index = index;
+    target.innerHTML = `<div><span class="clippy-index-dot${running ? ' running' : ''}"></span><strong>${escapeHtml(clippyIndexSummary(index))}</strong><small>${escapeHtml(index.note || 'The local index discovers findings across engagement repos and pages through the combined results.')} Each indexing batch runs up to 100 lookups or two minutes. Continue indexing to load the remaining metadata.</small></div><button type="button" data-clippy-sync>${running ? 'Pause indexing' : index.complete ? 'Refresh index' : Number(index.findings || 0) > 0 ? 'Continue indexing' : 'Index intelligence'}</button>`;
+    target.querySelector('[data-clippy-sync]').addEventListener('click', async event => {
+      event.currentTarget.disabled = true;
+      try {
+        await packageApi('POST', running ? '/api/clippy/index/cancel' : '/api/clippy/index/sync', running ? {} : { maxCalls: 100, ...(index.complete ? { reset: true } : {}) });
+        await refreshClippyIndex(view);
+      } catch (error) { showToast(error.message, { kind: 'warning', label: 'Clippy index' }); event.currentTarget.disabled = false; }
+    });
+    if (previous && JSON.stringify(previous) !== JSON.stringify(index)) {
+      if (state.clippyDashboard.view === 'opportunities') loadClippyOpportunities(view);
+      if (state.clippyDashboard.view === 'findings') loadClippyFindings(view);
+    }
+    if (running) view.indexTimer = setTimeout(() => refreshClippyIndex(view), 2500);
+  } catch (error) {
+    if (clippyViewAlive(view) && error.name !== 'AbortError') target.textContent = `Index status unavailable: ${error.message}`;
+  }
+}
+
+function clippyOpportunityPrompt(item) {
+  const counts = item.counts || {};
+  return `Help me decide whether to start an authorized assessment at ${item.domain}. Review the Clippy evidence and the cached Dradis project/report coverage, then explain the strongest starting point, the evidence gaps, and the next scoped verification steps. Do not launch an assessment.\n\nDomain: ${item.domain}\nFindings: ${Number(counts.critical || 0)} critical, ${Number(counts.high || 0)} high\nEngagement repos: ${(item.repos || [item.repo]).filter(Boolean).join(', ')}\nReport coverage: ${item.reportCoverage?.label || 'Not checked'}. Cached feed absence does not establish that no live Dradis report exists.`;
+}
+
+function clippyCoverageMarkup(coverage = {}) {
+  const status = coverage.status || 'unknown';
+  const label = coverage.label || (status === 'indexed_report_found' ? 'Report evidence indexed' : 'Report coverage not checked');
+  const checked = coverage.checkedAt ? new Date(coverage.checkedAt).toLocaleString() : '';
+  const age = coverage.cacheAgeSeconds == null ? '' : `Feed age ${Math.round(Number(coverage.cacheAgeSeconds) / 60)} min`;
+  const projects = (coverage.projects || []).slice(0, 5).map(project => {
+    const title = [project.name || 'Dradis project', project.status].filter(Boolean).join(' · ');
+    return /^https?:\/\/[^\s]+$/i.test(String(project.url || '')) ? `<a href="${escapeHtml(project.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(title)} ↗</a>` : `<span>${escapeHtml(title)}</span>`;
+  }).join('');
+  const evidence = (coverage.evidence || []).slice(0, 5).map(item => `<span>${escapeHtml([item.repo, item.path].filter(Boolean).join(' / '))}</span>`).join('');
+  return `<span class="clippy-coverage-badge ${['reported', 'indexed_report_found'].includes(status) ? 'reported' : 'unknown'}">${escapeHtml(label)}</span>${checked || age ? `<small>${escapeHtml([checked && `Checked ${checked}`, age].filter(Boolean).join(' · '))}</small>` : ''}${projects || evidence ? `<div class="clippy-coverage-evidence">${projects}${evidence}</div>` : ''}`;
+}
+
+function renderClippyOpportunities(view) {
+  const dashboard = state.clippyDashboard;
+  const target = view.wrap.querySelector('[data-clippy-workspace]');
+  target.innerHTML = `<div class="clippy-opportunities-heading"><div><span class="collection-eyebrow">Choose the next engagement</span><h2>Turn intelligence into a starting point.</h2><p>Prioritize domains with serious findings and check what has already been reported.</p></div><button type="button" data-clippy-ask-priorities>✦ Ask Clippy to prioritize</button></div><div class="clippy-search-row"><label class="clippy-search"><span class="sr-only">Search domains and repos</span><input type="search" data-clippy-opportunity-search placeholder="Find a domain or engagement repo…" value="${escapeHtml(dashboard.opportunityQuery || '')}" /></label><label><span class="sr-only">Minimum finding severity</span><select data-clippy-opportunity-severity><option value="">All severities</option>${CLIPPY_SEVERITIES.filter(value => value !== 'unknown').map(value => `<option value="${value}"${dashboard.opportunitySeverity === value ? ' selected' : ''}>${value[0].toUpperCase() + value.slice(1)} findings</option>`).join('')}</select></label><label><span class="sr-only">Report coverage</span><select data-clippy-opportunity-coverage><option value="missing"${dashboard.coverage === 'missing' ? ' selected' : ''}>No delivered report found</option><option value="found"${dashboard.coverage === 'found' ? ' selected' : ''}>Delivered report found</option><option value="all"${dashboard.coverage === 'all' ? ' selected' : ''}>All report coverage</option></select></label></div><p class="clippy-data-note">Report coverage comes from Clippy’s cached Dradis feed and indexed evidence. Unchecked or missing matches require verification before concluding a report does not exist.</p><div class="clippy-opportunity-summary" data-clippy-opportunity-total role="status">Loading domains…</div><div class="clippy-opportunity-list" data-clippy-opportunities></div><div class="clippy-pagination" data-clippy-opportunity-pagination></div>`;
+  wireClippyAgentButton(target.querySelector('[data-clippy-ask-priorities]'), 'Use the indexed Clippy intelligence to recommend the strongest domains to assess next. Prioritize critical findings, group related engagement repos, and check cached Dradis report coverage. Cite the evidence and label unknown or stale coverage. Do not launch an assessment.');
+  target.querySelector('[data-clippy-opportunity-search]').addEventListener('input', event => {
+    dashboard.opportunityQuery = event.target.value;
+    dashboard.opportunityOffset = 0;
+    clearTimeout(view.searchTimer);
+    view.searchTimer = setTimeout(() => loadClippyOpportunities(view), 280);
+  });
+  for (const [selector, key] of [['[data-clippy-opportunity-severity]', 'opportunitySeverity'], ['[data-clippy-opportunity-coverage]', 'coverage']]) target.querySelector(selector).addEventListener('change', event => {
+    dashboard[key] = event.target.value;
+    dashboard.opportunityOffset = 0;
+    loadClippyOpportunities(view);
+  });
+  loadClippyOpportunities(view);
+}
+
+async function loadClippyOpportunities(view) {
+  if (!clippyViewAlive(view)) return;
+  const target = view.wrap.querySelector('[data-clippy-opportunities]');
+  if (!target) return;
+  const dashboard = state.clippyDashboard;
+  const query = new URLSearchParams({ q: dashboard.opportunityQuery || '', severity: dashboard.opportunitySeverity || '', reportCoverage: dashboard.coverage || 'missing', offset: String(dashboard.opportunityOffset || 0), limit: '25' });
+  try {
+    const result = await clippyRead(view, `/opportunities?${query}`, 'opportunities');
+    if (!clippyViewAlive(view) || !target.isConnected) return;
+    const opportunities = clippyCollection(result, 'opportunities');
+    view.opportunities = opportunities;
+    view.wrap.querySelector('[data-clippy-opportunity-total]').textContent = `${Number(result.total ?? opportunities.length).toLocaleString()} domains in indexed intelligence${result.index?.complete ? '' : ' · index still incomplete'}`;
+    target.innerHTML = opportunities.length ? opportunities.map((item, i) => {
+      const counts = item.counts || {};
+      const repos = item.repos || [item.repo].filter(Boolean);
+      return `<article class="clippy-opportunity-card"><div class="clippy-opportunity-title"><div><h3>${escapeHtml(item.domain)}</h3><p>${escapeHtml(repos.join(' · '))}</p></div><div class="clippy-opportunity-counts">${CLIPPY_SEVERITIES.filter(severity => counts[severity]).map(severity => `<span class="clippy-severity-badge ${severity}">${Number(counts[severity]).toLocaleString()} ${severity}</span>`).join('')}</div></div><div class="clippy-opportunity-coverage" data-clippy-coverage-row="${i}">${clippyCoverageMarkup(item.reportCoverage)}</div>${(item.findings || []).length ? `<ul class="clippy-opportunity-evidence">${item.findings.slice(0, 3).map(finding => `<li><span class="clippy-severity-badge ${clippySeverity(finding.severity)}">${escapeHtml(clippySeverity(finding.severity))}</span><span>${escapeHtml(finding.title || finding.id || finding.path)}</span></li>`).join('')}</ul>` : ''}<footer><button type="button" data-clippy-coverage-check="${i}">Check report coverage</button><button type="button" data-clippy-domain-findings="${i}">View findings</button><button type="button" class="clippy-chat-button" data-clippy-start-here="${i}">✦ Start here with Clippy</button></footer></article>`;
+    }).join('') : clippyEmpty('No matching domains yet', 'Only findings with explicit domain or target metadata are grouped here. Other intelligence remains in Security findings. Index more intelligence or adjust your filters to find starting points.', '<button type="button" data-clippy-browse-findings>Browse security findings</button>');
+    target.querySelector('[data-clippy-browse-findings]')?.addEventListener('click', () => {
+      dashboard.view = 'findings';
+      view.wrap.querySelectorAll('[data-clippy-view]').forEach(tab => tab.setAttribute('aria-selected', String(tab.dataset.clippyView === 'findings')));
+      renderClippyWorkspace(view);
+    });
+    target.querySelectorAll('[data-clippy-start-here]').forEach(button => wireClippyAgentButton(button, () => clippyOpportunityPrompt(opportunities[Number(button.dataset.clippyStartHere)])));
+    target.querySelectorAll('[data-clippy-domain-findings]').forEach(button => button.addEventListener('click', () => {
+      const item = opportunities[Number(button.dataset.clippyDomainFindings)];
+      Object.assign(dashboard, { view: 'findings', query: item.domain, severity: '', repo: '', category: '', offset: 0 });
+      view.wrap.querySelectorAll('[data-clippy-view]').forEach(tab => tab.setAttribute('aria-selected', String(tab.dataset.clippyView === 'findings')));
+      renderClippyWorkspace(view);
+    }));
+    target.querySelectorAll('[data-clippy-coverage-check]').forEach(button => button.addEventListener('click', async () => {
+      const i = Number(button.dataset.clippyCoverageCheck);
+      button.disabled = true;
+      button.textContent = 'Checking…';
+      try {
+        const checked = await packageApi('POST', '/api/clippy/opportunities/coverage', { domain: opportunities[i].domain });
+        if (!clippyViewAlive(view) || !button.isConnected) return;
+        opportunities[i].reportCoverage = checked.reportCoverage;
+        target.querySelector(`[data-clippy-coverage-row="${i}"]`).innerHTML = `${clippyCoverageMarkup(checked.reportCoverage)}${checked.reportCoverage?.note ? `<small>${escapeHtml(checked.reportCoverage.note)}</small>` : ''}`;
+      } catch (error) { showToast(error.message, { kind: 'warning', label: 'Report coverage' }); }
+      finally { button.disabled = false; button.textContent = 'Check report coverage'; }
+    }));
+    const pagination = view.wrap.querySelector('[data-clippy-opportunity-pagination]');
+    pagination.innerHTML = dashboard.opportunityOffset || result.hasMore ? `<button type="button" data-clippy-opportunity-prev${dashboard.opportunityOffset ? '' : ' disabled'}>← Previous</button><span>Page ${Math.floor((dashboard.opportunityOffset || 0) / 25) + 1}</span><button type="button" data-clippy-opportunity-next${result.hasMore ? '' : ' disabled'}>Next →</button>` : '';
+    pagination.querySelector('[data-clippy-opportunity-prev]')?.addEventListener('click', () => { dashboard.opportunityOffset = Math.max(0, dashboard.opportunityOffset - 25); loadClippyOpportunities(view); });
+    pagination.querySelector('[data-clippy-opportunity-next]')?.addEventListener('click', () => { dashboard.opportunityOffset = Number(result.nextOffset ?? (dashboard.opportunityOffset || 0) + 25); loadClippyOpportunities(view); });
+  } catch (error) { if (clippyViewAlive(view) && target.isConnected && error.name !== 'AbortError') clippyError(target, error, () => loadClippyOpportunities(view)); }
+}
+
+function renderClippyFindings(view) {
+  const dashboard = state.clippyDashboard;
+  const target = view.wrap.querySelector('[data-clippy-workspace]');
+  target.innerHTML = `<div class="clippy-findings-toolbar"><div class="clippy-severity-filters" role="group" aria-label="Filter by severity"><button type="button" class="clippy-severity-chip all" data-clippy-severity="" aria-pressed="${!dashboard.severity}">All <span data-clippy-count="all">—</span></button>${CLIPPY_SEVERITIES.map(severity => `<button type="button" class="clippy-severity-chip ${severity}" data-clippy-severity="${severity}" aria-pressed="${dashboard.severity === severity}">${severity === 'unknown' ? 'Unspecified' : severity}<span data-clippy-count="${severity}">—</span></button>`).join('')}</div><button type="button" class="text-action" data-clippy-clear>Clear filters</button></div><div class="clippy-search-row"><label class="clippy-search"><span class="sr-only">Search findings</span><input type="search" data-clippy-search placeholder="Search title, target, repo, ID…" value="${escapeHtml(dashboard.query)}" /></label><label><span class="sr-only">Filter findings by repository</span><select data-clippy-repo><option value="">All engagement repos</option>${dashboard.repo ? `<option value="${escapeHtml(dashboard.repo)}" selected>${escapeHtml(dashboard.repo)}</option>` : ''}</select></label><label><span class="sr-only">Filter findings by category</span><select data-clippy-category><option value="">All categories</option>${dashboard.category ? `<option value="${escapeHtml(dashboard.category)}" selected>${escapeHtml(dashboard.category)}</option>` : ''}</select></label></div><div class="clippy-data-note" data-clippy-note role="status" hidden></div><div class="clippy-findings-layout"><section class="clippy-results-panel" aria-label="Security findings"><div class="clippy-panel-heading"><strong data-clippy-count-scope>Findings</strong><span data-clippy-total>Loading…</span></div><div class="clippy-findings-list" data-clippy-findings role="list"></div><div class="clippy-pagination" data-clippy-pagination></div></section><section class="clippy-finding-detail" data-clippy-detail aria-label="Finding details">${clippyEmpty('Select a finding', 'Details, evidence, and remediation appear here.')}</section></div>`;
+  const search = target.querySelector('[data-clippy-search]');
+  search.addEventListener('input', () => {
+    dashboard.query = search.value;
+    dashboard.offset = 0;
+    clearTimeout(view.searchTimer);
+    view.controllers.get('findings')?.abort();
+    view.searchTimer = setTimeout(() => loadClippyFindings(view), 280);
+  });
+  target.querySelectorAll('[data-clippy-severity]').forEach(button => button.addEventListener('click', () => {
+    dashboard.severity = button.dataset.clippySeverity;
+    dashboard.offset = 0;
+    target.querySelectorAll('[data-clippy-severity]').forEach(chip => chip.setAttribute('aria-pressed', String(chip === button)));
+    loadClippyFindings(view);
+  }));
+  for (const [selector, key] of [['[data-clippy-repo]', 'repo'], ['[data-clippy-category]', 'category']]) target.querySelector(selector).addEventListener('change', event => {
+    dashboard[key] = event.target.value;
+    dashboard.offset = 0;
+    loadClippyFindings(view);
+  });
+  target.querySelector('[data-clippy-clear]').addEventListener('click', () => {
+    Object.assign(dashboard, { query: '', severity: '', repo: '', category: '', offset: 0 });
+    renderClippyWorkspace(view);
+  });
+  loadClippyFindings(view);
+  loadClippyRepoOptions(view);
+}
+
+async function loadClippyRepoOptions(view) {
+  const dashboard = state.clippyDashboard;
+  const select = view.wrap.querySelector('[data-clippy-repo]');
+  try {
+    if (!dashboard.repoOptions || Date.now() - dashboard.repoOptionsAt > 300000) {
+      const result = await clippyRead(view, '/repos', 'repo-options');
+      if (!clippyViewAlive(view) || !select.isConnected) return;
+      dashboard.repoOptions = clippyCollection(result, 'repos');
+      dashboard.repoOptionsAt = Date.now();
+    }
+    if (select.isConnected) updateClippyFilterOptions(select, dashboard.repoOptions, dashboard.repo, 'All engagement repos');
+  } catch {}
+}
+
+function updateClippyFilterOptions(select, rows, selected, label) {
+  const choices = new Map();
+  for (const row of rows) {
+    const value = typeof row === 'string' ? row : String(row.id || row.name || row.repo || '');
+    if (value) choices.set(value, typeof row === 'string' ? row : row.name || value);
+  }
+  if (selected && !choices.has(selected)) choices.set(selected, selected);
+  select.innerHTML = `<option value="">${label}</option>${[...choices].map(([value, name]) => `<option value="${escapeHtml(value)}"${selected === value ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('')}`;
+}
+
+async function loadClippyFindings(view) {
+  if (!clippyViewAlive(view)) return;
+  const target = view.wrap.querySelector('[data-clippy-findings]');
+  if (!target) return;
+  const dashboard = state.clippyDashboard;
+  const query = new URLSearchParams({ q: dashboard.query, severity: dashboard.severity, repo: dashboard.repo, category: dashboard.category, offset: String(dashboard.offset), limit: '25' });
+  target.setAttribute('aria-busy', 'true');
+  target.innerHTML = '<p class="clippy-list-message">Loading findings…</p>';
+  view.wrap.querySelector('[data-clippy-total]').textContent = 'Loading…';
+  view.wrap.querySelector('[data-clippy-pagination]').innerHTML = '';
+  try {
+    const result = await clippyRead(view, `/findings?${query}`, 'findings');
+    if (!clippyViewAlive(view) || !target.isConnected) return;
+    const findings = clippyCollection(result, 'findings');
+    view.findings = findings;
+    const total = Number(result.total ?? findings.length);
+    view.wrap.querySelector('[data-clippy-total]').textContent = `${total.toLocaleString()}${result.partial ? total === 1 ? ' match' : ' matches' : ''}`;
+    view.wrap.querySelector('[data-clippy-count-scope]').textContent = clippyFindingCountScope(result);
+    const counts = result.counts || result.severityCounts || {};
+    const allCount = result.totalUnfiltered ?? result.unfilteredTotal ?? (Object.keys(counts).length ? Object.values(counts).reduce((sum, count) => sum + (Number(count) || 0), 0) : total);
+    view.wrap.querySelector('[data-clippy-count="all"]').textContent = Number(allCount).toLocaleString();
+    for (const severity of CLIPPY_SEVERITIES) view.wrap.querySelector(`[data-clippy-count="${severity}"]`).textContent = counts[severity] == null ? '—' : Number(counts[severity]).toLocaleString();
+    const note = view.wrap.querySelector('[data-clippy-note]');
+    const pendingMetadata = Number(result.metadataPending ?? result.index?.metadataPending ?? 0);
+    note.hidden = !result.note && !result.partial && !pendingMetadata;
+    note.textContent = [result.note || (result.partial ? 'Showing indexed matches available through Clippy. Counts reflect this result set.' : ''), pendingMetadata ? 'Severity counts include parsed findings only. Findings still loading metadata remain available under All.' : ''].filter(Boolean).join(' ');
+    updateClippyFilterOptions(view.wrap.querySelector('[data-clippy-repo]'), dashboard.repoOptions || result.repos || findings.map(item => item.repo).filter(Boolean), dashboard.repo, 'All engagement repos');
+    updateClippyFilterOptions(view.wrap.querySelector('[data-clippy-category]'), result.categories || findings.map(item => item.category).filter(Boolean), dashboard.category, 'All categories');
+    target.innerHTML = findings.length ? findings.map((finding, index) => `<button type="button" class="clippy-finding-row${view.selectedFinding === String(finding.id) ? ' selected' : ''}" data-clippy-finding="${index}" role="listitem"><div class="clippy-finding-row-top"><strong>${escapeHtml(finding.title || finding.name || finding.id || 'Untitled finding')}</strong>${clippyFindingSeverityMarkup(finding)}</div><p>${escapeHtml([finding.repo, finding.category].filter(Boolean).join(' · ') || finding.path || '')}</p>${finding.target ? `<small>${escapeHtml(finding.target)}</small>` : ''}</button>`).join('') : clippyEmpty('No matching findings', result.hasMore ? 'No matches on this indexed page. Try the next page or adjust your filters.' : 'Try another search or clear your filters.');
+    target.querySelectorAll('[data-clippy-finding]').forEach(button => button.addEventListener('click', () => selectClippyFinding(view, findings[Number(button.dataset.clippyFinding)])));
+    const pagination = view.wrap.querySelector('[data-clippy-pagination]');
+    const hasMore = result.hasMore === true || (result.hasMore !== false && dashboard.offset + findings.length < total);
+    pagination.innerHTML = dashboard.offset || hasMore ? `<button type="button" data-clippy-prev${dashboard.offset ? '' : ' disabled'}>← Previous</button><span>Page ${Math.floor(dashboard.offset / 25) + 1} · ${findings.length} shown</span><button type="button" data-clippy-next${hasMore ? '' : ' disabled'}>Next →</button>` : '';
+    pagination.querySelector('[data-clippy-prev]')?.addEventListener('click', () => { dashboard.offset = Math.max(0, dashboard.offset - 25); loadClippyFindings(view); });
+    pagination.querySelector('[data-clippy-next]')?.addEventListener('click', () => { dashboard.offset = Number(result.nextOffset ?? dashboard.offset + 25); loadClippyFindings(view); });
+  } catch (error) {
+    if (clippyViewAlive(view) && target.isConnected && error.name !== 'AbortError') {
+      view.wrap.querySelector('[data-clippy-total]').textContent = 'Unavailable';
+      clippyError(target, error, () => loadClippyFindings(view));
+    }
+  } finally { if (target.isConnected) target.removeAttribute('aria-busy'); }
+}
+
+async function selectClippyFinding(view, finding) {
+  const id = String(finding.id || finding.path || '');
+  view.selectedFinding = id;
+  view.wrap.querySelectorAll('[data-clippy-finding]').forEach(button => button.classList.toggle('selected', view.findings[Number(button.dataset.clippyFinding)] === finding));
+  const detail = view.wrap.querySelector('[data-clippy-detail]');
+  detail.innerHTML = clippyEmpty('Loading finding', finding.title || finding.path || id);
+  try {
+    const result = await clippyRead(view, `/findings/${encodeURIComponent(id)}`, 'detail');
+    if (!clippyViewAlive(view) || !detail.isConnected || view.selectedFinding !== id) return;
+    const item = { ...finding, ...(result.finding || result), metadataPending: false };
+    const sections = ['description', 'summary', 'impact', 'evidence', 'remediation', 'recommendation'];
+    detail.innerHTML = `<div class="clippy-detail-heading"><div><span class="clippy-severity-badge ${clippySeverity(item.severity)}">${clippySeverity(item.severity) === 'unknown' ? 'Unspecified' : clippySeverity(item.severity)}</span><h2>${escapeHtml(item.title || item.name || 'Finding')}</h2><p>${escapeHtml([item.repo, item.category, item.target].filter(Boolean).join(' · '))}</p></div><button type="button" data-clippy-ask>✦ Ask Clippy</button></div><dl class="clippy-detail-meta">${[['Finding ID', item.id], ['Repository', item.repo], ['File', item.path], ['Status', item.status]].filter(([, value]) => value).map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl><div class="clippy-finding-body">${item.content ? renderMarkdown(item.content) : sections.filter(key => item[key]).map(key => `<section><h3>${key[0].toUpperCase() + key.slice(1)}</h3>${renderMarkdown(typeof item[key] === 'string' ? item[key] : JSON.stringify(item[key], null, 2))}</section>`).join('') || '<p class="field-note">No additional detail was returned for this finding.</p>'}</div>`;
+    enhanceMarkdownContent(detail);
+    wireClippyAgentButton(detail.querySelector('[data-clippy-ask]'), `Explain this Clippy finding, including its evidence, impact, and remediation.\n\nFinding: ${item.title || id}\nRepository: ${item.repo || ''}\nPath: ${item.path || ''}\nID: ${id}`);
+  } catch (error) { if (clippyViewAlive(view) && detail.isConnected && error.name !== 'AbortError') clippyError(detail, error, () => selectClippyFinding(view, finding)); }
+}
+
+function renderClippyRepos(view) {
+  const target = view.wrap.querySelector('[data-clippy-workspace]');
+  target.innerHTML = `<div class="clippy-repos-toolbar"><div><h2>Engagement repos</h2><span data-clippy-repos-total>Loading…</span></div><label class="clippy-search"><span class="sr-only">Filter repositories</span><input type="search" data-clippy-repo-search placeholder="Filter repos…" value="${escapeHtml(state.clippyDashboard.repoQuery)}" /></label></div><div class="clippy-repos-layout"><section class="clippy-repo-panel" aria-label="Engagement repositories"><div class="clippy-repo-list" data-clippy-repos></div></section><section class="clippy-files-panel" aria-label="Repository files"><div class="clippy-panel-heading"><strong>Files</strong><span data-clippy-files-total></span></div><div class="clippy-files-list" data-clippy-files>${clippyEmpty('Select a repo', 'Its indexed files will appear here.')}</div></section><section class="clippy-file-detail" data-clippy-file-detail aria-label="File preview">${clippyEmpty('Select a file', 'Preview engagement notes and assessment evidence.')}</section></div>`;
+  const input = target.querySelector('[data-clippy-repo-search]');
+  input.addEventListener('input', () => {
+    state.clippyDashboard.repoQuery = input.value;
+    clearTimeout(view.searchTimer);
+    view.controllers.get('repos')?.abort();
+    view.searchTimer = setTimeout(() => loadClippyRepos(view), 280);
+  });
+  loadClippyRepos(view);
+}
+
+async function loadClippyRepos(view) {
+  const target = view.wrap.querySelector('[data-clippy-repos]');
+  if (!target) return;
+  target.innerHTML = '<p class="clippy-list-message">Loading engagement repos…</p>';
+  try {
+    const result = await clippyRead(view, `/repos?${new URLSearchParams({ q: state.clippyDashboard.repoQuery })}`, 'repos');
+    if (!clippyViewAlive(view) || !target.isConnected) return;
+    const repos = clippyCollection(result, 'repos');
+    view.repos = repos;
+    view.wrap.querySelector('[data-clippy-repos-total]').textContent = `${Number(result.total ?? repos.length).toLocaleString()} repos`;
+    let visible = 200;
+    const draw = () => {
+      target.innerHTML = repos.length ? repos.slice(0, visible).map((repo, index) => `<button type="button" class="clippy-repo-row${view.selectedRepo === clippyRepoId(repo) ? ' selected' : ''}" data-clippy-repo-item="${index}"><span class="clippy-repo-icon" aria-hidden="true">▤</span><span><strong>${escapeHtml(repo.name || clippyRepoId(repo))}</strong><small>${repo.files != null || repo.fileCount != null ? `${Number(repo.files ?? repo.fileCount).toLocaleString()} files` : 'Engagement repository'}</small></span></button>`).join('') : clippyEmpty('No matching repos', 'Try another repository name.');
+      if (repos.length > visible) target.insertAdjacentHTML('beforeend', `<button type="button" class="clippy-load-more" data-clippy-more-repos>Show ${Math.min(200, repos.length - visible)} more repos</button>`);
+      target.querySelector('[data-clippy-more-repos]')?.addEventListener('click', () => { visible += 200; draw(); });
+      target.querySelectorAll('[data-clippy-repo-item]').forEach(button => button.addEventListener('click', () => selectClippyRepo(view, repos[Number(button.dataset.clippyRepoItem)])));
+    };
+    draw();
+  } catch (error) { if (clippyViewAlive(view) && target.isConnected && error.name !== 'AbortError') clippyError(target, error, () => loadClippyRepos(view)); }
+}
+
+async function selectClippyRepo(view, repo) {
+  const id = clippyRepoId(repo);
+  view.selectedRepo = id;
+  view.selectedFile = null;
+  view.controllers.get('file')?.abort();
+  view.controllers.delete('file');
+  view.wrap.querySelectorAll('[data-clippy-repo-item]').forEach(button => button.classList.toggle('selected', clippyRepoId(view.repos[Number(button.dataset.clippyRepoItem)]) === id));
+  const target = view.wrap.querySelector('[data-clippy-files]');
+  target.innerHTML = '<p class="clippy-list-message">Loading files…</p>';
+  view.wrap.querySelector('[data-clippy-files-total]').textContent = '';
+  view.wrap.querySelector('[data-clippy-file-detail]').innerHTML = clippyEmpty('Select a file', `Browsing ${id}`);
+  try {
+    const result = await clippyRead(view, `/repos/${encodeURIComponent(id)}/files`, 'files');
+    if (!clippyViewAlive(view) || !target.isConnected || view.selectedRepo !== id) return;
+    const files = clippyCollection(result, 'files');
+    view.files = files;
+    view.wrap.querySelector('[data-clippy-files-total]').textContent = `${files.length.toLocaleString()}${result.partial ? '+' : ''}`;
+    target.innerHTML = files.length ? `${result.partial ? '<p class="clippy-index-note">Showing the indexed file selection returned by Clippy.</p>' : ''}<label class="clippy-file-search"><span class="sr-only">Filter indexed files</span><input type="search" data-clippy-file-search placeholder="Find a file…" /></label><div data-clippy-file-rows>${files.map((file, index) => `<button type="button" class="clippy-file-row" data-clippy-file="${index}"><span aria-hidden="true">${file.is_text === false ? '▧' : '≡'}</span><span>${escapeHtml(file.path || file.name || String(file))}</span></button>`).join('')}</div>` : clippyEmpty('No indexed files', 'This repo has no files available through Clippy.');
+    target.querySelector('[data-clippy-file-search]')?.addEventListener('input', event => {
+      const query = event.target.value.toLowerCase();
+      target.querySelectorAll('[data-clippy-file]').forEach(button => { button.hidden = !String(files[Number(button.dataset.clippyFile)].path || files[Number(button.dataset.clippyFile)].name || '').toLowerCase().includes(query); });
+    });
+    target.querySelectorAll('[data-clippy-file]').forEach(button => button.addEventListener('click', () => selectClippyFile(view, files[Number(button.dataset.clippyFile)])));
+  } catch (error) { if (clippyViewAlive(view) && target.isConnected && error.name !== 'AbortError') clippyError(target, error, () => selectClippyRepo(view, repo)); }
+}
+
+async function selectClippyFile(view, file, offset = 1) {
+  const path = file.path || file.name || String(file);
+  const repo = view.selectedRepo;
+  view.selectedFile = path;
+  view.wrap.querySelectorAll('[data-clippy-file]').forEach(button => button.classList.toggle('selected', (view.files[Number(button.dataset.clippyFile)].path || view.files[Number(button.dataset.clippyFile)].name) === path));
+  const target = view.wrap.querySelector('[data-clippy-file-detail]');
+  target.innerHTML = clippyEmpty('Loading file', path);
+  try {
+    const result = await clippyRead(view, `/file?${new URLSearchParams({ repo, path, offset: String(offset), limit: '500' })}`, 'file');
+    if (!clippyViewAlive(view) || !target.isConnected || view.selectedFile !== path || view.selectedRepo !== repo) return;
+    const content = result.file || result;
+    const binary = content.is_text === false;
+    const markdown = /\.(?:md|markdown)$/i.test(path);
+    const rawText = content.content || content.text || '';
+    const preview = markdown && content.lineNumbered ? String(rawText).replace(/^\d+: ?/gm, '') : rawText;
+    const pageSize = Number(content.limit) || 500;
+    const start = Number(content.offset) || offset;
+    const totalLines = Number(content.total_lines) || 0;
+    const hasMore = totalLines ? start + pageSize <= totalLines : content.truncated === true;
+    target.innerHTML = `<div class="clippy-file-heading"><div><span class="collection-eyebrow">${escapeHtml(repo)}</span><h2>${escapeHtml(path)}</h2></div><button type="button" data-clippy-ask-file>✦ Ask Clippy</button></div>${content.truncated || start > 1 ? `<p class="clippy-data-note">Showing indexed lines ${start}–${totalLines ? Math.min(start + pageSize - 1, totalLines) : start + pageSize - 1}${totalLines ? ` of ${totalLines.toLocaleString()}` : ''}.</p>` : ''}${binary ? clippyEmpty('Binary file', 'A text preview is not available for this file.') : `<div class="clippy-file-body">${markdown ? renderMarkdown(preview) : `<pre>${escapeHtml(preview)}</pre>`}</div>`}`;
+    if (!binary && (hasMore || start > 1)) {
+      target.insertAdjacentHTML('beforeend', `<div class="clippy-file-pagination"><button type="button" data-clippy-file-prev${start > 1 ? '' : ' disabled'}>← Previous lines</button><button type="button" data-clippy-file-next${hasMore ? '' : ' disabled'}>Next lines →</button></div>`);
+      target.querySelector('[data-clippy-file-prev]').addEventListener('click', () => selectClippyFile(view, file, Math.max(1, start - pageSize)));
+      target.querySelector('[data-clippy-file-next]').addEventListener('click', () => selectClippyFile(view, file, start + pageSize));
+    }
+    enhanceMarkdownContent(target);
+    wireClippyAgentButton(target.querySelector('[data-clippy-ask-file]'), `Read and explain this indexed Clippy engagement file.\n\nRepository: ${repo}\nPath: ${path}`);
+  } catch (error) { if (clippyViewAlive(view) && target.isConnected && error.name !== 'AbortError') clippyError(target, error, () => selectClippyFile(view, file, offset)); }
+}
+
+// The connector picker presents integrations before requesting credentials.
+function openSmartConnectLibrary(onSaved, { connect = false } = {}) {
+  const root = document.getElementById('modal-root');
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<div class="app-modal smart-connect-modal" role="dialog" aria-modal="true" aria-labelledby="smart-connect-title"><header><div><h2 id="smart-connect-title">Connectors</h2><small>Bring your security knowledge into GLaDOS.</small></div><button type="button" data-smart-close aria-label="Close connectors">×</button></header><div class="app-modal-copy" data-smart-content></div></div>`;
+  root.appendChild(backdrop);
+  let controller = new AbortController();
+  let configured = false;
+  let selected = 'available';
+  let busy = false;
+  const close = prepareCollectionDialog(backdrop, { onClose: () => {
+    controller.abort();
+    const key = backdrop.querySelector('[data-smart-key]');
+    if (key) key.value = '';
+  } });
+  backdrop.querySelector('[data-smart-close]').addEventListener('click', close);
+  const target = backdrop.querySelector('[data-smart-content]');
+  const request = async (method, endpoint, token) => {
+    const requestController = new AbortController();
+    const cancel = () => requestController.abort();
+    controller.signal.addEventListener('abort', cancel, { once: true });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; requestController.abort(); }, 45000);
+    try {
+      const response = await fetch(endpoint, { method, signal: requestController.signal, headers: { 'Content-Type': 'application/json' }, ...(token === undefined ? {} : { body: JSON.stringify({ token }) }) });
+      const result = await response.json();
+      if (!response.ok || result.ok === false) throw new Error(result.error || 'Clippy could not connect.');
+      if (!backdrop.isConnected) throw Object.assign(new Error('Dialog closed'), { name: 'AbortError' });
+      return result;
+    } catch (error) {
+      if (timedOut) throw new Error('Clippy took too long to respond. Try again.');
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      controller.signal.removeEventListener('abort', cancel);
+    }
+  };
+  const showKey = () => {
+    backdrop.querySelector('#smart-connect-title').textContent = 'Connect Clippy';
+    target.innerHTML = `<button type="button" class="text-action smart-connect-back" data-smart-back>← All connectors</button><div class="smart-connect-intro"><span class="clippy-logo" aria-hidden="true">C</span><h3>Clippy MCP</h3><p>Explore findings, browse engagement repositories, and query your security knowledge with Clippy Agent.</p></div><form data-smart-form><label class="editor-field"><span>Clippy API key</span><div class="smart-connect-key"><input type="password" data-smart-key placeholder="Paste your Clippy key" autocomplete="new-password" spellcheck="false" aria-describedby="smart-connect-privacy" required /><button type="button" data-smart-reveal aria-label="Show entered key">Show</button></div></label><p id="smart-connect-privacy" class="field-note">Your key is stored on this computer and its saved value is never displayed. GLaDOS uses read-only Clippy tools.</p><p class="package-editor-status" data-smart-status role="status" aria-live="polite"></p><div class="smart-connect-form-actions"><button type="button" data-smart-cancel>Cancel</button><button type="submit" class="safe" data-smart-submit disabled>Connect Clippy</button></div></form>`;
+    const key = target.querySelector('[data-smart-key]');
+    const submit = target.querySelector('[data-smart-submit]');
+    const status = target.querySelector('[data-smart-status]');
+    target.querySelector('[data-smart-back]').addEventListener('click', () => { if (!busy) { key.value = ''; showLibrary(); } });
+    target.querySelector('[data-smart-cancel]').addEventListener('click', close);
+    target.querySelector('[data-smart-reveal]').addEventListener('click', event => {
+      const showing = key.type === 'text';
+      key.type = showing ? 'password' : 'text';
+      event.target.textContent = showing ? 'Show' : 'Hide';
+      event.target.setAttribute('aria-label', showing ? 'Show entered key' : 'Hide entered key');
+    });
+    key.addEventListener('input', () => { submit.disabled = busy || !key.value.trim(); });
+    target.querySelector('[data-smart-form]').addEventListener('submit', async event => {
+      event.preventDefault();
+      if (busy || !key.value.trim()) return;
+      busy = true;
+      submit.disabled = true;
+      key.disabled = true;
+      target.querySelector('[data-smart-back]').disabled = true;
+      status.textContent = 'Checking your Clippy connection…';
+      try {
+        await request('POST', '/api/settings/clippy/test', key.value.trim());
+        status.textContent = 'Saving your connection…';
+        await request('PUT', '/api/settings/clippy', key.value.trim());
+        key.value = '';
+        configured = true;
+        close();
+        showToast('Clippy is connected. Open Tools → Clippy to browse your knowledge.', { kind: 'success', label: 'Clippy MCP' });
+        try { await offerClippyAgent(); }
+        catch (error) { showToast(`Clippy is connected. Optional agent setup could not finish: ${error.message}`, { kind: 'warning', label: 'Clippy Agent' }); }
+        await onSaved?.();
+      } catch (error) {
+        if (error.name !== 'AbortError' && backdrop.isConnected) status.textContent = error.message;
+      } finally {
+        busy = false;
+        if (backdrop.isConnected) { key.disabled = false; submit.disabled = !key.value.trim(); target.querySelector('[data-smart-back]').disabled = false; }
+      }
+    });
+    key.focus();
+  };
+  const showLibrary = () => {
+    backdrop.querySelector('#smart-connect-title').textContent = 'Connectors';
+    target.innerHTML = `<label class="smart-connect-search"><span aria-hidden="true">⌕</span><input type="search" data-smart-search aria-label="Search connectors" placeholder="Search" /></label><div class="smart-connect-segments" role="tablist" aria-label="Connector availability"><button type="button" role="tab" data-smart-tab="available" aria-selected="${selected === 'available'}">Available</button><button type="button" role="tab" data-smart-tab="connected" aria-selected="${selected === 'connected'}">Connected</button></div><div data-smart-results></div><p class="smart-connect-footnote">Need a custom server? <button type="button" class="text-action" data-smart-advanced>Advanced MCP setup</button></p>`;
+    const draw = () => {
+      const query = target.querySelector('[data-smart-search]').value.toLowerCase().trim();
+      const matches = !query || 'clippy mcp security findings engagement repositories'.includes(query);
+      const visible = matches && (selected === 'connected' ? configured : !configured);
+      const results = target.querySelector('[data-smart-results]');
+      results.innerHTML = visible ? `<div class="smart-connect-row"><span class="clippy-logo" aria-hidden="true">C</span><div><strong>Clippy MCP</strong><p>Security findings & engagement intelligence</p></div><button type="button" class="text-action" data-smart-connect>${configured ? 'Manage' : 'Connect'}</button></div><span class="collection-eyebrow smart-featured-label">${configured ? 'Connected knowledge' : 'Featured'}</span><button type="button" class="smart-connect-featured" data-smart-featured><span class="clippy-logo" aria-hidden="true">C</span><strong>Clippy</strong><p>Your assessment findings and engagement repos, ready for GLaDOS.</p><span>${configured ? 'Manage connection' : 'Connect your knowledge'} →</span></button>` : `<div class="smart-connect-empty"><strong>${query ? 'No matching connectors' : selected === 'connected' ? 'No connected integrations' : 'You’re all connected'}</strong><p>${query ? 'Try searching for Clippy.' : selected === 'connected' ? 'Connect Clippy from the Available tab.' : 'Clippy is available in the Connected tab.'}</p></div>`;
+      const proceed = () => { if (configured) { close(); openConnectors(); } else showKey(); };
+      results.querySelector('[data-smart-connect]')?.addEventListener('click', proceed);
+      results.querySelector('[data-smart-featured]')?.addEventListener('click', proceed);
+    };
+    target.querySelector('[data-smart-search]').addEventListener('input', draw);
+    target.querySelectorAll('[data-smart-tab]').forEach(button => button.addEventListener('click', () => {
+      selected = button.dataset.smartTab;
+      target.querySelectorAll('[data-smart-tab]').forEach(tab => tab.setAttribute('aria-selected', String(tab === button)));
+      draw();
+    }));
+    target.querySelector('[data-smart-advanced]').addEventListener('click', () => { close(); openConnectorEditor(null, onSaved); });
+    draw();
+  };
+  target.innerHTML = '<p class="field-note">Loading connectors…</p>';
+  request('GET', '/api/settings/clippy').then(result => {
+    configured = Boolean(result.configured && result.enabled !== false);
+    if (connect) showKey();
+    else showLibrary();
+  }).catch(error => {
+    if (!backdrop.isConnected) return;
+    target.innerHTML = `<p class="field-note">${escapeHtml(error.message)}</p><button type="button" data-smart-continue>Continue to Clippy</button>`;
+    target.querySelector('[data-smart-continue]').addEventListener('click', showKey);
+  });
+}
+
+async function renderConnectorsPane() {
+  const wrap = document.createElement('div');
+  wrap.className = 'settings-pane connectors-pane collection-pane';
+  wrap.innerHTML = `<div class="collection-page-heading"><div><span class="collection-eyebrow">Tools</span><h1>Connectors</h1><p>Connect the tools and knowledge your agents can use.</p></div><div class="collection-page-actions"><button type="button" class="text-action" data-import-connectors>Import MCP config</button><button type="button" class="safe" data-add-connector>＋ Add connector</button></div></div><section class="settings-section"><div class="settings-section-heading"><div><h2>Your connectors</h2><p class="settings-section-copy">Manage your connections. Built-in tools are maintained by GLaDOS.</p></div></div><div class="connector-grid" data-connector-list>Loading connectors…</div></section>`;
+  paneEl.appendChild(wrap);
+  const reload = async () => {
+    const result = await fetchJson('/api/connectors', { timeoutMs: 10000 });
+    if (!wrap.isConnected) return;
+    state.connectorLibrary.catalog = result;
+    if (state.agentLibrary.catalog) state.agentLibrary.catalog.connectors = result.connectors;
+    drawConnectorCollection(wrap, result.connectors || [], reload);
+  };
+  wrap.querySelector('[data-add-connector]').addEventListener('click', () => openSmartConnectLibrary(reload));
+  wrap.querySelector('[data-import-connectors]').addEventListener('click', () => openConnectorConfigImport(reload));
+  try { await reload(); }
+  catch (error) { if (wrap.isConnected) wrap.querySelector('[data-connector-list]').innerHTML = `<div class="collection-empty"><strong>Connectors could not load</strong><p>${escapeHtml(error.message)}</p></div>`; }
+}
+
+function connectorIsBuiltIn(item) {
+  return item.builtIn === true || item.source === 'builtin' || item.source === 'built-in';
+}
+
+function connectorCardMarkup(item) {
+  const builtin = connectorIsBuiltIn(item);
+  const clippy = item.id === 'clippy' || item.serverName === 'clippy';
+  const connected = item.enabled && item.available !== false;
+  const configured = Boolean(item.configured || item.hasCredentials || connected);
+  const editable = item.source === 'user' || item.source === 'custom' || item.source === 'imported' || item.editable;
+  const disconnected = item.disconnected || (clippy && !configured);
+  const label = connected ? 'Connected' : disconnected ? 'Not connected' : item.status === 'disabled by runtime' ? 'Disabled by runtime' : item.enabled ? 'Needs setup' : 'Disabled';
+  return `<article class="connector-card${clippy ? ' connector-card-clippy' : ''}"><div class="connector-card-heading"><div class="connector-card-identity">${clippy ? clippyConnectorMarkup() : '<span class="connector-card-symbol" aria-hidden="true">⌘</span>'}<div><h3>${escapeHtml(item.name || item.id)}</h3><small>${builtin ? 'Built-in' : clippy ? 'Knowledge integration' : item.source === 'downloaded' ? 'Installed' : 'Custom connection'}</small></div></div><span class="package-status${connected ? ' active' : ' muted'}">${label}</span></div><p>${escapeHtml(item.description || item.url || item.command || item.serverName || '')}</p><details><summary>Tools & requirements</summary><div class="connector-detail"><strong>Selected tools</strong><p>${escapeHtml((item.tools || []).join(', ') || 'None selected yet')}</p>${(item.knownTools || []).length ? `<strong>Advertised tools</strong><p>${escapeHtml(item.knownTools.join(', '))}</p>` : ''}${(item.requiredEnv || []).length ? `<strong>Required credentials</strong><p>${escapeHtml(item.requiredEnv.join(', '))}</p>` : ''}${(item.configuredEnv || []).length || (item.configuredHeaders || []).length ? `<strong>Saved credential names</strong><p>${escapeHtml([...(item.configuredEnv || []), ...(item.configuredHeaders || [])].join(', '))}</p>` : ''}<strong>Connector ID</strong><p><code>${escapeHtml(item.id)}</code></p></div></details><div class="connector-card-actions">${builtin ? '<span class="field-note">Managed by GLaDOS</span>' : `${clippy ? `<button type="button" data-connect-clippy>${configured ? 'Update key' : 'Connect'}</button>${connected ? '<button type="button" data-open-clippy>Open Clippy</button>' : ''}` : editable ? `<button type="button" data-edit-connector="${escapeHtml(item.id)}">Configure</button>${!item.enabled && !item.disconnected ? `<button type="button" data-enable-connector="${escapeHtml(item.id)}">Enable</button>` : ''}` : ''}${!disconnected ? `<button type="button" data-test-connector="${escapeHtml(item.id)}">Check connection</button>` : ''}<button type="button" class="text-action connector-disconnect" data-disconnect-connector="${escapeHtml(item.id)}"${disconnected ? ' disabled' : ''}>Disconnect</button>`}</div></article>`;
+}
+
+function drawConnectorCollection(wrap, connectors, reload) {
+  const list = wrap.querySelector('[data-connector-list]');
+  if (!list || !wrap.isConnected) return;
+  const collection = [...connectors].sort((a, b) => Number(b.id === 'clippy') - Number(a.id === 'clippy'));
+  list.innerHTML = collection.length ? collection.map(connectorCardMarkup).join('') : '<div class="collection-empty"><strong>Connect your knowledge</strong><p>Add Clippy to browse findings and engagement repositories.</p><button type="button" data-connect-clippy>Connect Clippy</button></div>';
+  list.querySelectorAll('[data-connect-clippy]').forEach(button => button.addEventListener('click', () => openSmartConnectLibrary(reload, { connect: true })));
+  list.querySelectorAll('[data-open-clippy]').forEach(button => button.addEventListener('click', openClippy));
+  list.querySelectorAll('[data-edit-connector]').forEach(button => button.addEventListener('click', () => openConnectorEditor(connectors.find(item => item.id === button.dataset.editConnector), reload)));
+  list.querySelectorAll('[data-enable-connector]').forEach(button => button.addEventListener('click', async () => {
+    const connector = connectors.find(item => item.id === button.dataset.enableConnector);
+    button.disabled = true;
+    try { await packageApi('PATCH', `/api/connectors/${encodeURIComponent(connector.id)}`, { connector: { enabled: true }, expectedRevision: connector.revision }); await reload(); }
+    catch (error) { showToast(error.message, { kind: 'warning', label: 'Connectors' }); if (button.isConnected) button.disabled = false; }
+  }));
+  list.querySelectorAll('[data-test-connector]').forEach(button => button.addEventListener('click', async () => {
+    const connector = connectors.find(item => item.id === button.dataset.testConnector);
+    button.disabled = true;
+    button.textContent = 'Checking…';
+    try {
+      const endpoint = connector.id === 'clippy' ? '/api/settings/clippy/test' : `/api/connectors/${encodeURIComponent(connector.id)}/test`;
+      const result = await packageApi('POST', endpoint, undefined, { timeoutMs: 60000 });
+      await reload();
+      showToast(`Connected. ${result.toolCount || 0} tools advertised.`, { kind: 'success', label: connector.name || connector.id });
+    } catch (error) { showToast(error.message, { kind: 'warning', label: connector.name || connector.id }); }
+    finally { if (button.isConnected) { button.disabled = false; button.textContent = 'Check connection'; } }
+  }));
+  list.querySelectorAll('[data-disconnect-connector]').forEach(button => button.addEventListener('click', async () => {
+    const connector = connectors.find(item => item.id === button.dataset.disconnectConnector);
+    if (connectorIsBuiltIn(connector)) return;
+    if (!await confirmAction({ title: `Disconnect ${connector.name || connector.id}?`, message: 'This removes its saved credentials and stops the connection from being used in new agent turns. You can reconnect later.', confirmLabel: 'Disconnect' })) return;
+    button.disabled = true;
+    button.textContent = 'Disconnecting…';
+    try {
+      await packageApi('POST', `/api/connectors/${encodeURIComponent(connector.id)}/disconnect`, connector.id === 'clippy' ? {} : { expectedRevision: connector.revision });
+      await reload();
+      showToast(`${connector.name || connector.id} disconnected.`, { kind: 'success', label: 'Connectors' });
+    } catch (error) { showToast(error.message, { kind: 'warning', label: 'Connectors' }); if (button.isConnected) { button.disabled = false; button.textContent = 'Disconnect'; } }
+  }));
+}
+
+function connectorFormPayload(values) {
+  const type = values.type === 'stdio' ? 'stdio' : values.type === 'sse' ? 'sse' : 'http';
+  const connector = { id: String(values.id || '').trim(), name: String(values.name || '').trim(), type, enabled: !!values.enabled, tools: packageLineItems(values.tools) };
+  if (!connector.id || !connector.name) throw new Error('Enter a connector name and ID.');
+  if (type === 'stdio') {
+    connector.command = String(values.command || '').trim();
+    if (!connector.command) throw new Error('Enter a command for this MCP server.');
+    try { connector.args = JSON.parse(values.args || '[]'); } catch { throw new Error('Arguments must be a JSON array, such as ["--port", "3000"].'); }
+    if (!Array.isArray(connector.args) || connector.args.some(arg => typeof arg !== 'string')) throw new Error('Arguments must be a JSON array of strings.');
+  } else {
+    connector.url = String(values.url || '').trim();
+    try { const parsed = new URL(connector.url); if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error(); } catch { throw new Error('Enter a complete HTTP or HTTPS URL.'); }
+  }
+  for (const key of ['env', 'headers']) if (String(values[key] || '').trim()) {
+    try { connector[key] = JSON.parse(values[key]); } catch { throw new Error(`${key === 'env' ? 'Environment variables' : 'Headers'} must be a JSON object.`); }
+    if (!connector[key] || Array.isArray(connector[key]) || typeof connector[key] !== 'object' || Object.values(connector[key]).some(value => typeof value !== 'string')) throw new Error(`${key === 'env' ? 'Environment variables' : 'Headers'} must contain text values.`);
+  }
+  return connector;
+}
+
+function openConnectorEditor(existing, onSaved) {
+  const root = document.getElementById('modal-root');
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<div class="app-modal connector-editor-modal" role="dialog" aria-modal="true" aria-labelledby="connector-editor-title"><header><div><h2 id="connector-editor-title">${existing ? 'Configure connector' : 'Add connector'}</h2><small>Connect an HTTP endpoint or a local MCP command.</small></div><button type="button" data-connector-close aria-label="Close connector editor">×</button></header><div class="app-modal-copy"><label class="connector-import-input">Import configuration <input type="file" data-connector-import accept=".json,application/json" /></label><div class="editor-field-grid"><label class="editor-field"><span>Name</span><input data-connector-field="name" value="${escapeHtml(existing?.name || '')}" /></label><label class="editor-field"><span>Connector ID</span><input data-connector-field="id" value="${escapeHtml(existing?.id || '')}"${existing ? ' readonly' : ''} spellcheck="false" /></label></div><label class="editor-field"><span>Connection</span><select data-connector-field="type"><option value="http"${!existing?.type || existing.type === 'http' ? ' selected' : ''}>HTTP MCP server</option><option value="sse"${existing?.type === 'sse' ? ' selected' : ''}>SSE MCP server</option><option value="stdio"${existing?.type === 'stdio' ? ' selected' : ''}>Local command</option></select></label><div data-connector-http><label class="editor-field"><span>Server URL</span><input data-connector-field="url" value="${escapeHtml(existing?.url || '')}" placeholder="https://server.example/mcp" spellcheck="false" /></label></div><div data-connector-stdio><label class="editor-field"><span>Command</span><input data-connector-field="command" value="${escapeHtml(existing?.command || '')}" placeholder="/path/to/mcp-server" spellcheck="false" /></label><label class="editor-field"><span>Arguments (JSON)</span><textarea data-connector-field="args" rows="2">${escapeHtml(JSON.stringify(existing?.args || []))}</textarea></label></div><details class="connector-advanced"><summary>Credentials & tools</summary><label class="editor-field"><span>Environment variables (JSON)</span><textarea data-connector-field="env" rows="3" placeholder='{"API_TOKEN": "your token"}'></textarea></label><label class="editor-field"><span>HTTP headers (JSON)</span><textarea data-connector-field="headers" rows="3" placeholder='{"Authorization": "Bearer your token"}'></textarea></label><p class="field-note">Saved credentials stay on this computer. ${existing ? 'Leave these fields blank to keep existing values.' : 'Their values are hidden after saving.'}</p><label class="editor-field"><span>Available tools</span><textarea data-connector-field="tools" rows="3" placeholder="One tool name per line">${escapeHtml((existing?.tools || []).join('\n'))}</textarea>${existing?.knownTools?.length ? `<small>Advertised: ${escapeHtml(existing.knownTools.join(', '))}</small>` : '<small>Save, then check the connection to discover tool names.</small>'}</label></details><label class="capability-choice"><input type="checkbox" data-connector-field="enabled"${existing?.enabled ? ' checked' : ''} /><span>Enable for new agent turns</span></label><p class="package-editor-status" data-connector-editor-status role="status"></p></div><footer><button type="button" data-connector-cancel>Cancel</button><button type="button" class="safe" data-connector-save>Save connector</button></footer></div>`;
+  root.appendChild(backdrop);
+  const close = prepareCollectionDialog(backdrop);
+  backdrop.querySelector('[data-connector-close]').addEventListener('click', close);
+  backdrop.querySelector('[data-connector-cancel]').addEventListener('click', close);
+  const status = backdrop.querySelector('[data-connector-editor-status]');
+  const type = backdrop.querySelector('[data-connector-field="type"]');
+  const applyType = () => { backdrop.querySelector('[data-connector-http]').hidden = type.value === 'stdio'; backdrop.querySelector('[data-connector-stdio]').hidden = type.value !== 'stdio'; };
+  type.addEventListener('change', applyType);
+  applyType();
+  backdrop.querySelector('[data-connector-import]').addEventListener('change', async event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      if (file.size > 1024 * 1024) throw new Error('Choose a configuration smaller than 1 MB.');
+      const parsed = JSON.parse(await file.text());
+      const servers = parsed.mcpServers ? Object.entries(parsed.mcpServers) : [];
+      if (servers.length > 1) throw new Error('Import one connector at a time. Choose a configuration with a single MCP server.');
+      const imported = parsed.connector || (servers.length ? { ...servers[0][1], id: servers[0][0], name: servers[0][0] } : parsed);
+      for (const key of ['id', 'name', 'url', 'command', 'args', 'env', 'headers', 'tools']) {
+        if (key === 'id' && existing) continue;
+        const field = backdrop.querySelector(`[data-connector-field="${key}"]`);
+        if (imported[key] !== undefined && field) field.value = key === 'tools' ? imported[key].join('\n') : ['args', 'env', 'headers'].includes(key) ? JSON.stringify(imported[key], null, 2) : imported[key];
+      }
+      type.value = imported.type === 'stdio' || imported.command ? 'stdio' : imported.type === 'sse' ? 'sse' : 'http';
+      applyType();
+      status.textContent = 'Configuration loaded. Review it before saving.';
+    } catch (error) { status.textContent = `Could not import configuration: ${error.message}`; }
+  });
+  backdrop.querySelector('[data-connector-save]').addEventListener('click', async event => {
+    const button = event.currentTarget;
+    try {
+      const values = {};
+      backdrop.querySelectorAll('[data-connector-field]').forEach(field => { values[field.dataset.connectorField] = field.type === 'checkbox' ? field.checked : field.value; });
+      const connector = connectorFormPayload(values);
+      if (existing && connector.url === existing.url) delete connector.url;
+      button.disabled = true;
+      status.textContent = 'Saving connector…';
+      await packageApi(existing ? 'PATCH' : 'POST', existing ? `/api/connectors/${encodeURIComponent(existing.id)}` : '/api/connectors', { connector, ...(existing ? { expectedRevision: existing.revision } : {}) });
+      close();
+      showToast('Connector saved for new agent turns.', { kind: 'success', label: 'Connectors' });
+      await onSaved?.();
+    } catch (error) { status.textContent = error.message; status.classList.add('error'); button.disabled = false; }
+  });
+}
+
+
+function prepareCollectionDialog(backdrop, { onClose } = {}) {
+  const previouslyFocused = document.activeElement;
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    onClose?.();
+    backdrop.removeEventListener('keydown', onKey);
+    backdrop.remove();
+    if (previouslyFocused?.isConnected) previouslyFocused.focus();
+  };
+  const onKey = event => {
+    if (event.key === 'Escape') { event.preventDefault(); close(); return; }
+    if (event.key !== 'Tab') return;
+    const focusable = [...backdrop.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary')].filter(element => !element.closest('[hidden]'));
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  };
+  backdrop.addEventListener('keydown', onKey);
+  backdrop.addEventListener('click', event => { if (event.target === backdrop) close(); });
+  queueMicrotask(() => backdrop.querySelector('input, button')?.focus());
+  return close;
+}
+
+function openConnectorConfigImport(onImported) {
+  const root = document.getElementById('modal-root');
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<div class="app-modal package-import-modal" role="dialog" aria-modal="true" aria-labelledby="connector-import-title"><header><div><h2 id="connector-import-title">Import MCP connections</h2><small>Bring a standard MCP configuration into your connector collection.</small></div><button type="button" data-config-close aria-label="Close import">×</button></header><div class="app-modal-copy"><label class="package-file-choice"><strong>MCP configuration JSON</strong><span>Choose a file containing an mcpServers collection.</span><input type="file" data-config-file accept=".json,application/json" /></label><label class="editor-field connector-json-paste"><span>Or paste a configuration</span><textarea rows="7" data-config-text spellcheck="false" placeholder='{"mcpServers": {"server-name": {"command": "server", "args": []}}}'></textarea></label><button type="button" data-config-preview>Preview connections</button><div data-config-preview-content></div><p class="package-editor-status" data-config-status role="status" aria-live="polite"></p></div><footer><button type="button" data-config-cancel>Cancel</button><button type="button" class="safe" data-config-import disabled>Import connections</button></footer></div>`;
+  root.appendChild(backdrop);
+  const close = prepareCollectionDialog(backdrop);
+  backdrop.querySelector('[data-config-close]').addEventListener('click', close);
+  backdrop.querySelector('[data-config-cancel]').addEventListener('click', close);
+  const field = backdrop.querySelector('[data-config-text]');
+  const status = backdrop.querySelector('[data-config-status]');
+  const previewButton = backdrop.querySelector('[data-config-preview]');
+  const importButton = backdrop.querySelector('[data-config-import]');
+  const target = backdrop.querySelector('[data-config-preview-content]');
+  let config = null;
+  let generation = 0;
+  const invalidate = () => { generation++; config = null; importButton.disabled = true; target.innerHTML = ''; };
+  field.addEventListener('input', invalidate);
+  const preview = async () => {
+    const requestGeneration = ++generation;
+    previewButton.disabled = true;
+    importButton.disabled = true;
+    status.textContent = 'Checking connection configuration…';
+    status.classList.remove('error');
+    try {
+      const input = JSON.parse(field.value);
+      const result = await packageApi('POST', '/api/connectors/import/preview', { config: input });
+      if (!backdrop.isConnected || requestGeneration !== generation) return;
+      config = input;
+      const details = result.preview || result;
+      target.innerHTML = `<div class="package-import-preview"><h3>${details.connectors?.length || 0} connection${details.connectors?.length === 1 ? '' : 's'}</h3>${(details.connectors || []).map(connector => `<div class="connector-import-row"><strong>${escapeHtml(connector.name || connector.id)}</strong><span>${escapeHtml(connector.type === 'stdio' ? 'Local MCP command' : connector.type === 'sse' ? 'SSE MCP endpoint' : 'HTTP MCP endpoint')}</span><code>${escapeHtml(connector.command || connector.url || '')}</code></div>`).join('')}${(details.conflicts || []).length ? `<div class="import-review-notes"><p>${details.conflicts.length} connector${details.conflicts.length === 1 ? '' : 's'} already exist. The import will not replace their saved configurations.</p></div>` : ''}</div>`;
+      status.textContent = 'Connections import as disabled. Review credentials and tools, then enable each connection when ready.';
+      importButton.disabled = !details.connectors?.length || !!details.conflicts?.length;
+    } catch (error) { if (requestGeneration === generation) { status.textContent = `Could not preview configuration: ${error.message}`; status.classList.add('error'); } }
+    finally { previewButton.disabled = false; }
+  };
+  backdrop.querySelector('[data-config-file]').addEventListener('change', async event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    invalidate();
+    try {
+      if (file.size > 5 * 1024 * 1024) throw new Error('Choose a configuration smaller than 5 MB.');
+      field.value = await file.text();
+      await preview();
+    } catch (error) { status.textContent = error.message; status.classList.add('error'); }
+  });
+  previewButton.addEventListener('click', preview);
+  importButton.addEventListener('click', async () => {
+    if (!config) return;
+    importButton.disabled = true;
+    status.textContent = 'Importing connections…';
+    try {
+      const result = await packageApi('POST', '/api/connectors/import', { config });
+      close();
+      showToast(`Imported ${result.connectors?.length || 0} connection${result.connectors?.length === 1 ? '' : 's'}. Review and enable them when ready.`, { kind: 'success', label: 'Connectors' });
+      await onImported?.();
+    } catch (error) { status.textContent = error.message; status.classList.add('error'); importButton.disabled = false; }
+  });
 }
 
 // --- Slash command menu ---
@@ -6390,7 +8401,7 @@ function clearPlanClientState() {
 
 async function refreshPlansBadge() {
   const badge = document.getElementById('plans-badge');
-  if (!badge) return;
+  if (!badge || !state.currentSessionId) return;
   try {
     const [plansRes, replanRes] = await Promise.all([
       fetch(withSession('/api/plans?state=pending_approval')),
@@ -6416,6 +8427,10 @@ setInterval(refreshPlansBadge, 5000);
 refreshPlansBadge();
 
 async function renderPlansPane() {
+  if (!state.currentSessionId) {
+    paneEl.innerHTML = '<div class="pane-empty">Open a conversation to review its plans.</div>';
+    return;
+  }
   paneEl.innerHTML = `
     <div class="plans-pane">
       <div class="plans-list">
@@ -6711,10 +8726,14 @@ async function decidePlan(id, action, body) {
 // (escapeHtml defined earlier in this file)
 
 document.getElementById('open-glados').addEventListener('click', ev => { ev.preventDefault(); openGladosChat(); });
+document.getElementById('new-session').addEventListener('click', () => createInvestigationSession().catch(error => pushNotification('error', error.message, { toast: true, label: 'New session' })));
 document.getElementById('open-plans').addEventListener('click', ev => { ev.preventDefault(); openPlans(); });
 document.getElementById('open-reports').addEventListener('click', ev => { ev.preventDefault(); openReports(); });
 document.getElementById('open-settings').addEventListener('click', ev => { ev.preventDefault(); openSettings(); });
 document.getElementById('open-terminal').addEventListener('click', ev => { ev.preventDefault(); openTerminal(); });
+document.getElementById('open-agent-library').addEventListener('click', ev => { ev.preventDefault(); openAgentsLibrary(); });
+document.getElementById('open-clippy').addEventListener('click', ev => { ev.preventDefault(); openClippy(); });
+document.getElementById('open-connectors').addEventListener('click', ev => { ev.preventDefault(); openConnectors(); });
 document.getElementById('open-proxy').addEventListener('click', ev => { ev.preventDefault(); openProxy(); });
 // Live-events footer: Clear wipes the on-screen feed (server keeps its own log).
 document.getElementById('events-clear').addEventListener('click', () => {
@@ -6765,13 +8784,13 @@ function closeCommandPalette() {
 
 function commandItems() {
   return [
-    { kind: 'chat', id: 'glados-chat', label: 'GLaDOS Chat', note: 'Current session' },
+    { kind: 'chat', id: 'glados-chat', label: 'Chat', note: 'Current session' },
     ...state.investigationSessions.map(session => ({
       kind: 'session', id: session.id, label: session.name || session.id,
       note: session.id === state.currentSessionId ? 'Current session' : 'Session',
     })),
-    ...state.agents.filter(agent => agent.id !== 'glados').map(agent => ({
-      kind: 'agent', id: agent.id, label: agent.id,
+    ...state.agents.filter(agent => agent.id !== activeCoordinatorId()).map(agent => ({
+      kind: 'agent', id: agent.id, label: agentDisplayName(agent),
       note: agentActivityView(agent.id).status || 'Agent',
     })),
   ];
@@ -6779,7 +8798,7 @@ function commandItems() {
 
 function renderCommandResults() {
   const query = commandQueryEl.value.trim().toLocaleLowerCase();
-  commandChoices = commandItems().filter(item => `${item.label} ${item.note}`.toLocaleLowerCase().includes(query)).slice(0, 35);
+  commandChoices = commandItems().filter(item => `${item.label} ${item.note} ${item.id}`.toLocaleLowerCase().includes(query)).slice(0, 35);
   commandSelectedIndex = Math.min(commandSelectedIndex, Math.max(0, commandChoices.length - 1));
   commandResultsEl.replaceChildren();
   if (!commandChoices.length) {
@@ -6794,6 +8813,7 @@ function renderCommandResults() {
     button.type = 'button';
     button.className = `command-result${index === commandSelectedIndex ? ' selected' : ''}`;
     button.setAttribute('role', 'option');
+    if (item.kind === 'agent') button.title = item.id;
     button.setAttribute('aria-selected', String(index === commandSelectedIndex));
     const name = document.createElement('strong');
     name.textContent = item.label;
@@ -6965,7 +8985,8 @@ function wirePersistentLayout() {
       if (chevron) chevron.textContent = collapsed ? '▸' : '▾';
       heading.classList.toggle('collapsed', collapsed);
     };
-    apply(localStorage.getItem(KEY) === '1');
+    const savedCollapsed = localStorage.getItem(KEY);
+    apply(savedCollapsed === '1' || (savedCollapsed === null && headingId === 'agents-heading'));
     heading.addEventListener('click', () => {
       const next = !heading.classList.contains('collapsed');
       localStorage.setItem(KEY, next ? '1' : '0');
@@ -6974,17 +8995,16 @@ function wirePersistentLayout() {
   }
 })();
 
-Promise.all([loadInvestigationSessions(), loadOperatorProfile().catch(() => state.operatorProfile)])
+Promise.all([loadInvestigationSessions(), loadOperatorProfile().catch(() => state.operatorProfile), loadAgentTeams().catch(() => state.teamCatalog)])
   .then(() => Promise.all([loadAgents(), loadSecurityReviews()])).then(() => {
-  const allowedStatic = new Set(['glados-chat', 'plans', 'reports', 'settings', 'terminal', 'proxy', 'update']);
+  const allowedStatic = new Set(['glados-chat', 'plans', 'reports', 'sessions', 'settings', 'terminal', 'proxy', 'agent-library', 'clippy', 'connectors', 'update']);
   const agentIds = new Set(state.agents.map(agent => agent.id).filter(id => id !== 'glados'));
   const savedTabs = storageGetJson('glados-dash.open-tabs', []);
   state.openTabs = Array.isArray(savedTabs)
     ? savedTabs.filter(tab => tab && (allowedStatic.has(tab.id) || agentIds.has(tab.id)))
     : [];
-  if (!state.openTabs.some(tab => tab.id === 'glados-chat')) state.openTabs.unshift({ id: 'glados-chat', kind: 'chat', label: 'GLaDOS Chat' });
-  const savedCurrent = localStorage.getItem('glados-dash.current-tab');
-  state.currentTab = state.openTabs.some(tab => tab.id === savedCurrent) ? savedCurrent : 'glados-chat';
+  state.openTabs = [{ id: 'glados-chat', kind: 'chat', label: 'Chat' }, ...state.openTabs.filter(tab => tab.id !== 'glados-chat')];
+  state.currentTab = 'glados-chat';
   renderTabs();
   renderAgentList();
   updateWorkspaceNav();

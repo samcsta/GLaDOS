@@ -90,13 +90,15 @@ test('agent model settings render direct inline selectors without opening every 
   assert.match(css, /\.settings-agent-row\s*\{[^}]*grid-template-columns/s);
 });
 
-test('project navigation is a collapsible folder tree and Sessions contains only unassigned work', () => {
+test('project navigation stays compact above three recent conversations from every project', () => {
   const app = fs.readFileSync(path.join(ROOT, 'dashboard/public/app.js'), 'utf8');
   const css = fs.readFileSync(path.join(ROOT, 'dashboard/public/styles.css'), 'utf8');
   const html = fs.readFileSync(path.join(ROOT, 'dashboard/public/index.html'), 'utf8');
   assert.match(app, /sidebar-project-folder/);
   assert.match(app, /data-project-toggle/);
-  assert.match(app, /sessions\.filter\(session => !session\.projectId\)/);
+  assert.match(app, /projectSessions\.slice\(0, 3\)/);
+  assert.match(app, /const recent = \[\.\.\.sessions\]/);
+  assert.match(app, /\.slice\(0, 3\)/);
   assert.match(app, /data-session-row=.*draggable="true"/);
   assert.match(app, /dataTransfer\.setData\('text\/plain'/);
   assert.match(app, /moveInvestigationSession\(sessionId, projectId\)/);
@@ -106,7 +108,7 @@ test('project navigation is a collapsible folder tree and Sessions contains only
   assert.doesNotMatch(app, /Create a project, then drag a session into it|All sessions are filed in projects|No unassigned sessions/);
   assert.match(html, /id="sidebar-project-new"[^>]*aria-label="Create project"/);
   assert.match(html, /id="sidebar-session-new"[^>]*aria-label="New session"/);
-  for (const label of ['Workspace', 'Projects', 'Sessions', 'Agents']) {
+  for (const label of ['Workspace', 'Projects', 'Recent sessions', 'Agents']) {
     assert.match(html, new RegExp(`<span class="collapsible-heading-label">${label}<\\/span>`));
   }
   assert.match(app, /data-project-delete-id/);
@@ -136,7 +138,7 @@ test('session switching leaves background work running and refreshes every sessi
   assert.match(server, /activeChatTurns\.set\(key, \{\s*sessionId,/);
   assert.match(server, /background sessions are still running/);
   assert.match(server, /pendingGladosKickoffs = new Map\(\)/);
-  assert.match(server, /findIndex\(row => !activeChatTurns\.has\(runtimeKey\(row\.sessionId, 'glados'\)\)\)/);
+  assert.match(server, /findIndex\(row => !activeChatTurns\.has\(runtimeKey\(row\.sessionId, sessionCoordinatorId\(row\.sessionId\)\)\)\)/);
   assert.match(app, /is still working in the background/);
   for (const eventName of ['session-started', 'session-ended', 'agent-liveness', 'chat-turn-started', 'chat-turn-ended']) {
     const handler = app.slice(app.indexOf(`es.addEventListener('${eventName}'`));
@@ -151,7 +153,7 @@ test('background session completion stays white until that session is opened', (
   const css = fs.readFileSync(path.join(ROOT, 'dashboard/public/styles.css'), 'utf8');
   assert.match(app, /glados-dash\.unread-completed-sessions/);
   assert.match(app, /function markBackgroundSessionCompleted\(sessionId\)/);
-  assert.match(app, /data\.agentId === 'glados'\) markBackgroundSessionCompleted\(data\.investigationSessionId\)/);
+  assert.match(app, /isSessionCoordinatorEvent\(data\)\) markBackgroundSessionCompleted\(data\.investigationSessionId\)/);
   assert.match(app, /markSessionSeen\(body\.session\.id\)/);
   assert.match(app, /needsReview \? ' attention' : ''/);
   assert.match(app, /Completed — open to review/);

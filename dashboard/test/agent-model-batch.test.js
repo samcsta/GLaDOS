@@ -31,6 +31,8 @@ function loadFixture() {
   return {
     details,
     overrides,
+    runtime,
+    workspaces,
     cleanup() {
       delete require.cache[detailsPath];
       if (originalConfig) require.cache[configPath] = originalConfig;
@@ -62,6 +64,42 @@ test('batch model updates persist valid assignments together and report invalid 
     assert.equal(stored[candidates[0].id], 'batch-model-one');
     assert.equal(stored[candidates[1].id], 'batch-model-two');
   } finally {
+    fixture.cleanup();
+  }
+});
+
+test('package models and enable state are managed without mutating immutable package files', () => {
+  const fixture = loadFixture();
+  const priorRuntime = process.env.GLADOS_RUNTIME_DIR;
+  const priorWorkspaces = process.env.GLADOS_AGENT_WORKSPACES;
+  process.env.GLADOS_RUNTIME_DIR = fixture.runtime;
+  process.env.GLADOS_AGENT_WORKSPACES = fixture.workspaces;
+  try {
+    const { createAgentPackageStore } = require('../lib/agent-packages');
+    const store = createAgentPackageStore({ runtimeDir: fixture.runtime });
+    store.create({ schemaVersion: 1, id: 'test-package', name: 'Test package', version: '1.0.0', agents: [{ id: 'specialist', name: 'Test specialist', instructions: 'Return a structured result.', model: 'original-model', tools: [], connectors: [] }] });
+    const id = 'pkg-test-package--specialist';
+    const original = store.runtimeEntries()[0];
+    const prompt = fs.readFileSync(path.join(original.workspace, 'AGENTS.md'), 'utf8');
+    const metadata = fs.readFileSync(path.join(original.workspace, 'agent.json'), 'utf8');
+    assert.equal(fixture.details.listSettingsAgents().find(row => row.id === id).source, 'custom');
+    const change = fixture.details.updateAgentModels([{ agentId: id, expectedModel: 'original-model', model: 'batch-model-one' }], ['batch-model-one']);
+    assert.equal(change.changed, 1);
+    assert.equal(fixture.details.agentDetails(id).model, 'batch-model-one');
+    assert.equal(fs.readFileSync(path.join(original.workspace, 'AGENTS.md'), 'utf8'), prompt);
+    assert.equal(fs.readFileSync(path.join(original.workspace, 'agent.json'), 'utf8'), metadata);
+    const edited = store.export('test-package').manifest;
+    edited.agents[0].model = 'updated-manifest-model';
+    store.save('test-package', edited, { expectedRevision: original.packageRevision });
+    assert.equal(fixture.details.agentDetails(id).model, 'updated-manifest-model', 'a previous runtime override cannot defeat a new package revision model');
+    fixture.details.updateAgentEnabled(id, false);
+    assert.equal(fixture.details.listSettingsAgents().find(row => row.id === id).enabled, false);
+    assert.equal(fs.readFileSync(path.join(original.workspace, 'AGENTS.md'), 'utf8'), prompt);
+    fixture.details.updateAgentEnabled(id, true);
+    assert.equal(fixture.details.listSettingsAgents().find(row => row.id === id).enabled, true);
+  } finally {
+    if (priorRuntime === undefined) delete process.env.GLADOS_RUNTIME_DIR; else process.env.GLADOS_RUNTIME_DIR = priorRuntime;
+    if (priorWorkspaces === undefined) delete process.env.GLADOS_AGENT_WORKSPACES; else process.env.GLADOS_AGENT_WORKSPACES = priorWorkspaces;
     fixture.cleanup();
   }
 });

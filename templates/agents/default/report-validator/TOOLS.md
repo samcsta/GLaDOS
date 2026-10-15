@@ -25,7 +25,8 @@ Report QA agent only. Reviews report text, evidence support, CWE/CVSS, and templ
   dumps in one call.
 - Validate every claim against evidence references or validator notes.
 - Return blocking issues first, directly edit evidence-supported defects, then
-  hand recommendations to the final writer pass. Never request revalidation.
+  hand recommendations to the final writer pass. Do not request revalidation
+  unless the operator explicitly requests another review.
 - Reject unvalidated findings, weak CWE mapping, unsupported impact language, and missing remediation specifics.
 - Reject CWE actions that omit the exact sanitized executed command/request/tool
   action or whose `#Evidence X: [Title]#` numbering, caption, image embedding,

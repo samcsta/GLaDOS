@@ -104,18 +104,24 @@ function classifyToolUse(toolName, input = {}) {
   const browserNavigation = browser && /__browser_(?:navigate|tabs|click|press_key|fill_form|type|select_option|evaluate)$/i.test(name);
   const browserNavigateToUrl = browser && /__browser_navigate$/i.test(name);
   const webFetch = name === 'WebFetch';
+  // An imported server's annotations are claims, not GLaDOS policy. Every
+  // selected user connector tool is conservatively treated as target-capable
+  // until GLaDOS provides a separately reviewed capability classification.
+  const customConnector = /^mcp__user-[a-z0-9._-]+__.+$/i.test(name);
   const networkShell = name === 'Bash' && NETWORK_COMMANDS.has(commandName) && !/\s--?(?:version|help)\b/.test(command);
   const mutating = /(?:\s|^)(?:-X\s*)?(?:POST|PUT|PATCH|DELETE)\b/i.test(command)
     || /(?:--data(?:-raw|-binary)?|-d)\s/.test(command)
     || /\b(?:sqlmap|ffuf|nuclei|masscan|nikto|gobuster|feroxbuster)\b/i.test(command)
-    || (browser && /__browser_(?:click|fill_form|type|select_option|file_upload|evaluate)$/i.test(name));
+    || (browser && /__browser_(?:click|fill_form|type|select_option|file_upload|evaluate)$/i.test(name))
+    || customConnector;
   const targetCapable = webFetch || networkShell || browserNavigation
-    || name === 'mcp__glados-ops__adfs_active_directory_login';
+    || customConnector || name === 'mcp__glados-ops__adfs_active_directory_login';
   return {
     command,
     commandName,
     browser,
     webFetch,
+    customConnector,
     networkShell,
     httpShell: networkShell && HTTP_COMMANDS.has(commandName),
     mutating,
@@ -128,7 +134,7 @@ function classifyToolUse(toolName, input = {}) {
       ? extractTargets(input.url)
       : (networkShell
           ? extractTargets(shellTargetText(command))
-          : (webFetch ? extractTargets(input) : [])),
+          : (webFetch || customConnector ? extractTargets(input) : [])),
   };
 }
 
@@ -157,12 +163,16 @@ function hostMatches(host, rule) {
 function activeScopes({
   dbPath = BLACKBOARD_DB,
   sessionId = process.env.GLADOS_SESSION_ID || 'legacy',
+  engagementId,
 } = {}) {
   if (!fs.existsSync(dbPath)) return [];
   let db;
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    return db.prepare("SELECT id, scope FROM engagements WHERE status = 'active' AND session_id=? ORDER BY started_at DESC").all(sessionId)
+    const rows = engagementId
+      ? db.prepare("SELECT id, scope FROM engagements WHERE status = 'active' AND session_id=? AND id=? ORDER BY started_at DESC").all(sessionId, engagementId)
+      : db.prepare("SELECT id, scope FROM engagements WHERE status = 'active' AND session_id=? ORDER BY started_at DESC").all(sessionId);
+    return rows
       .flatMap(row => {
         let scope = row.scope;
         try { scope = JSON.parse(scope); } catch {}
@@ -175,18 +185,18 @@ function activeScopes({
 function targetAllowed(agentId, target, turnTargets = [], options = {}) {
   const host = normalizeHost(target);
   if (!host) return { allowed: false, reason: `could not determine target host from ${target}` };
-  if (PASSIVE_HOSTS.some(rule => hostMatches(host, rule)) && PHASE1_AGENTS.has(agentId)) {
+  if (options.requireEngagementScope !== true && PASSIVE_HOSTS.some(rule => hostMatches(host, rule)) && PHASE1_AGENTS.has(agentId)) {
     return { allowed: true, reason: `phase-1 passive surface ${host}` };
   }
 
   const acl = readJson(FETCH_ACL, null);
   const aclRules = acl?.enabled === true ? acl?.agents?.[agentId]?.allow || [] : [];
-  if (aclRules.some(rule => hostMatches(host, rule))) {
+  if (options.requireEngagementScope !== true && aclRules.some(rule => hostMatches(host, rule))) {
     return { allowed: true, reason: `approved plan ACL includes ${host}` };
   }
 
   const promptRules = (turnTargets || []).map(normalizeHost).filter(Boolean);
-  if (promptRules.some(rule => hostMatches(host, rule))) {
+  if (options.requireEngagementScope !== true && promptRules.some(rule => hostMatches(host, rule))) {
     return { allowed: true, reason: `operator prompt explicitly named ${host}` };
   }
 
@@ -201,11 +211,11 @@ function targetAllowed(agentId, target, turnTargets = [], options = {}) {
   return { allowed: false, reason: `${host} is not in an active engagement, approved plan ACL, or the current operator prompt` };
 }
 
-function targetHealthDecision(target) {
-  if (!fs.existsSync(WATCHDOG_DB)) return { allowed: true, state: 'unknown' };
+function targetHealthDecision(target, { dbPath = WATCHDOG_DB } = {}) {
+  if (!fs.existsSync(dbPath)) return { allowed: true, state: 'unknown' };
   let db;
   try {
-    db = new Database(WATCHDOG_DB, { readonly: true, fileMustExist: true });
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
     const host = normalizeHost(target);
     const rows = db.prepare('SELECT * FROM target_health ORDER BY updated_at DESC LIMIT 200').all();
     const row = rows.find(candidate => normalizeHost(candidate.target_url) === host);
@@ -234,6 +244,8 @@ function evaluateToolUse({
   engagementId,
   sessionId = process.env.GLADOS_SESSION_ID || 'legacy',
   dbPath = BLACKBOARD_DB,
+  managedPackageAgents,
+  watchdogDbPath = WATCHDOG_DB,
 }) {
   const halt = agentStatus(agentId);
   if (halt.haltActive) {
@@ -249,7 +261,7 @@ function evaluateToolUse({
 
   if ((toolName === 'Task' || toolName === 'Agent')) {
     const targetAgent = input.subagent_type || input.subagentType || input.agent || input.agentId || input.agent_id;
-    const plan = planCheckDispatch(targetAgent, engagementId, { sessionId, dbPath });
+    const plan = planCheckDispatch(targetAgent, engagementId, { sessionId, dbPath, managedPackageAgents, dispatchOnly: true });
     if (!plan.allowed) return { allowed: false, reason: `subagent plan gate denied: ${plan.reason}`, plan };
   }
 
@@ -262,7 +274,7 @@ function evaluateToolUse({
     return { allowed: false, reason: 'GLaDOS is the coordinator and must dispatch a named specialist for target-capable work' };
   }
 
-  const plan = planCheckDispatch(agentId, engagementId, { sessionId, dbPath });
+  const plan = planCheckDispatch(agentId, engagementId, { sessionId, dbPath, managedPackageAgents });
   if (!plan.allowed) return { allowed: false, reason: `plan gate denied ${agentId}: ${plan.reason}`, plan };
   if (PHASE1_AGENTS.has(agentId) && use.mutating && !use.browser) {
     return { allowed: false, reason: `${agentId} is phase-1 and may not perform mutating or active-test operations` };
@@ -271,14 +283,16 @@ function evaluateToolUse({
   const attribution = hasRequiredHttpAttribution(agentId, use);
   if (!attribution.allowed) return attribution;
 
-  const targets = use.targets.length ? use.targets : (use.browser ? turnTargets : []);
+  const targets = use.targets.length ? use.targets : (use.browser || use.customConnector ? turnTargets : []);
   for (const target of targets) {
-    const scope = targetAllowed(agentId, target, turnTargets, { sessionId, dbPath });
+    const scope = targetAllowed(agentId, target, turnTargets, { sessionId, dbPath,
+      ...(use.customConnector ? { engagementId: plan.engagement_id, requireEngagementScope: true } : {}),
+    });
     if (!scope.allowed) return { allowed: false, reason: `scope gate denied: ${scope.reason}` };
-    const health = targetHealthDecision(target);
+    const health = targetHealthDecision(target, { dbPath: watchdogDbPath });
     if (!health.allowed) return { allowed: false, reason: `health gate denied: ${health.reason}` };
   }
-  if ((use.networkShell || use.browser) && targets.length === 0) {
+  if ((use.networkShell || use.browser || use.customConnector) && targets.length === 0) {
     return { allowed: false, reason: `${toolName} is target-capable but no target could be extracted for scope enforcement` };
   }
   return { allowed: true, reason: `scope, health, plan, attribution, and halt gates passed`, plan };

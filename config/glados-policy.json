@@ -133,13 +133,13 @@
     "webapp-vuln"
   ],
   "clippyMcpTools": {
-    "glados": ["projects_search", "search", "read", "list_files", "directory_lookup", "directory_search", "cross_search", "domain_search", "domain_lookup", "infra_search", "infra_lookup", "github_search", "github_lookup"],
-    "webapp-recon": ["search", "read", "list_files", "domain_search", "domain_lookup", "infra_search", "infra_lookup", "github_search", "github_lookup"],
-    "api-expert": ["search", "read", "list_files", "domain_search", "domain_lookup", "infra_search", "infra_lookup", "github_search", "github_lookup"],
-    "source-code": ["search", "read", "list_files", "github_search", "github_lookup", "github_property_values"],
-    "osint": ["projects_search", "search", "read", "list_files", "directory_lookup", "directory_search", "cross_search", "domain_search", "domain_lookup", "infra_search", "infra_lookup", "github_search", "github_lookup", "github_property_values"],
-    "report-writer": ["search", "read", "list_files"],
-    "report-validator": ["search", "read", "list_files"]
+    "glados": ["projects_search", "search", "fetch", "read", "list_repos", "list_files", "list_teams", "directory_lookup", "directory_search", "cross_search", "domain_search", "domain_lookup", "infra_search", "infra_lookup", "github_property_values", "github_search", "github_lookup", "assessment_status", "testbox_info", "share_list", "support_info", "skill"],
+    "webapp-recon": ["search", "read", "list_repos", "list_files", "domain_search", "domain_lookup", "infra_search", "infra_lookup", "github_search", "github_lookup"],
+    "api-expert": ["search", "read", "list_repos", "list_files", "domain_search", "domain_lookup", "infra_search", "infra_lookup", "github_search", "github_lookup"],
+    "source-code": ["search", "read", "list_repos", "list_files", "github_search", "github_lookup", "github_property_values"],
+    "osint": ["projects_search", "search", "read", "list_repos", "list_files", "directory_lookup", "directory_search", "cross_search", "domain_search", "domain_lookup", "infra_search", "infra_lookup", "github_search", "github_lookup", "github_property_values"],
+    "report-writer": ["search", "read", "list_repos", "list_files"],
+    "report-validator": ["search", "read", "list_repos", "list_files"]
   },
   "agentToolProfiles": {
     "glados": "leader",

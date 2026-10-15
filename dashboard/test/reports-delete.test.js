@@ -13,6 +13,33 @@ function loadReports(runtimeDir) {
   return require('../lib/reports');
 }
 
+test('security reviews have readable titles and recorded metadata while sealed files keep their identity', () => {
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-review-labels-'));
+  const review = path.join(runtime, 'investigations', 'Users-user-Desktop-GH-REPOS-security-api-main-20260819-abcdef', 'security-review');
+  fs.mkdirSync(path.join(review, 'deliverables'), { recursive: true });
+  const receipt = { status: 'SEALED', terminal_state: 'SATURATED', engagement_id: 'stable-review', completed_at: '2026-08-19T14:30:00Z', repository_head: 'abcdef123456' };
+  fs.writeFileSync(path.join(review, 'completion-receipt.json'), JSON.stringify(receipt));
+  fs.writeFileSync(path.join(review, 'run.json'), JSON.stringify({ repositoryPath: '/repos/security-api', branch: 'main' }));
+  for (const name of ['SECURITY-REVIEW.md', 'security-review-report.html', 'security-review-report.pdf', 'EXECUTIVE-SUMMARY.md', 'DELIVERABLES-MANIFEST.json']) fs.writeFileSync(path.join(review, 'deliverables', name), `sealed ${name}`);
+  const reports = loadReports(runtime);
+  const node = reports.tree().tree.find(node => node.path === 'security-reviews').children[0];
+  assert.equal(node.displayName, 'Security API · Security review');
+  assert.equal(node.path, 'security-reviews/stable-review');
+  assert.equal(node.review.completedAt, receipt.completed_at);
+  assert.equal(node.review.revision, receipt.repository_head);
+  assert.equal(node.review.branch, 'main');
+  assert.equal(node.children.filter(file => file.documentKey === 'full-report').length, 3);
+  assert.equal(node.children.find(file => file.fileName === 'EXECUTIVE-SUMMARY.md').displayName, 'Executive summary');
+  assert.equal(node.children.find(file => file.fileName === 'DELIVERABLES-MANIFEST.json').technical, true);
+  const reportPath = 'security-reviews/stable-review/SECURITY-REVIEW.md';
+  assert.equal(reports.renamePath(reportPath, 'Full assessment').alias, true);
+  assert.equal(fs.readFileSync(path.join(review, 'deliverables', 'SECURITY-REVIEW.md'), 'utf8'), 'sealed SECURITY-REVIEW.md');
+  assert.equal(reports.readFile(reportPath).kind, 'markdown');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(review, 'completion-receipt.json'), 'utf8')), receipt);
+  reports.renamePath('security-reviews/stable-review', 'secops');
+  assert.equal(reports.tree().tree.find(node => node.path === 'security-reviews').children[0].displayName, 'SecOps · Security review');
+});
+
 test('Reports indexes sealed security reviews as a dedicated collection', () => {
   const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-reports-security-review-'));
   const review = path.join(runtime, 'investigations', 'eng-1', 'security-review');

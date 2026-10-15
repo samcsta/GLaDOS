@@ -7,6 +7,56 @@ const Database = require('better-sqlite3');
 const { ensureBlackboardDb } = require('../../scripts/lib/glados-local');
 const { InvestigationSessionStore } = require('../lib/investigation-session-store');
 
+test('a session keeps its selected team across reopen, rename, project moves, and activation', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-session-teams-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const dbPath = path.join(root, 'blackboard.db'); ensureBlackboardDb({ blackboardDb: dbPath });
+  let store = new InvestigationSessionStore(dbPath);
+  const old = store.getActive(); assert.equal(old.teamId, 'glados');
+  const selected = store.create({ name: 'Team session', teamId: 'pkg-my-team--crew', metadata: { note: 'retained' } });
+  assert.equal(selected.teamId, 'pkg-my-team--crew'); assert.equal(selected.metadata.teamId, selected.teamId);
+  store.rename(selected.id, 'Renamed team session');
+  store.moveToProject(selected.id, store.createProject('Team project').id);
+  store.activate(old.id); store.activate(selected.id);
+  store.close(); store = new InvestigationSessionStore(dbPath);
+  assert.equal(store.get(selected.id).teamId, 'pkg-my-team--crew');
+  assert.equal(store.get(selected.id).metadata.note, 'retained');
+  assert.equal(store.get(old.id).teamId, 'glados');
+  const direct = store.create({ teamId: 'agent:pkg-my-team--member', metadata: { directAgentId: 'ignored-spoof' } });
+  assert.equal(direct.kind, 'agent'); assert.equal(direct.teamId, 'agent:pkg-my-team--member');
+  assert.equal(direct.directAgentId, 'pkg-my-team--member');
+  assert.equal(direct.metadata.directAgentId, 'pkg-my-team--member');
+  store.close(); store = new InvestigationSessionStore(dbPath);
+  assert.equal(store.get(direct.id).directAgentId, 'pkg-my-team--member');
+  assert.throws(() => store.create({ teamId: '../escape' }), /invalid session team/);
+  store.close();
+});
+
+test('session recency changes on a new message, while opening, renaming, or filing a conversation preserves it', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-session-recency-'));
+  const dbPath = path.join(root, 'blackboard.db');
+  ensureBlackboardDb({ blackboardDb: dbPath });
+  const store = new InvestigationSessionStore(dbPath);
+  const first = store.create({ name: 'First conversation' });
+  const second = store.create({ name: 'Second conversation' });
+  const db = new Database(dbPath);
+  const insert = db.prepare('INSERT INTO dashboard_transcript_events (session_id, agent_id, kind, text, event_json, ts) VALUES (?, ?, ?, ?, ?, ?)');
+  insert.run(first.id, 'glados', 'user-message', 'First prompt', '{}', '2026-10-14T10:00:00.000Z');
+  insert.run(second.id, 'glados', 'user-message', 'Second prompt', '{}', '2026-10-14T11:00:00.000Z');
+  assert.equal(store.get(first.id).lastActivityAt, '2026-10-14T10:00:00.000Z');
+  store.activate(first.id);
+  store.rename(first.id, 'Renamed conversation');
+  store.moveToProject(first.id, store.createProject('Project').id);
+  assert.equal(store.get(first.id).lastActivityAt, '2026-10-14T10:00:00.000Z');
+  assert.equal(store.list().find(session => session.id === second.id).lastActivityAt, '2026-10-14T11:00:00.000Z');
+  insert.run(first.id, 'glados', 'assistant-text', 'Backfilled response', '{}', '2026-10-14T12:00:00.000Z');
+  assert.equal(store.get(first.id).lastActivityAt, '2026-10-14T10:00:00.000Z');
+  insert.run(first.id, 'glados', 'user-message', 'New prompt', '{}', '2026-10-14T13:00:00.000Z');
+  assert.equal(store.get(first.id).lastActivityAt, '2026-10-14T13:00:00.000Z');
+  db.close();
+  store.close();
+});
+
 test('new investigation sessions archive rather than delete prior blackboard data', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-investigation-sessions-'));
   const dbPath = path.join(root, 'blackboard.db');

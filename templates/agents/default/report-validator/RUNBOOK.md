@@ -65,8 +65,8 @@ directory, Dradis, evidence, CVSS, chronology, error, and metering contract.
    limitations.
 10. Call `glados-ops__engagement_metrics` with the exact engagement ID. Update
    the `RT/Writeup.md` assessment-metrics section to the newest available
-   `meteredThrough` cutoff before returning PASS. Preserve the tool's source,
-   attribution, and current-turn caveat. Never estimate missing tokens or cost.
+   `meteredThrough` cutoff before returning `REVIEW_COMPLETE`. Preserve the
+   tool's source, attribution, and current-turn caveat. Never estimate missing tokens or cost.
 11. Scan all report files for credentials, tokens, unrelated targets, stale
     engagement IDs, inconsistent flags, and broken evidence paths.
 12. Record a concrete recommendation for every defect and patch every
@@ -75,7 +75,8 @@ directory, Dradis, evidence, CVSS, chronology, error, and metering contract.
     cannot be resolved from evidence, write an explicit limitation and a final-
     writer action instead of inventing support. Return the recommendations and
     edited manifest to GLaDOS for the single `report-writer` final pass. Do not
-    request revalidation and do not dispatch or create a validator/writer loop.
+    request revalidation or create a validator/writer loop unless the operator
+    explicitly requests another review.
 
 ## Output Contract
 

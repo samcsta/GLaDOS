@@ -35,3 +35,21 @@ test('operator chat identity persists a normalized name and derives initials', (
   assert.equal(operatorInitials('Prince'), 'PR');
   assert.equal(operatorInitials(''), 'You');
 });
+
+test('scoped package agent preferences retain package effort defaults and long stable identities', t => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-package-chat-prefs-'));
+  t.after(() => fs.rmSync(runtimeDir, { recursive: true, force: true }));
+  const env = { GLADOS_RUNTIME_DIR: runtimeDir };
+  const agentId = `pkg-${'a'.repeat(64)}--${'b'.repeat(64)}`;
+  assert.equal(effortForAgent(agentId, env, 'minimal'), 'minimal');
+  const saved = writeChatPreferences({ agentId, effort: 'none' }, env);
+  assert.equal(saved.efforts[agentId], 'none');
+  assert.equal(effortForAgent(agentId, env, 'xhigh'), 'none');
+  assert.throws(() => writeChatPreferences({ agentId: 'glados', effort: 'none' }, env), /effort must be/);
+  assert.throws(() => writeChatPreferences({ agentId: '../outside', effort: 'high' }, env), /valid agentId/);
+  const firstRevision = 'a'.repeat(64);
+  const editedRevision = 'b'.repeat(64);
+  writeChatPreferences({ agentId, effort: 'minimal', packageRevision: firstRevision }, env);
+  assert.equal(effortForAgent(agentId, env, 'high', firstRevision), 'minimal');
+  assert.equal(effortForAgent(agentId, env, 'xhigh', editedRevision), 'xhigh');
+});

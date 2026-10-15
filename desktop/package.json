@@ -1,6 +1,6 @@
 {
   "name": "glados",
-  "version": "4.6.1",
+  "version": "4.9.0",
   "private": true,
   "description": "Electron shell for the GLaDOS operator app.",
   "author": {

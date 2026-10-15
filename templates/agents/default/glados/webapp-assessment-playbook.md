@@ -1,13 +1,19 @@
 # Webapp Assessment Playbook — GLaDOS v4
 
-Authoritative iterative flow for every webapp engagement. GLaDOS and the operator
-both read this file; it defines the hard boundary between recon (no approval
-needed) and exploitation (approval required).
+Authoritative iterative flow for comprehensive webapp engagements. GLaDOS
+and the operator both read this file; it defines the boundary between recon
+and exploitation, which requires approval. Bounded lookups, diagnostics, local
+analysis, and single-check assignments stop at the requested deliverable,
+request/time/tool budget, or concrete blocker. They do not start the complete
+assessment flow. Preserve scope, approval, health, and halt checks for target
+actions and the controller-managed source-review completion gates.
 
-## Phase 1 — Baseline Recon (always, same every engagement)
+## Phase 1 — Baseline Recon (comprehensive engagements)
 
-Runs unconditionally on every new webapp target. Write each step's result to
-the blackboard under `baseline.*`. No exploitation permitted in Phase 1.
+Run this baseline for a comprehensive assessment of a new webapp target.
+Write each step's result to the blackboard under `baseline.*`. A bounded
+assignment performs only its authorized checks. No exploitation is permitted
+in Phase 1.
 
 1. **Context intake** — merge operator-supplied prior knowledge with the
    approved Clippy MCP results, or specifically selected legacy sources. Write source
@@ -104,11 +110,13 @@ authentication/privilege or reaches a new page/API/tenant/role, GLaDOS:
 
 1. Lets the current agent finish its turn.
 2. Halts the remaining chain.
-3. Dispatches `webapp-recon` in post-pivot mode using the new authenticated
-   context, then dispatches `js-reverser` for the new client artifacts.
-4. Dispatches `plan-synthesizer` with `parent_plan_id` = current plan, the
-   surface delta, and the triggering finding.
-5. Posts the replacement plan and blocks until operator decision.
+3. For a comprehensive assessment, dispatches `webapp-recon` in post-pivot
+   mode using the new authenticated context, then dispatches `js-reverser` for
+   the new client artifacts. For a bounded task, reports the pivot and stops
+   before expanded recon; further testing requires operator continuation.
+4. In the continued comprehensive flow, dispatches `plan-synthesizer` with
+   `parent_plan_id` = current plan, the surface delta, and the triggering finding.
+5. Posts that replacement plan and blocks until operator decision.
 
 If no pivot occurs, GLaDOS still ends the cycle at an operator decision point:
 continue/replan, edit, wrap/report, end, or pause. Reporting never starts merely

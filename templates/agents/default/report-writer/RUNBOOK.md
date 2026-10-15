@@ -92,7 +92,8 @@ summary, and full technical writeup.
     read the validator's recommendations and corrected files in bounded pages,
     preserve verified edits, resolve every recommendation that evidence allows,
     update the meter cutoff, and publish the final draft. Do not request or
-    trigger another validator pass; the second writer pass is final.
+    trigger another validator pass unless the operator explicitly requests
+    another review; the second writer pass is final.
 
 ## Writing Rules
 

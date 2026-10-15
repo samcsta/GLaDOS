@@ -80,6 +80,18 @@ function renderDownloadPage(installerRoot, installerBasePath = '/installers') {
   const wikiUrl = 'https://wiki.r3dt34m.net/rt/glados';
   const logoPath = `${installerBasePath.replace(/\/$/, '')}/linux/glados.png`;
   const releaseNotes = [{
+    version: 'v4.9.0',
+    label: 'macOS and Linux release · October 14, 2026',
+    title: 'Clippy intelligence and editable agent workspaces',
+    notes: [
+      'Added a Clippy dashboard for severity-filtered findings, engagement repositories, domain priorities, and cached Dradis report coverage.',
+      'Browse beyond the 100-result search limit with resumable indexing, immediate access to discovered findings, and bounded parallel metadata loading.',
+      'Chat with Clippy Agent beside the intelligence dashboard and customize its instructions, model, reasoning, and tools in Agents. Connecting asks permission before creating the agent.',
+      'Added agent packages, dedicated team conversations, and connector management with optional connector disconnection.',
+      'Reduced unnecessary agent work with explicit stopping conditions and peer review focused on substantive findings.',
+    ],
+    footnote: 'macOS and Linux downloads are v4.9.0. Existing agent edits, connector credentials, and conversation history are preserved. Windows remains available as a source build.',
+  }, {
     version: 'v4.6.1',
     label: 'macOS release · October 13, 2026',
     title: 'A quieter GLaDOS workspace',

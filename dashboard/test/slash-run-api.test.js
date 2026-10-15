@@ -129,7 +129,12 @@ test('POST /api/slash/run executes workflow and safety commands through server w
 
     const help = await slashRun(srv.port, '/help');
     assert.equal(help.ok, true);
-    assert.match(help.events.at(-1).text, /\/goal <target>/);
+    assert.match(help.events.at(-1).text, /\/investigate <target>/);
+    assert.doesNotMatch(help.events.at(-1).text, /\/agents|\/goal/);
+
+    const commandList = await request(srv.port, 'GET', '/api/slash-commands');
+    assert.equal(commandList.status, 200);
+    assert.equal(commandList.json.commands.some(({ cmd }) => /^\/(?:agents|goal)(?:\s|$)/.test(cmd)), false);
 
     const unknownDirectChat = await request(srv.port, 'POST', '/api/chat/not-an-agent', { message: 'hello' });
     assert.equal(unknownDirectChat.status, 404);
@@ -139,10 +144,16 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     assert.equal(emptyDirectChat.status, 400);
     assert.equal(emptyDirectChat.json.error, 'message required');
 
-    const goal = await slashRun(srv.port, '/goal example.com');
+    const goal = await slashRun(srv.port, '/investigate example.com');
     assert.equal(goal.ok, true);
     assert.match(goal.events.at(-1).text, /DradisTab/);
     assert.match(goal.events.at(-1).text, /DomainsAI/);
+
+    for (const command of ['/agents', '/goal example.com']) {
+      const removed = await slashRun(srv.port, command);
+      assert.equal(removed.ok, false);
+      assert.match(removed.events.at(-1).text, /unknown command/);
+    }
 
     const overviewDb = new Database(path.join(srv.runtime, 'blackboard', 'blackboard.db'));
     try {

@@ -1,4 +1,8 @@
 /* Shared operator chat layout for GLaDOS and every named agent. */
+/* The blank landing page reuses the existing composer without transcript chrome. */
+html[data-theme] .chat-visual-chamber.chat-new-session .agent-view-toolbar { display: none; }
+html[data-theme] .chat-visual-chamber.chat-new-session .transcript { flex: 0 0 auto; margin-top: auto; padding: 0 24px 12px; overflow: visible; }
+html[data-theme] .chat-visual-chamber.chat-new-session .chat-input { margin-bottom: auto; }
 .chat-visual-chamber {
   --chamber-grid: rgba(255,255,255,.025);
   --chamber-shadow: rgba(0,0,0,.22);

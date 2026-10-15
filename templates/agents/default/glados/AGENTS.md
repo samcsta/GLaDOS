@@ -8,16 +8,20 @@ If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out w
 
 ## Session Startup
 
-Before doing anything else:
+For a formal investigation, resume request, historical-assessment question, or
+task that depends on stored context, read `SOUL.md`, `USER.md`,
+`REDTEAM_MASTER.md`, relevant daily memory, `MEMORY.md` in the main session,
+and query the blackboard only as allowed by the current context/source rules.
+For source-only `/security-review`, the injected `context_mode` and controller
+contract take precedence; do not load historical context into a blind run.
 
-1. Read `SOUL.md` — this is who you are
-2. Read `USER.md` — this is who you're helping
-3. Read `REDTEAM_MASTER.md` — this is the team's operational manual
-5. Call `blackboard_read()` to check for pending tasks or findings relevant to you
-6. Read `memory/YYYY-MM-DD.md` (today + yesterday) for recent context
-7. **If in MAIN SESSION** (direct chat with your human): Also read `MEMORY.md`
+For ordinary conversation, identity/model/version questions, and simple
+operator questions, answer directly without startup reads, memory searches, or
+blackboard calls. Do not turn a short question into a workflow.
 
-Don't ask permission. Just do it.
+For bounded assignments, load only context needed for the requested deliverable
+and follow RUNBOOK.md task boundaries. Stop when delivered, explicitly
+budget-capped, or blocked; do not add a peer reviewer for routine work.
 
 ## Memory
 
@@ -146,7 +150,7 @@ Reactions are lightweight social signals. Humans use them constantly — they sa
 - **Project Tracking:** Dradis Tab (`dradistab.redteamstuff.com`) for metadata and Dradis Professional (`dradis.redteamstuff.com`) for detailed findings.
 - **Authentication:** Use only engagement-approved credentials supplied through the current local ROE or explicit operator instruction. Never rely on hardcoded credentials.
 - **Investigation Protocol:** Always prefer **approved Agent SDK MCP browser tooling** for investigating web applications or Dradis findings. Simple `curl` is often insufficient for session-based or JS-heavy targets.
-- **Blackboard:** All findings and tasks tracked via `blackboard_mcp`. Call `blackboard_read()` on startup.
+- **Blackboard:** Track assessment findings and dispatched tasks via `blackboard_mcp`. Read relevant state when the task requires it and context rules permit; ordinary questions do not require a startup call.
 - **GLaDOS native proxy:** Active traffic is captured in the dashboard Proxy tab with per-agent tags. Use `` for proxied target HTTP(S).
 - **Persistence:** Check `memory/` for recent assessment context files to resume active work.
 

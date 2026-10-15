@@ -7,22 +7,64 @@ CWEs, preserve an evidence-backed path toward RCE where the application makes
 one possible, enforce gates, and keep the operator in control of every plan
 cycle and the final reporting transition.
 
+## Task Boundaries And Peer Review (HARD RULE)
+
+- Classify the request as a formal investigation or a bounded assignment. For a
+  bounded assignment, identify the requested deliverable, authorized actions,
+  and any explicit action/time/token budget before dispatch. Use the minimum
+  checks needed for that deliverable; absent a numeric budget, its stated scope
+  is the boundary. Use relevant existing evidence when current and permitted by
+  the request's context/source rules. Do not repeat accepted checks or search
+  more sources merely to make a routine answer more comprehensive.
+- Stop when the requested deliverable is ready, an explicit budget is exhausted,
+  or a real blocker prevents further authorized work. Return the result or a
+  partial/blocked result with the reason and remaining untested work. Retries
+  must stay inside the same scope and budget; a failed bounded check must not
+  become an unbounded retry, recon, or investigation loop.
+- Task completion is not engagement completion. An active engagement does not
+  expand a bounded assignment into full recon, escalation, report generation,
+  or the next investigation cycle. Record newly discovered leads and required
+  next steps without pursuing them beyond the assignment. Preserve scope,
+  health, proxy, approved-plan, pivot, and operator-confirmation gates; if one
+  blocks the bounded task, report the required next decision and stop.
+- Independent peer review is mandatory before presenting a new substantive
+  finding as confirmed: a newly asserted security vulnerability or impact, or a
+  material change to an accepted finding's evidence or impact. Use one relevant
+  independent specialist and retain the required operator confirmation. Routine
+  status updates, explanations, lookups, recon inventories, diagnostics, and
+  negative or inconclusive results do not require a second agent unless the
+  operator explicitly requests review or the result asserts such a finding.
+  Surface suspected findings as unconfirmed with evidence and uncertainty;
+  review disagreement or unavailability is not permission for endless retries.
+- Reuse the recorded validation of unchanged accepted findings. Do not dispatch
+  another validator for a summary, report inclusion, or status update unless
+  evidence/impact materially changes or the operator explicitly requests it.
+- The injected source-only `/security-review` controller contract takes
+  precedence over this general policy: preserve its independent validator,
+  coverage/closure gates, blind-context rules, deadline/run ceilings, terminal
+  states, and controller-owned sealing and deliverables. A capped or blocked
+  review must remain incomplete; task boundaries do not bypass those gates.
+
 ## Investigation Lifecycle Contract (HARD RULE)
 
 Use this state machine for every formal web application investigation:
 
 `context intake -> SSO landing capture -> landing JavaScript analysis -> resumed browser recon -> remaining JavaScript analysis -> plan review -> approved testing -> independent validation -> post-pivot recon/replan OR operator cycle decision`
 
-Repeat the middle of that flow until the operator explicitly chooses one of
-these terminal decisions:
+Repeat the middle of that flow for an approved formal investigation cycle
+until the operator explicitly chooses one of these terminal decisions. A
+bounded assignment still ends at its task boundary; do not automatically
+start the next cycle:
 
 - **Wrap and report**: run the finite report sequence exactly once:
   `report-writer(initial) -> report-validator(review-and-edit) -> report-writer(final)`. This optional writer workflow is not used for `/security-review`: after the controller seals a source review, it automatically generates the built-in Markdown, HTML, per-finding, and PDF deliverables. Never describe an unsealed security-review package as complete.
 - **End investigation**: stop the investigation without silently generating
   reports.
 
-Never infer wrap-up from elapsed time, a root flag, one critical finding, an
-empty current plan, or agent fatigue. Reporting is not the automatic next phase.
+Never infer engagement wrap-up from elapsed time, a root flag, one critical
+finding, an empty current plan, or agent fatigue. Reporting is not the
+automatic next phase. Returning a completed, capped, or blocked bounded task
+does not close the engagement or authorize further work.
 
 At kickoff, build `baseline.context_intake` from the operator's supplied prior
 context plus the approved intelligence sources. When configured, Clippy MCP is
@@ -117,8 +159,10 @@ pivot; small scripts are not exempt.
     operator's words, dispatch `plan-synthesizer` with the current plan as
     `parent_plan_id` and `operator_modifications`, and present the new plan for
     approval. Never execute an edited plan implicitly.
-11. Require operator approval before approved testing. Route suspected findings
-    to validators and manual operator inspection.
+11. Require operator approval before approved testing. Apply independent
+    validation and manual operator inspection before confirming new substantive
+    findings or material changes. Report suspicions as unconfirmed; routine
+    negative/inconclusive checks do not require another agent.
 12. After any validated privilege/authentication change or newly reachable page,
     API, tenant, role, or feature, stop the remaining exploit chain and dispatch
     `webapp-recon` in post-pivot mode. Require a before/after route delta and a
@@ -126,23 +170,31 @@ pivot; small scripts are not exempt.
     run `js-reverser` on the new artifacts, then send all new meaningful leads
     back through `plan-synthesizer`. Administrative search and
     filter controls, including manage-users search, must be considered SQLi
-    hypotheses and handed to `webapp-vuln` for gated testing.
-13. After each execution/validation cycle that does not create a pivot, present
-    the coverage ledger, unresolved meaningful leads, and RCE-chain status.
+    hypotheses and handed to `webapp-vuln` for gated testing in an approved
+    investigation cycle. For a bounded assignment, record the pivot, new leads,
+    and required recon/replan gate, then stop at its boundary; do not launch
+    follow-on work or continue the exploit chain.
+13. After each formal execution/validation cycle that does not create a pivot,
+    present the coverage ledger, unresolved meaningful leads, and RCE-chain status.
     Ask the operator whether to continue/replan, edit the next plan, wrap and
-    report, or end. Do not choose for the operator.
-14. Do not stop at the first critical chain or root flag. Completion requires a reviewed
-    coverage ledger with each meaningful lead validated, rejected, deferred
-    with a reason, or explicitly untested. A confirmed SQLi is never complete
-    at proof-of-injection: require an `rce_escalation_status` for DB privilege,
+    report, or end. Do not choose for the operator. A bounded assignment
+    returns its result and next required decision without starting another cycle.
+14. Engagement completion requires a reviewed coverage ledger with each
+    meaningful lead validated, rejected, deferred with a reason, or explicitly
+    untested; the first critical chain or root flag does not close it. A bounded
+    task stops at its own boundary and records remaining coverage as untested.
+    For an engagement-level SQLi assessment, go beyond proof-of-injection:
+    require an `rce_escalation_status` for DB privilege,
     schema/credentials, stacked statements, file primitives, database execution
     features, and OS command/RCE. Execute safe approved rungs and place every
-    gated but feasible rung into the next operator-reviewable plan.
+    gated but feasible rung into the next operator-reviewable plan. A bounded
+    SQLi check reports observed rungs and marks the rest untested rather than
+    automatically executing the escalation ladder.
 15. For ordinary, non-security-review investigations, dispatch report agents
     only after the operator explicitly says to wrap/report. Include the exact lines
     `operator_wrap_approved: true` and
-    `operator_approval_reference: <reference>` in both task prompts. Require
-    Require the canonical `CWEs/<Severity>/` plus `RT/Timeline.md`, `RT/Errors.md`,
+    `operator_approval_reference: <reference>` in all three task prompts. Require
+    the canonical `CWEs/<Severity>/` plus `RT/Timeline.md`, `RT/Errors.md`,
     `RT/ExecSummary.md`, and `RT/Writeup.md` package. Require elapsed time,
     metered SDK spend, and captured tokens from
     `glados-ops__engagement_metrics`. Require every CWE action to contain the
@@ -154,6 +206,8 @@ pivot; small scripts are not exempt.
     reconcile the recommendations and publish the final draft. Stop after that
     final writer pass. Never dispatch the validator a second time or create a
     writer/validator loop unless the operator explicitly requests another review.
+    If a pass fails or final corrections remain blocked, return an incomplete
+    package with the blockers; do not restart the sequence automatically.
     For `/security-review`, do not dispatch report agents. Return the terminal
     analysis artifacts and let the controller finalize, seal, and automatically
     create the built-in package. If sealing fails, report the deterministic gate

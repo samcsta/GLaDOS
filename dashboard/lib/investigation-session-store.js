@@ -1,5 +1,6 @@
 const crypto = require('node:crypto');
 const Database = require('better-sqlite3');
+const LAST_MESSAGE_ACTIVITY = `COALESCE((SELECT t.ts FROM dashboard_transcript_events t WHERE t.session_id=s.id AND t.kind='user-message' ORDER BY t.ts DESC LIMIT 1), s.created_at) AS last_activity_at`;
 
 class InvestigationSessionStore {
   constructor(dbPath) {
@@ -8,6 +9,7 @@ class InvestigationSessionStore {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     this.db.pragma('secure_delete = ON');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_dashboard_transcript_session_kind_ts ON dashboard_transcript_events(session_id, kind, ts)');
     this.ensureInitialSession();
     this.removeDuplicateEmptyUnassignedSessions();
   }
@@ -59,7 +61,7 @@ class InvestigationSessionStore {
   list({ includeArchived = true } = {}) {
     const where = includeArchived ? '' : `WHERE state='active'`;
     return this.db.prepare(`
-      SELECT s.*, p.name AS project_name, COUNT(e.id) AS engagement_count,
+      SELECT s.*, p.name AS project_name, COUNT(e.id) AS engagement_count, ${LAST_MESSAGE_ACTIVITY},
         (SELECT COUNT(*) FROM controller_jobs j
           WHERE j.engagement_id IN (SELECT owned.id FROM engagements owned WHERE owned.session_id=s.id)
             AND j.status IN ('queued','running','cancelling')) AS running_count
@@ -74,7 +76,7 @@ class InvestigationSessionStore {
 
   get(id) {
     const row = this.db.prepare(`
-      SELECT s.*, p.name AS project_name,
+      SELECT s.*, p.name AS project_name, ${LAST_MESSAGE_ACTIVITY},
         (SELECT COUNT(*) FROM engagements e WHERE e.session_id=s.id) AS engagement_count,
         (SELECT COUNT(*) FROM controller_jobs j
           WHERE j.engagement_id IN (SELECT owned.id FROM engagements owned WHERE owned.session_id=s.id)
@@ -88,7 +90,7 @@ class InvestigationSessionStore {
 
   getActive() {
     const row = this.db.prepare(`
-      SELECT s.*, p.name AS project_name,
+      SELECT s.*, p.name AS project_name, ${LAST_MESSAGE_ACTIVITY},
         (SELECT COUNT(*) FROM engagements e WHERE e.session_id=s.id) AS engagement_count,
         (SELECT COUNT(*) FROM controller_jobs j
           WHERE j.engagement_id IN (SELECT owned.id FROM engagements owned WHERE owned.session_id=s.id)
@@ -100,7 +102,11 @@ class InvestigationSessionStore {
     return row ? decodeSession(row) : null;
   }
 
-  create({ name, metadata = {}, activate = true, projectId = null } = {}) {
+  create({ name, metadata = {}, activate = true, projectId = null, teamId = metadata?.teamId || 'glados' } = {}) {
+    if (typeof teamId !== 'string' || !/^(?:glados|(?:agent:)?pkg-[a-z][a-z0-9]*(?:-[a-z0-9]+)*--[a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.test(teamId)) throw new Error('invalid session team identity');
+    metadata = { ...(metadata || {}), teamId };
+    if (teamId.startsWith('agent:')) metadata.directAgentId = teamId.slice('agent:'.length);
+    else delete metadata.directAgentId;
     const id = `session_${Date.now().toString(36)}_${crypto.randomBytes(5).toString('hex')}`;
     const label = String(name || '').trim().slice(0, 120) || 'Unassigned session';
     const normalizedProjectId = projectId == null || projectId === '' ? null : String(projectId);
@@ -223,7 +229,9 @@ class InvestigationSessionStore {
     const session = this.get(id);
     if (!session) throw new Error(`investigation session not found: ${id}`);
     if (session.state === 'active') throw new Error('create or activate another investigation before archiving the active session');
-    this.db.prepare(`UPDATE investigation_sessions SET state='archived', archived_at=COALESCE(archived_at, datetime('now')), updated_at=datetime('now') WHERE id=?`).run(id);
+    const metadata = { ...session.metadata };
+    if (metadata.surface === 'clippy') metadata.workspaceClosed = true;
+    this.db.prepare(`UPDATE investigation_sessions SET state='archived', archived_at=COALESCE(archived_at, datetime('now')), metadata_json=?, updated_at=datetime('now') WHERE id=?`).run(JSON.stringify(metadata), id);
     return this.get(id);
   }
 
@@ -313,11 +321,15 @@ function decodeSession(row) {
     state: row.state,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    lastActivityAt: row.last_activity_at || row.created_at,
     archivedAt: row.archived_at || null,
     engagementCount: Number(row.engagement_count || 0),
     runningCount: Number(row.running_count || 0),
     projectId: row.project_id || null,
     projectName: row.project_name || null,
+    teamId: metadata.teamId || 'glados',
+    directAgentId: metadata.directAgentId || null,
+    kind: metadata.directAgentId ? 'agent' : 'team',
     metadata,
   };
 }

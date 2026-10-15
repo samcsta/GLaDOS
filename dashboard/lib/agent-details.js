@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { MODEL_OVERRIDES_JSON, GLADOS_AGENT_WORKSPACES } = require('./config');
-const { loadRegistry: loadAgentRegistry, loadPolicy, buildMcpServers } = require('./harness/agent-sdk');
+const { loadRegistry: loadAgentRegistry, loadPolicy, buildMcpServers, mountedToolsForAgent } = require('./harness/agent-sdk');
 const { fetchLiteLlmModels } = require('./litellm-models');
 const { bareModelAlias } = require('../../scripts/lib/model-aliases');
 
@@ -58,6 +58,10 @@ function templateRegistryById() {
 }
 
 function workspaceMeta(agentId) {
+  const packageEntry = loadAgentRegistry().find(row => row.id === agentId && row.packageCapabilities);
+  if (packageEntry) {
+    return { workspace: packageEntry.workspace, meta: {}, upstream: packageEntry, disabledFile: false, enabled: packageEntry.enabled !== false };
+  }
   const workspace = path.join(GLADOS_AGENT_WORKSPACES, agentId);
   const meta = readJson(path.join(workspace, 'agent.json'), {});
   const upstream = templateRegistryById().get(agentId) || {};
@@ -76,9 +80,10 @@ function isSubagent(agentId, meta, upstream) {
 }
 
 function listSettingsAgents() {
-  const active = new Map(loadAgentRegistry().filter(a => a.enabled !== false).map(a => [a.id, a]));
+  const rows = loadAgentRegistry();
+  const active = new Map(rows.filter(a => a.enabled !== false).map(a => [a.id, a]));
   const upstream = templateRegistryById();
-  const ids = new Set([...active.keys(), ...upstream.keys()]);
+  const ids = new Set([...rows.map(row => row.id), ...upstream.keys()]);
   return [...ids].sort().map(id => {
     const local = workspaceMeta(id);
     const entry = active.get(id);
@@ -92,6 +97,14 @@ function listSettingsAgents() {
       model: bareModelAlias(entry?.model || local.meta.model || local.upstream.model || null, { fallback: null }),
       workspace: local.workspace,
       disabledFile: local.disabledFile,
+      source: local.upstream.source || 'builtin',
+      packageId: local.upstream.packageId || null,
+      packageVersion: local.upstream.packageVersion || null,
+      packageRevision: local.upstream.packageRevision || null,
+      description: local.upstream.description || null,
+      effort: local.upstream.effort || null,
+      teamInternal: !!local.upstream.teamInternal,
+      teamCoordinator: !!local.upstream.teamCoordinator,
     };
   });
 }
@@ -116,17 +129,33 @@ function agentDetails(agentId) {
     toolsDoc: safeRead(path.join(ws, 'TOOLS.md')),
     runbook: safeRead(path.join(ws, 'RUNBOOK.md')),
     identity: safeRead(path.join(ws, 'IDENTITY.md')),
-    skills: listSkills(ws),
-    mcp: listMcpServers(),
+    skills: local.upstream.packageCapabilities
+      ? (local.upstream.skills || []).map(skill => ({ name: skill.name || skill.id, skillFile: skill.path, description: skill.description || null }))
+      : listSkills(ws),
+    mcp: local.upstream.packageCapabilities
+      ? listMcpServers().filter(name => mountedToolsForAgent(agentId).some(tool => tool.startsWith(`mcp__${name}__`)))
+      : listMcpServers(),
+    source: local.upstream.source || 'builtin',
+    packageId: local.upstream.packageId || null,
+    packageVersion: local.upstream.packageVersion || null,
+    packageRevision: local.upstream.packageRevision || null,
+    description: local.upstream.description || null,
+    effort: local.upstream.effort || null,
+    connectors: local.upstream.connectors || [],
+    tools: local.upstream.tools || [],
+    deliverables: local.upstream.deliverables || [],
+    team: local.upstream.team || null,
   };
 }
 
 // Persist the model choice to the durable v4 override store. Agent SDK turns
 // read this store when the next prompt is assembled.
-function persistModelOverride(agentId, newModel) {
+function persistModelOverride(agentId, newModel, { packageRevision } = {}) {
   let overrides = {};
   try { overrides = JSON.parse(fs.readFileSync(MODEL_OVERRIDES_JSON, 'utf8')) || {}; } catch {}
-  if (newModel) overrides[agentId] = bareModelAlias(newModel, { fallback: null });
+  if (newModel) overrides[agentId] = packageRevision
+    ? { model: bareModelAlias(newModel, { fallback: null }), packageRevision }
+    : bareModelAlias(newModel, { fallback: null });
   else delete overrides[agentId];
   writeJsonAtomic(MODEL_OVERRIDES_JSON, overrides);
 }
@@ -137,7 +166,10 @@ function updateAgentModel(agentId, newModel) {
   const local = workspaceMeta(agentId);
   if (!local.upstream.id) throw new Error(`agent not found: ${agentId}`);
   const old = bareModelAlias(local.meta.model || local.upstream.model || activeEntryById(agentId)?.model, { fallback: null });
-  persistModelOverride(agentId, durableModel);
+  persistModelOverride(agentId, durableModel, { packageRevision: local.upstream.packageCapabilities ? local.upstream.packageRevision : null });
+  if (local.upstream.packageCapabilities) {
+    return { agentId, oldModel: old, newModel: durableModel, runtime: 'agent-sdk', requiresRestart: false };
+  }
   const next = {
     id: local.meta.id || local.upstream.id || agentId,
     name: local.meta.name || local.upstream.name || agentId,
@@ -171,7 +203,7 @@ function updateAgentModels(changes, availableModels) {
     if (!agentId || seen.has(agentId)) {
       code = 'duplicate_or_missing_agent';
       error = agentId ? `duplicate agent: ${agentId}` : 'agentId required';
-    } else if (!upstream.has(agentId)) {
+    } else if (!upstream.has(agentId) && !registry.get(agentId)?.packageCapabilities) {
       code = 'agent_not_found';
       error = `agent not found: ${agentId}`;
     } else if (!requested || requested.includes('/')) {
@@ -194,7 +226,9 @@ function updateAgentModels(changes, availableModels) {
       results.push({ agentId, ok: true, unchanged: true, oldModel: current, newModel: requested, runtime: 'agent-sdk', requiresRestart: false });
       continue;
     }
-    const result = { agentId, ok: true, oldModel: current, newModel: requested, runtime: 'agent-sdk', requiresRestart: false };
+    const result = { agentId, ok: true, oldModel: current, newModel: requested, runtime: 'agent-sdk', requiresRestart: false,
+      ...(registry.get(agentId)?.packageCapabilities ? { packageRevision: registry.get(agentId).packageRevision } : {}),
+    };
     results.push(result);
     accepted.push(result);
   }
@@ -209,12 +243,15 @@ function updateAgentModels(changes, availableModels) {
     if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) {
       throw new Error('model override store must contain a JSON object');
     }
-    for (const result of accepted) overrides[result.agentId] = result.newModel;
+    for (const result of accepted) overrides[result.agentId] = result.packageRevision
+      ? { model: result.newModel, packageRevision: result.packageRevision }
+      : result.newModel;
     writeJsonAtomic(MODEL_OVERRIDES_JSON, overrides);
 
     for (const result of accepted) {
       try {
         const local = workspaceMeta(result.agentId);
+        if (local.upstream.packageCapabilities) continue;
         const next = {
           id: local.meta.id || local.upstream.id || result.agentId,
           name: local.meta.name || local.upstream.name || result.agentId,
@@ -237,9 +274,14 @@ function updateAgentModels(changes, availableModels) {
 }
 
 function updateAgentEnabled(agentId, enabled) {
-  if (agentId === 'glados' && enabled === false) throw new Error('glados cannot be disabled from Settings');
+  if (agentId === 'glados' && enabled === false) throw new Error('glados cannot be disabled from Agents');
   const { workspace, meta, upstream } = workspaceMeta(agentId);
   if (!upstream.id) throw new Error(`agent not found: ${agentId}`);
+  if (upstream.packageCapabilities) {
+    const { createAgentPackageStore } = require('./agent-packages');
+    createAgentPackageStore({ runtimeDir: process.env.GLADOS_RUNTIME_DIR }).setEntryEnabled(agentId, !!enabled, { expectedRevision: upstream.packageRevision });
+    return { agentId, packageId: upstream.packageId, enabled: !!enabled, workspace, runtime: 'agent-sdk', requiresRestart: false };
+  }
   if (!fs.existsSync(workspace)) throw new Error(`agent workspace not found: ${agentId}`);
   const disabledPath = path.join(workspace, '.disabled');
   if (enabled && fs.existsSync(disabledPath)) fs.unlinkSync(disabledPath);

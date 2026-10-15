@@ -5,10 +5,11 @@ const { randomUUID } = require('node:crypto');
 
 const CLIPPY_URL = 'https://clippy.redteamstuff.com:8443/mcp/';
 const READ_TOOLS = new Set([
-  'search', 'read', 'list_files', 'projects_search',
+  'search', 'fetch', 'read', 'list_repos', 'list_files', 'projects_search', 'list_teams',
   'directory_lookup', 'directory_search', 'cross_search',
   'infra_lookup', 'infra_search', 'domain_lookup', 'domain_search',
   'github_property_values', 'github_lookup', 'github_search',
+  'assessment_status', 'testbox_info', 'share_list', 'support_info', 'skill',
 ]);
 const DENIED_TOOLS = [
   'context_put', 'infra_add', 'infra_add_note', 'domain_add',

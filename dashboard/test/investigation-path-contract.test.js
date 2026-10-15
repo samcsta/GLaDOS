@@ -24,7 +24,7 @@ test('core investigation prompts encode the operator-controlled iterative lifecy
   assert.match(glados, /operator_modifications/);
   assert.match(glados, /End investigation/);
   assert.match(glados, /operator_wrap_approved: true/);
-  assert.match(glados, /never infer wrap-up/is);
+  assert.match(glados, /never infer (?:engagement )?wrap-up/is);
   assert.match(glados, /report-writer\(initial\).*report-validator\(review-and-edit\).*report-writer\(final\)/is);
   assert.doesNotMatch(glados, /revalidate until|repeat until validation|failures loop back to the writer/is);
 });

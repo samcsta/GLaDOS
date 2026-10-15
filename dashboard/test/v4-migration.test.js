@@ -327,7 +327,7 @@ test('v4 slash commands keep investigation prompt slash-only and omit RPS shortc
   const slashSource = fs.readFileSync(path.join(ROOT, 'dashboard/lib/slash.js'), 'utf8');
   const server = fs.readFileSync(path.join(ROOT, 'dashboard/server.js'), 'utf8');
   assert.match(slashSource, /function investigateReadyPrompt/);
-  assert.match(server, /cmd === '\/investigate' \? slash\.investigateReadyPrompt\(\)/);
+  assert.match(server, /cmd === '\/investigate'\)\s*\{\s*if \(!arg\)\s*\{\s*emit\(slash\.investigateReadyPrompt\(\)\)/);
   assert.doesNotMatch(server, /function extractInvestigationTarget/);
   assert.doesNotMatch(server, /const kickoffTarget = extractInvestigationTarget\(message\)/);
   assert.doesNotMatch(slashSource, /\/rps|\/breaker|Proxy RPS/i);
@@ -402,7 +402,7 @@ test('v4 report library provides searchable, source-filtered navigation with dur
   assert.match(app, /function reportTreeActionMenu/);
   assert.match(app, /actions\.push\(\['rename', 'Rename'\], \['delete'/);
   assert.match(app, /viewer\.innerHTML = header \+ `<div class="report-empty">error:/);
-  assert.match(app, /row\.append\(head, reportTreeActionMenu\(n, 'dir'/);
+  assert.match(app, /if \(!n\.virtualGroup\) row\.appendChild\(reportTreeActionMenu\(n, 'dir'/);
   assert.match(app, /Delete security review/);
   assert.match(app, /Delete investigation/);
   assert.match(app, /function renameReportEntry/);
