@@ -8,6 +8,9 @@ contextBridge.exposeInMainWorld('gladosDesktop', {
   getDashboardHealth() {
     return ipcRenderer.invoke('desktop:dashboard:health');
   },
+  openProxyBrowser(input) {
+    return ipcRenderer.invoke('desktop:proxy:open-browser', input);
+  },
   onUpdateStatus(callback) {
     ipcRenderer.on('desktop-update-status', (_event, payload) => callback(payload));
   },

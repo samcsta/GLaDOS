@@ -36,13 +36,14 @@ const state = {
   agentsLoadedOnce: false,
   update: { lines: [], running: false, es: null, autoStart: false, availableVersion: null, dismissedVersion: null },
   reports: { query: '', scope: 'all', selectedPath: null, tree: [] },
-  agentLibrary: { view: 'built-in', catalog: null, selectedId: null, details: null, draft: null, selectedAgentId: null, selectedTeamId: null, query: '', testMessages: [], testBusy: false, testGeneration: 0, dirty: false, selectionGeneration: 0, loading: false },
+  agentLibrary: { view: 'built-in', catalog: null, fordCatalog: null, selectedId: null, details: null, draft: null, selectedAgentId: null, selectedTeamId: null, query: '', testMessages: [], testBusy: false, testGeneration: 0, dirty: false, selectionGeneration: 0, loading: false },
   connectorLibrary: { catalog: null },
-  clippyDashboard: { view: 'opportunities', query: '', severity: '', repo: '', category: '', offset: 0, repoQuery: '', opportunityQuery: '', opportunitySeverity: 'critical', coverage: 'missing', opportunityOffset: 0, chatOpen: true, chatSession: null },
+  clippyDashboard: { view: 'leads', browseView: 'findings', query: '', severity: '', repo: '', category: '', offset: 0, repoQuery: '', leadQuery: '', expandedLeads: new Set(), chatOpen: true, chatSession: null },
   investigationSessions: [],
   investigationProjects: [],
   currentSessionId: null,
   currentTeamId: 'glados',
+  defaultTeamPreference: { defaultTeamId: 'glados', effectiveTeamId: 'glados', fallback: false, teams: [] },
   teamCatalog: { teams: [{ id: 'glados', name: 'GLaDOS', coordinatorId: 'glados', source: 'builtin', memberIds: [], assignedAgentIds: [], available: true }], agents: [], directAgents: [] },
   teamCatalogGeneration: 0,
   teamChangeDraft: null,
@@ -156,6 +157,12 @@ function withSession(url, sessionId) {
 
 function allConversationContexts() {
   return [...(state.teamCatalog?.teams || []), ...(state.teamCatalog?.directAgents || [])];
+}
+
+async function loadDefaultTeamPreference() {
+  const preference = await fetchJson('/api/settings/default-team', { timeoutMs: 8000 });
+  state.defaultTeamPreference = preference;
+  return preference;
 }
 
 function activeTeam() {
@@ -292,6 +299,15 @@ async function loadOperatorProfile() {
   return state.operatorProfile;
 }
 
+function nextSessionActivationGeneration() {
+  let stored = 0;
+  try { stored = Number(sessionStorage.getItem('glados-dash.activation-generation')) || 0; } catch {}
+  const next = Math.max(Date.now(), state.sessionActivationGeneration + 1, stored + 1);
+  state.sessionActivationGeneration = next;
+  try { sessionStorage.setItem('glados-dash.activation-generation', String(next)); } catch {}
+  return next;
+}
+
 async function activateInvestigationSession(sessionId) {
   if (!sessionId) return;
   if (sessionId === state.currentSessionId) { openGladosChat(); return; }
@@ -299,7 +315,7 @@ async function activateInvestigationSession(sessionId) {
   const previousTeamId = state.currentTeamId;
   const previous = state.investigationSessions.find(session => session.id === previousSessionId);
   const continuesInBackground = Number(previous?.runningCount || 0) > 0 || state.active.size > 0;
-  const activationGeneration = ++state.sessionActivationGeneration;
+  const activationGeneration = nextSessionActivationGeneration();
   state.sessionActivationController?.abort();
   const controller = new AbortController();
   state.sessionActivationController = controller;
@@ -352,7 +368,10 @@ async function activateInvestigationSession(sessionId) {
   if (continuesInBackground) showToast(`${previous?.name || 'The previous session'} is still working in the background.`, { kind: 'info', label: 'Sessions' });
 }
 
-async function createInvestigationSession({ teamId = 'glados' } = {}) {
+async function createInvestigationSession({ teamId } = {}) {
+  const requestedGeneration = state.sessionActivationGeneration;
+  const selectedTeamId = teamId || (await loadDefaultTeamPreference()).effectiveTeamId || 'glados';
+  if (requestedGeneration !== state.sessionActivationGeneration) return null;
   const current = state.investigationSessions.find(session => session.id === state.currentSessionId);
   const continuesInBackground = Number(current?.runningCount || 0) > 0 || state.active.size > 0;
   ++state.sessionActivationGeneration;
@@ -361,7 +380,7 @@ async function createInvestigationSession({ teamId = 'glados' } = {}) {
   state.sessionActivationController = null;
   closeSessionStreams();
   state.currentSessionId = null;
-  state.currentTeamId = teamId;
+  state.currentTeamId = selectedTeamId;
   state.teamChangeDraft = null;
   state.securityReviews = [];
   renderSecurityReviews();
@@ -499,7 +518,7 @@ async function deleteInvestigationSession(sessionId) {
     state.sessionActivationController = null;
     closeSessionStreams();
     state.currentSessionId = null;
-    state.currentTeamId = 'glados';
+    state.currentTeamId = state.defaultTeamPreference?.effectiveTeamId || 'glados';
     state.teamChangeDraft = null;
     clearPlanClientState();
     persistWorkspaceState();
@@ -634,16 +653,23 @@ function openNotificationDrawer(open = true) {
 
 errorsOnlyEl.addEventListener('change', () => {
   document.body.classList.toggle('errors-only', errorsOnlyEl.checked);
+  document.querySelectorAll('.work-history').forEach(applyWorkHistoryMode);
   if (errorsOnlyEl.checked) {
     document.querySelectorAll('.entry.tool-result.error .tool-details')
       .forEach(details => { details.open = true; });
   }
 });
 
-// Debug off shows the conversation without internal thinking or tool activity.
-// When enabled, open tool details so the current work is visible immediately.
+// Debug off shows live progress, then folds completed work behind a summary.
+// Debug additionally exposes raw tool events and internal thinking.
+function applyWorkHistoryMode(history) {
+  const hasVisibleError = errorsOnlyEl.checked && history.querySelector('.entry.error, .entry.prompt-error, .entry.permission-denied');
+  history.open = debugModeEl.checked || !!hasVisibleError || history.dataset.expanded === 'true';
+}
+
 function applyDebugMode() {
   document.body.classList.toggle('debug-off', !debugModeEl.checked);
+  document.querySelectorAll('.work-history').forEach(applyWorkHistoryMode);
   if (debugModeEl.checked) {
     document.querySelectorAll('.entry.tool-call .tool-details, .entry.tool-result .tool-details')
       .forEach(details => { details.open = true; });
@@ -1199,10 +1225,11 @@ function updateWorkspaceNav() {
     settings: 'open-settings',
   };
   document.querySelectorAll('.workspace-links a').forEach(link => { link.classList.remove('nav-active'); link.removeAttribute('aria-current'); });
-  const selectedLink = document.getElementById(mapping[state.currentTab]);
+  const proxyTab = state.openTabs.find(tab => tab.id === state.currentTab)?.kind === 'proxy';
+  const selectedLink = document.getElementById(proxyTab ? 'open-proxy' : mapping[state.currentTab]);
   selectedLink?.classList.add('nav-active');
   selectedLink?.setAttribute('aria-current', 'page');
-  document.getElementById('workspace-tools')?.classList.toggle('nav-active', ['agent-library', 'clippy', 'connectors', 'proxy', 'reports', 'terminal'].includes(state.currentTab));
+  document.getElementById('workspace-tools')?.classList.toggle('nav-active', proxyTab || ['agent-library', 'clippy', 'connectors', 'reports', 'terminal'].includes(state.currentTab));
 }
 
 function renderTabs() {
@@ -1216,12 +1243,20 @@ function renderTabs() {
     if (t.kind === 'agent') el.title = t.id;
     el.innerHTML = `<span class="label">${escapeHtml(label)}</span>` +
       (closable ? `<span class="close" data-close="${t.id}">×</span>` : '');
-    el.addEventListener('click', ev => {
+    el.addEventListener('click', async ev => {
       if (ev.target.dataset.close) {
         ev.stopPropagation();
         closeTab(t.id);
       } else {
-        setCurrentTab(t.id);
+        try {
+          if (t.kind === 'proxy' && t.sessionId !== state.currentSessionId) {
+            await activateInvestigationSession(t.sessionId);
+            if (state.currentSessionId !== t.sessionId) return;
+          }
+          setCurrentTab(t.id);
+        } catch (error) {
+          showToast(error.message, { kind: 'error', label: 'Proxy' });
+        }
       }
     });
     tabsEl.appendChild(el);
@@ -1264,10 +1299,19 @@ function openTerminal() {
   setCurrentTab(id);
 }
 
-function openProxy() {
-  const id = 'proxy';
-  if (!state.openTabs.find(t => t.id === id)) state.openTabs.push({ id, kind: 'proxy', label: 'Proxy' });
-  setCurrentTab(id);
+async function openProxy(options = {}) {
+  try {
+    const sessionId = options.sessionId || state.currentSessionId || await materializeDraftSession();
+    if (!sessionId) return;
+    const session = state.investigationSessions.find(item => item.id === sessionId);
+    const id = `proxy:${sessionId}`;
+    if (!state.openTabs.some(tab => tab.id === id)) {
+      state.openTabs.push({ id, kind: 'proxy', sessionId, sessionName: session?.name || sessionId, label: `Proxy · ${session?.name || 'Session'}` });
+    }
+    setCurrentTab(id);
+  } catch (error) {
+    showToast(error.message, { kind: 'error', label: 'Proxy' });
+  }
 }
 
 function openUpdatePane({ autoStart = false } = {}) {
@@ -1279,6 +1323,7 @@ function openUpdatePane({ autoStart = false } = {}) {
 
 function renderPane() {
   disposeClippyPane();
+  GladosProxyWorkspace.dispose();
   paneEl.innerHTML = '';
   const id = state.currentTab;
   if (!id) {
@@ -2186,8 +2231,22 @@ function ensureTranscript(tabId, agentId, options = {}) {
     // arrives as assistant-text, so success results should not become chat
     // bubbles. Error results are rendered as explicit prompt failures.
     if (ev.kind === 'result' && !ev.isError) {
-      finalizeActiveStreamEntries(rec);
-      if (rec.sending && eventBelongsToCurrentTurn(rec, ev)) finishTranscriptTurn(rec, tabId);
+      // Retain an invisible terminal boundary so replay cannot resurrect a
+      // synchronous call whose result was never recorded as permanently live.
+      const sourceTs = transcriptEventMs(ev);
+      const belongsToCurrentTurn = eventBelongsToCurrentTurn(rec, ev) && (!rec.turnStartedAt || sourceTs >= rec.turnStartedAt);
+      if (belongsToCurrentTurn) finalizeActiveStreamEntries(rec);
+      const terminal = sourceTs || !rec.sending ? { kind: 'work-turn-ended', ts: sourceTs || Date.now(), id: `work-terminal:${ev.id || `${ev.runId || ev.sessionId || ''}:${ev.ts || 'unknown'}`}` } : null;
+      if (terminal) {
+        const inserted = insertTranscriptEvent(rec, terminal);
+        if (rec.el?.isConnected) {
+          if (inserted.outOfOrder) renderTranscriptEvents(rec);
+          else appendEntry(rec.el, terminal, rec);
+        }
+      }
+      if (belongsToCurrentTurn) {
+        if (rec.sending) finishTranscriptTurn(rec, tabId, terminal);
+      }
       return;
     }
     if (ev.kind === 'error' || (ev.kind === 'result' && ev.isError)) {
@@ -2209,7 +2268,7 @@ function ensureTranscript(tabId, agentId, options = {}) {
       rec.firstTokenSeenAt ||= Date.now();
       markTranscriptActivity(rec, tabId, isText ? 'responding' : 'thinking');
       handleStreamDelta(rec, ev);
-      if (isText && ev.evtType === 'text_end') finishTranscriptTurn(rec, tabId);
+      // text_end finishes one public progress block, not the agent turn.
       return;
     }
 
@@ -2222,7 +2281,7 @@ function ensureTranscript(tabId, agentId, options = {}) {
         reconcileStreamedEvent(rec, ev);
         if (ev.kind === 'assistant-text' && rec.sending && eventBelongsToCurrentTurn(rec, ev)) {
           rec.firstTokenSeenAt ||= Date.now();
-          finishTranscriptTurn(rec, tabId);
+          markTranscriptActivity(rec, tabId, 'responding');
         }
         return;
       }
@@ -2254,9 +2313,9 @@ function ensureTranscript(tabId, agentId, options = {}) {
     const inserted = insertTranscriptEvent(rec, ev);
     if (!inserted.added) {
       if (rec.el && rec.el.isConnected && inserted.index >= 0) renderTranscriptEvents(rec);
-      if (rec.sending && (ev.kind === 'assistant-text' || ev.kind === 'prompt-error') && eventBelongsToCurrentTurn(rec, ev)) {
-        rec.firstTokenSeenAt ||= Date.now();
-        finishTranscriptTurn(rec, tabId);
+      if (rec.sending && eventBelongsToCurrentTurn(rec, ev)) {
+        if (ev.kind === 'prompt-error') finishTranscriptTurn(rec, tabId, ev);
+        else if (ev.kind === 'assistant-text') markTranscriptActivity(rec, tabId, 'responding');
       }
       return;
     }
@@ -2274,7 +2333,8 @@ function ensureTranscript(tabId, agentId, options = {}) {
       if (ev.kind === 'assistant-text' || ev.kind === 'prompt-error') {
         if (eventBelongsToCurrentTurn(rec, ev)) {
           rec.firstTokenSeenAt ||= Date.now();
-          finishTranscriptTurn(rec, tabId);
+          if (ev.kind === 'prompt-error') finishTranscriptTurn(rec, tabId, ev);
+          else markTranscriptActivity(rec, tabId, 'responding');
         }
       } else if (ev.kind === 'thinking') {
         rec.firstTokenSeenAt ||= Date.now();
@@ -2354,8 +2414,9 @@ function findEventIndexByIdentity(rec, ev) {
     const byId = rec.events.findIndex(x => x.id && x.id === ev.id);
     if (byId >= 0) return byId;
   }
-  if (ev.toolCallId) {
-    const byTool = rec.events.findIndex(x => x.kind === ev.kind && x.toolCallId === ev.toolCallId);
+  if (ev.toolCallId || ev.toolUseId) {
+    const toolId = ev.toolCallId || ev.toolUseId;
+    const byTool = rec.events.findIndex(x => x.kind === ev.kind && (x.toolCallId || x.toolUseId) === toolId);
     if (byTool >= 0) return byTool;
   }
   const evMs = transcriptEventMs(ev);
@@ -2505,7 +2566,7 @@ function finalizeActiveStreamEntries(rec) {
         try {
           const ts = entry.el.querySelector('.ts')?.outerHTML || '';
           entry.el.innerHTML = `${ts}${renderMarkdown(content)}`;
-          enhanceMarkdownContent(entry.el);
+          enhanceMarkdownContent(entry.el, { clippySources: rec?.agentId === 'pkg-clippy-intel--clippy' });
         } catch (_) { /* keep plain text on error */ }
       }
     }
@@ -2513,7 +2574,7 @@ function finalizeActiveStreamEntries(rec) {
       rec.events.push({
         kind: durableKind,
         text: content,
-        ts: Date.now(),
+        ts: Number(entry.el?.dataset.streamTs) || Date.now(),
         _streamed: true,
       });
     }
@@ -2553,14 +2614,32 @@ function markTranscriptActivity(rec, tabId, activity) {
   updateSendingIndicator(tabId);
 }
 
-function finishTranscriptTurn(rec, tabId) {
+function workTurnBoundary(rec, terminal = null) {
+  if (terminal?.kind === 'work-turn-ended') return terminal;
+  const ts = transcriptEventMs(terminal) || Date.now();
+  return {
+    kind: 'work-turn-ended',
+    ts,
+    id: `work-terminal:${terminal?.id || rec?.turnStartedAt || ts}`,
+    outcome: terminal?.kind === 'prompt-error' ? 'error' : rec?.activity === 'stopping' ? 'stopped' : 'ended',
+  };
+}
+
+function finishTranscriptTurn(rec, tabId, terminal = null) {
   if (!rec) return;
+  const wasSending = rec.sending;
+  finalizeActiveStreamEntries(rec);
+  const boundary = workTurnBoundary(rec, terminal);
+  if (boundary !== terminal) insertTranscriptEvent(rec, boundary);
+  finishWorkActivities(rec, boundary);
+  if (rec.el?.isConnected) compactCompletedWork(rec.el, boundary, rec);
   rec.sending = false;
   rec.activity = null;
   rec.lastActivityTs = Date.now();
   rec.turnAgeMs = null;
   rec.completedAt = Date.now();
   updateSendingIndicator(tabId);
+  if (wasSending && rec.agentId === 'pkg-clippy-intel--clippy' && !['error', 'stopped'].includes(boundary.outcome)) syncClippyChatCandidates(rec, boundary);
 }
 
 function formatElapsed(ms) {
@@ -2654,15 +2733,23 @@ async function refreshChatTurnStatus(tabId, agentId) {
       setTimeout(() => {
         if (rec.sending && rec.activity === 'finalizing') finishTranscriptTurn(rec, tabId);
       }, 1000);
+    } else {
+      finishWorkActivities(rec);
     }
   } catch {}
 }
 
 function refreshVisibleChatTurnStatuses() {
   const tab = state.openTabs.find(item => item.id === state.currentTab);
-  if (!tab || !['chat', 'agent'].includes(tab.kind)) return;
-  const agentId = tab.kind === 'chat' ? 'glados' : tab.id;
-  refreshChatTurnStatus(tab.id, agentId);
+  if (!tab) return;
+  if (tab.kind === 'clippy') {
+    const independent = state.transcripts.get('clippy-chat');
+    if (independent?.agentId && independent.sessionId) refreshChatTurnStatus('clippy-chat', independent.agentId);
+    return;
+  }
+  if (!['chat', 'agent'].includes(tab.kind)) return;
+  const rec = state.transcripts.get(tab.id);
+  refreshChatTurnStatus(tab.id, rec?.agentId || (tab.kind === 'chat' ? activeCoordinatorId() : tab.id));
 }
 
 function handleStreamDelta(rec, ev) {
@@ -2766,7 +2853,7 @@ function handleStreamDelta(rec, ev) {
       try {
         const ts = entry.el.querySelector('.ts')?.outerHTML || '';
         entry.el.innerHTML = `${ts}${renderMarkdown(entry.content || '')}`;
-        enhanceMarkdownContent(entry.el);
+        enhanceMarkdownContent(entry.el, { clippySources: rec?.agentId === 'pkg-clippy-intel--clippy' });
         addAskGladosAction(entry.el, entry.content, rec);
         const toggle = entry.el.querySelector('.expand-toggle');
         if (toggle) {
@@ -2962,12 +3049,13 @@ function chatComposerMarkup(tabId, label, { coordinator = false } = {}) {
           </label>
           <label class="composer-select composer-effort" title="Reasoning effort">
             <span class="sr-only">Reasoning effort</span>
-            <select data-chat-effort aria-label="Reasoning effort">${efforts.map(([value, text]) => `<option value="${value}">${text}</option>`).join('')}</select>
+            <select data-chat-effort aria-label="Reasoning effort" disabled>${efforts.map(([value, text]) => `<option value="${value}">${text}</option>`).join('')}</select>
           </label>
           <button type="button" data-chat-stop data-chat-tab="${escapeHtml(tabId)}" class="composer-stop-button" title="Stop the current response" aria-label="Stop response" disabled><svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
           <button type="button" data-chat-send data-chat-tab="${escapeHtml(tabId)}" class="composer-send-button" title="Send" aria-label="Send message"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M12 19V5m0 0-5.5 5.5M12 5l5.5 5.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         </div>
       </div>
+      <p class="composer-effort-note" data-chat-effort-note hidden></p>
     </div>`;
 }
 
@@ -2990,6 +3078,15 @@ function fileDataUrl(file) {
   });
 }
 
+function applyComposerEffortSupport(select, note, config, busy = false) {
+  const supported = config?.effortSupported !== false;
+  const message = supported ? 'Reasoning effort for new turns' : config.effortNote || 'This model deployment does not support adjustable reasoning effort. Your saved preference is preserved.';
+  select.disabled = busy || !supported;
+  select.title = message;
+  select.closest?.('label')?.setAttribute('title', message);
+  if (note) { note.hidden = supported; note.textContent = supported ? '' : message; }
+}
+
 function wireChatComposerControls(chat, { agentId, tabId, coordinator, rec }) {
   const root = chat.querySelector(`[data-chat-composer][data-chat-tab="${CSS.escape(tabId)}"]`);
   const textarea = root.querySelector('textarea');
@@ -2998,6 +3095,7 @@ function wireChatComposerControls(chat, { agentId, tabId, coordinator, rec }) {
   const strip = root.querySelector('[data-chat-attachment-strip]');
   const modelSelect = root.querySelector('[data-chat-model]');
   const effortSelect = root.querySelector('[data-chat-effort]');
+  const effortNote = root.querySelector('[data-chat-effort-note]');
   const accessButton = root.querySelector('[data-chat-full-access]');
   const selectedAttachments = rec.composerAttachments || (rec.composerAttachments = []);
   let config = null;
@@ -3134,6 +3232,13 @@ function wireChatComposerControls(chat, { agentId, tabId, coordinator, rec }) {
       const result = body.results?.[0];
       if (!response.ok || !result?.ok) throw new Error(result?.error || body.error || `HTTP ${response.status}`);
       config.model = result.newModel;
+      try {
+        config = { ...config, ...await fetchJson(withSession(`/api/chat/${encodeURIComponent(agentId)}/composer`, rec.sessionId), { timeoutMs: 8000 }) };
+        applyComposerEffortSupport(effortSelect, effortNote, config);
+      } catch {
+        effortSelect.disabled = true;
+        effortSelect.title = 'Reopen this chat to reload reasoning support for the selected model.';
+      }
       await loadAgents();
       showToast(`${agentId === 'glados' ? 'GLaDOS' : agentId} will use ${result.newModel} on the next turn.`, { kind: 'success', label: 'Model' });
     } catch (error) {
@@ -3146,7 +3251,7 @@ function wireChatComposerControls(chat, { agentId, tabId, coordinator, rec }) {
   });
 
   effortSelect.addEventListener('change', async () => {
-    if (!config || busy || effortSelect.value === config.effort) return;
+    if (!config || busy || config.effortSupported === false || effortSelect.value === config.effort) return;
     const prior = config.effort;
     busy = true;
     effortSelect.disabled = true;
@@ -3163,7 +3268,7 @@ function wireChatComposerControls(chat, { agentId, tabId, coordinator, rec }) {
       pushNotification('error', error.message, { toast: true, label: 'Reasoning' });
     } finally {
       busy = false;
-      effortSelect.disabled = false;
+      applyComposerEffortSupport(effortSelect, effortNote, config);
     }
   });
 
@@ -3183,6 +3288,7 @@ function wireChatComposerControls(chat, { agentId, tabId, coordinator, rec }) {
         .map(value => `<option value="${value}">${labels[value]}</option>`).join('');
     }
     effortSelect.value = config.effort || 'high';
+    applyComposerEffortSupport(effortSelect, effortNote, config);
     renderAccess(config.fullAccess);
   }).catch(error => {
     modelSelect.innerHTML = '<option>Models unavailable</option>';
@@ -3292,9 +3398,8 @@ function renderLegacyChatPane() {
         logEvent('error', 'chat error: ' + (j.error || 'unknown'));
         finishTranscriptTurn(rec, tabId);
       }
-      // On success, the "sending" flag gets cleared by the SSE handler when
-      // the first assistant/thinking/result event arrives (which is usually
-      // before the POST resolves, since the CLI blocks until turn end).
+      // On success, sending remains active until the terminal SDK result or
+      // server turn status arrives. Progress text is not turn completion.
     }).catch(e => {
       logEvent('error', 'chat exception: ' + e.message);
       finishTranscriptTurn(rec, tabId);
@@ -3339,6 +3444,8 @@ function refreshChatFind(chat, { advance = 0 } = {}) {
   const current = matches[index];
   if (current) {
     current.classList.add('find-current');
+    const history = current.closest('.work-history');
+    if (history) history.open = true;
     current.querySelectorAll('details').forEach(details => { details.open = true; });
     const rec = state.transcripts.get(state.currentTab);
     if (rec) rec.autoScroll = false;
@@ -3608,9 +3715,26 @@ function renderMarkdown(text, extraClass = '') {
 
 // Post-process a rendered markdown container: open links in new tab,
 // attach copy buttons to fenced code blocks. Idempotent — safe to re-run.
-function enhanceMarkdownContent(container) {
+function enhanceMarkdownContent(container, { clippySources = false, source = null } = {}) {
   if (!container) return;
   container.querySelectorAll('a[href]').forEach(a => {
+    const reference = clippySourceReference(a.getAttribute('href'), { allowRelative: clippySources, source });
+    if (reference) {
+      // Keep a stable same-origin citation even after a desktop restart changes
+      // the dashboard port. Reading happens only when the analyst opens it.
+      a.setAttribute('href', clippySourceHref(reference));
+      a.removeAttribute('target');
+      a.setAttribute('title', `Read Clippy source: ${reference.path}`);
+      if (!a.dataset.clippySourceWired) {
+        a.dataset.clippySourceWired = 'true';
+        a.addEventListener('click', event => {
+          event.preventDefault();
+          const current = clippySourceReference(a.getAttribute('href'));
+          if (current) openClippySourcePreview(current);
+        });
+      }
+      return;
+    }
     a.setAttribute('target', '_blank');
     a.setAttribute('rel', 'noopener noreferrer');
   });
@@ -3666,19 +3790,14 @@ function extractEventUrl(ev) {
   return candidates[candidates.length - 1];
 }
 
-function openRelatedTraffic(agentId, ev) {
+function openRelatedTraffic(agentId, ev, sessionId = state.currentSessionId) {
   const url = extractEventUrl(ev);
   if (!url) return;
   let host = '';
   try { host = new URL(url).hostname; } catch { host = url; }
-  _proxyState.filterAgent = agentId || '';
-  _proxyState.filterText = host;
-  _proxyState.pendingFocus = {
-    agentId,
-    url,
-    ts: transcriptEventMs(ev) || Date.now(),
-  };
-  openProxy();
+  if (!sessionId) return;
+  GladosProxyWorkspace.focus(sessionId, { agentId, url, host, ts: transcriptEventMs(ev) || Date.now() });
+  openProxy({ sessionId });
 }
 
 function focusTranscriptProvenance(rec) {
@@ -3729,9 +3848,196 @@ function openAgentProvenance(row) {
   }, 3000);
 }
 
+// Public work previews are derived only from tool events, never thinking text.
+function sanitizeWorkPreview(value, limit = 240) {
+  let text = String(value ?? '').slice(0, 12000);
+  text = text.replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g, '[private key redacted]');
+  text = text.replace(/https?:\/\/[^\s<>"']+/gi, match => {
+    try {
+      const url = new URL(match);
+      url.username = ''; url.password = '';
+      const query = !!url.search || !!url.hash;
+      url.search = ''; url.hash = '';
+      return `${url.toString()}${query ? '[query omitted]' : ''}`;
+    } catch { return '[URL omitted]'; }
+  });
+  text = text.replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9+\/_=.:-]+/gi, '[authorization redacted]');
+  text = text.replace(/((?:authorization|cookie|set-cookie|password|passwd|secret|token|api[_-]?key|access[_-]?key|credential|client[_-]?secret)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1[redacted]');
+  text = text.replace(/\b[A-Za-z_][A-Za-z0-9_]*(?:=)(?:"[^"]*"|'[^']*'|[^\s;]+)/g, '[assignment omitted]');
+  text = text.replace(/(?:--?(?:password|passwd|token|api[_-]?key|secret|credential|authorization|cookie|user)|-u)\s+(?:"[^"]*"|'[^']*'|[^\s]+)/gi, '[credential argument omitted]');
+  text = text.replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|[A-Za-z0-9_+\/-]{40,}={0,2})\b/g, '[opaque value omitted]');
+  text = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '');
+  return text.length > limit ? `${text.slice(0, Math.max(0, limit - 1))}…` : text;
+}
+
+function safeWorkCommand(command) {
+  // Keep an executable, familiar subcommands, and file references. Arbitrary
+  // command text/positional arguments can contain keys and are never echoed.
+  const tokens = String(command || '').split(/[\n\r]/, 1)[0].match(/"[^"]*"|'[^']*'|[^\s]+/g) || [];
+  while (tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) tokens.shift();
+  const executable = (tokens.shift() || '').replace(/^['"]|['"]$/g, '').split('/').pop();
+  if (!/^[a-zA-Z][a-zA-Z0-9_.-]{0,40}$/.test(executable || '')) return 'Command (arguments omitted)';
+  const safeWords = new Set(['run', 'test', 'build', 'check', 'lint', 'typecheck', 'diff', 'status', 'log', 'show', 'rev-parse', 'branch', 'version', 'install', 'ci', 'pytest', 'node:test']);
+  const selected = [];
+  for (let index = 0; index < tokens.length && selected.length < 5; index++) {
+    const token = tokens[index].replace(/^['"]|['"]$/g, '');
+    if (/^(?:--?(?:password|passwd|token|api[_-]?key|secret|credential|header|cookie|user)|-u|-H|--data(?:-raw|-binary)?|-d)$/i.test(token)) { index++; continue; }
+    if (/^[;&|<>`]/.test(token) || token.includes('$(')) break;
+    if (safeWords.has(token) || /^(?:--check|--stat|--name-only|--version|--test|--no-emit|-n|-l|-a|-m|-q)$/.test(token)) selected.push(token);
+    else if (/^(?:\.{0,2}\/)?[A-Za-z0-9_.\/-]+\.(?:js|cjs|mjs|ts|tsx|jsx|py|go|rs|java|json|md|css|html|sh|test|spec)$/i.test(token) && !/(?:token|secret|password|credential)/i.test(token)) selected.push(token);
+  }
+  return sanitizeWorkPreview([executable, ...selected, tokens.length > selected.length ? '…' : ''].filter(Boolean).join(' '), 150);
+}
+
+function sanitizeWorkInput(value, depth = 0) {
+  if (depth > 4) return '[nested content omitted]';
+  if (typeof value === 'string') return sanitizeWorkPreview(value, 350);
+  if (value == null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.slice(0, 8).map(item => sanitizeWorkInput(item, depth + 1));
+  const result = Object.create(null);
+  for (const [key, entry] of Object.entries(value).slice(0, 25)) {
+    if (/authorization|cookie|password|passwd|secret|token|api[_-]?key|access[_-]?key|credential|private[_-]?key|session[_-]?(?:id|key)|^(?:key|auth)$/i.test(key)) result[key] = '[redacted]';
+    else if (/^(?:command|cmd|shell)$/i.test(key)) result[key] = safeWorkCommand(entry);
+    else if (/^(?:body|content|old_string|new_string|code|script|prompt|headers|env|environment|stdin|input_data|args)$/i.test(key)) result[key] = '[content omitted]';
+    else result[key] = sanitizeWorkInput(entry, depth + 1);
+  }
+  return result;
+}
+
+function workActivitySpec(call = {}, result = null) {
+  const name = String(call.toolName || result?.toolName || 'Tool');
+  const input = call.arguments || call.toolInput || {};
+  const lower = name.toLowerCase();
+  let category = 'tool', icon = '◇', label = 'Use tool';
+  if (/browser|playwright|chrome|navigate|screenshot|computer|cua/.test(lower)) { category = 'browser'; icon = '◉'; label = 'Use browser'; }
+  else if (/(?:^|__)(?:read|glob|grep|search|list|find)(?:$|_|file)|readfile|read_file|file_read/.test(lower)) { category = 'read'; icon = '▤'; label = /search|grep|glob|find/.test(lower) ? 'Search files' : 'Read files'; }
+  else if (/edit|write|patch|notebook/.test(lower)) { category = 'edit'; icon = '✎'; label = 'Edit files'; }
+  else if (/bash|shell|exec|terminal|command/.test(lower)) { category = 'command'; icon = '›_'; label = 'Run command'; }
+  else if (/^(?:agent|task)$/.test(lower) || call.targetAgentId || /(?:^|__)(?:dispatch_agent|delegate_agent|spawn_agent|agent_dispatch)$/.test(lower)) { category = 'delegation'; icon = '↗'; label = 'Delegate work'; }
+  else if (/^mcp__/.test(lower)) { category = 'mcp'; icon = '⌁'; label = 'Query connector'; }
+  // MCP tool names describe the connector even when their action is read/search.
+  if (/^mcp__/.test(lower) && category !== 'browser' && category !== 'delegation') { category = 'mcp'; icon = '⌁'; label = 'Use connector'; }
+  const path = input.file_path || input.path || input.file || input.cwd || input.workdir || '';
+  const target = category === 'command' ? safeWorkCommand(input.command || input.cmd || input.shell || '')
+    : category === 'delegation' ? call.targetAgentId || input.subagent_type || input.agent || input.description || name
+    : category === 'mcp' ? name.replace(/^mcp__/, '').replace(/__/g, ' · ')
+    : category === 'browser' ? input.url || input.action || input.title || name
+    : path || input.pattern || input.query || name;
+  const error = result?.isError === true || Number(result?.exitCode || 0) !== 0;
+  const state = result ? error ? 'error' : 'completed' : 'running';
+  const outputSize = typeof result?.text === 'string' ? result.text.length : 0;
+  const safeInput = sanitizeWorkInput(input);
+  const details = [`Tool: ${sanitizeWorkPreview(name)}`, Object.keys(safeInput || {}).length ? `Input preview:\n${JSON.stringify(safeInput, null, 2)}` : '', result ? `Outcome: ${error ? 'Failed' : 'Completed'}${result.exitCode !== undefined ? ` · exit ${Number(result.exitCode)}` : ''}${Number.isFinite(result.durationMs) ? ` · ${result.durationMs}ms` : ''}` : 'Outcome: Running', outputSize ? `Tool output: ${outputSize.toLocaleString()} characters (raw output available in Debug).` : '', error ? `Error preview: ${sanitizeWorkPreview(result.text || result.error || 'Tool failed', 350)}` : ''].filter(Boolean).join('\n\n');
+  return { category, icon, label, target: sanitizeWorkPreview(target, 150), state, details: sanitizeWorkPreview(details, 2400) };
+}
+
+function appendWorkActivity(container, ev, rec) {
+  const kind = ev.kind;
+  if (!['tool-call', 'tool-result', 'permission-denied', 'liveness'].includes(kind)) return null;
+  if (kind === 'liveness' && !ev.toolCallId && !ev.taskId) return null;
+  const id = String(ev.toolCallId || ev.toolUseId || ev.taskId || ev.id || '');
+  let row = id ? [...container.querySelectorAll('.work-activity')].find(node => node.dataset.workId === id) : null;
+  const prior = row?._workActivity || {};
+  const savedCall = rec?.events?.find(event => event.kind === 'tool-call' && String(event.toolCallId || event.toolUseId || event.id || '') === id);
+  const call = kind === 'tool-call' ? ev : prior.call || savedCall || { toolName: ev.toolName || (kind === 'liveness' ? 'Agent' : 'Tool'), targetAgentId: ev.subagentType };
+  let result = kind === 'tool-result' ? ev : prior.result || null;
+  // A background Agent launch acknowledgement is not completion. The paired
+  // lifecycle event closes the activity when the delegated task actually ends.
+  const backgroundAck = kind === 'tool-result' && /^Subagent launched\.?$/i.test(String(ev.text || '').trim()) && workActivitySpec(call).category === 'delegation';
+  if (backgroundAck) result = null;
+  if (kind === 'permission-denied') result = { ...ev, isError: true, text: ev.decisionReason || ev.text || 'Permission denied' };
+  if (kind === 'liveness' && ev.live === false) result = { ...ev, isError: /error|failed/i.test(ev.state || ''), text: '' };
+  if (!row) {
+    row = document.createElement('div');
+    row.dataset.workId = id;
+    row.dataset.eventTs = String(transcriptEventMs(ev) || Date.now());
+    if (rec?.agentId) row.dataset.agent = rec.agentId;
+    container.appendChild(row);
+  }
+  row._workActivity = { call, result, background: prior.background || backgroundAck || call.toolInput?.run_in_background === true || call.arguments?.run_in_background === true };
+  const spec = workActivitySpec(call, result);
+  const expanded = row.querySelector('details')?.open === true;
+  row.className = `entry work-activity work-${spec.category}${spec.state === 'error' ? ' error' : ''}`;
+  row.dataset.workState = spec.state;
+  const status = spec.state === 'running' ? 'Running' : spec.state === 'error' ? 'Failed' : 'Done';
+  row.innerHTML = `<details class="work-details"${expanded ? ' open' : ''}><summary><span class="work-icon" aria-hidden="true">${spec.icon}</span><span class="work-label">${escapeHtml(spec.label)}</span><span class="work-target">${escapeHtml(spec.target)}</span><span class="work-status">${status}</span></summary><pre class="work-detail-preview">${escapeHtml(spec.details)}</pre></details>`;
+  return row;
+}
+
+function finishWorkActivities(rec, terminal = null) {
+  if (!rec?.el) return;
+  const cutoff = transcriptEventMs(terminal);
+  for (const row of rec.el.querySelectorAll('.work-activity')) {
+    if (row.dataset.workState !== 'running' || row._workActivity?.background) continue;
+    if (cutoff && Number(row.dataset.eventTs || 0) > cutoff) continue;
+    row.dataset.workState = 'unavailable';
+    const status = row.querySelector('.work-status');
+    if (status) status.textContent = 'Ended';
+    const detail = row.querySelector('.work-detail-preview');
+    if (detail) detail.textContent = detail.textContent.replace('Outcome: Running', 'Outcome: Turn ended before a tool result was recorded.');
+  }
+}
+
+// Fold only at an authoritative turn boundary. Public progress remains live
+// while tools run; private traces retain their normal Debug visibility even
+// when an operator expands this history.
+function compactCompletedWork(container, terminal, rec) {
+  if (!container?.children || !container.insertBefore) return;
+  const boundaryId = String(terminal.id || `work-terminal:${transcriptEventMs(terminal)}`);
+  const children = [...container.children];
+  if (children.some(node => node.dataset.workBoundary === boundaryId)) return;
+  const cutoff = transcriptEventMs(terminal);
+  let start = 0;
+  for (let i = 0; i < children.length; i++) {
+    if (children[i].dataset.workBoundary || children[i].classList.contains('user-message')) start = i + 1;
+  }
+  const rows = children.slice(start).filter(node => node.classList.contains('entry') && (!cutoff || Number(node.dataset.eventTs || node.dataset.streamTs || 0) <= cutoff));
+  const lastTool = rows.findLastIndex(node => node.classList.contains('tool-call') || node.classList.contains('work-activity'));
+  const lastAnswer = rows.findLastIndex(node => node.classList.contains('assistant-text'));
+  const failed = terminal.outcome === 'error' || terminal.outcome === 'stopped' || rows.some(node => node.classList.contains('prompt-error'));
+  const answer = !failed && lastAnswer > lastTool ? rows[lastAnswer] : null;
+  const runningIds = new Set(rows.filter(node => node.classList.contains('work-activity') && node.dataset.workState === 'running').map(node => node.dataset.workId));
+  const previous = rows.filter(node => node !== answer && !node.classList.contains('prompt-error') && !node.classList.contains('operator-event') && !node.classList.contains('permission-denied') && !runningIds.has(node.dataset.workId || node.dataset.toolCallId));
+  const updates = previous.filter(node => node.classList.contains('assistant-text') || node.classList.contains('work-activity')).length;
+  if (updates) {
+    const history = document.createElement('details');
+    history.className = 'work-history';
+    history.dataset.historyId = boundaryId;
+    history.dataset.expanded = String(rec?.workHistoryExpanded?.has(boundaryId) || false);
+    const summary = document.createElement('summary');
+    summary.textContent = `${updates} previous update${updates === 1 ? '' : 's'}`;
+    history.appendChild(summary);
+    const body = document.createElement('div');
+    body.className = 'work-history-content';
+    history.appendChild(body);
+    history.addEventListener('toggle', () => {
+      if (debugModeEl.checked || errorsOnlyEl.checked) return;
+      history.dataset.expanded = String(history.open);
+      if (rec) {
+        rec.workHistoryExpanded ||= new Set();
+        if (history.open) rec.workHistoryExpanded.add(boundaryId);
+        else rec.workHistoryExpanded.delete(boundaryId);
+      }
+    });
+    container.insertBefore(history, previous[0]);
+    for (const node of previous) body.appendChild(node);
+    applyWorkHistoryMode(history);
+  }
+  const boundary = document.createElement('span');
+  boundary.hidden = true;
+  boundary.dataset.workBoundary = boundaryId;
+  container.appendChild(boundary);
+}
+
 function appendEntry(container, ev, rec) {
   if (ev.kind === 'result' && !ev.isError) return;
+  if (ev.kind === 'work-turn-ended') {
+    finishWorkActivities(rec || { el: container }, ev);
+    compactCompletedWork(container, ev, rec);
+    return;
+  }
   if (rec?.independentSession) container.querySelector?.('.clippy-chat-welcome')?.remove();
+  appendWorkActivity(container, ev, rec);
   const el = document.createElement('div');
   const kind = ev.kind;
   const classes = ['entry', kind];
@@ -3751,7 +4057,7 @@ function appendEntry(container, ev, rec) {
   if (kind === 'assistant-text') {
     // v4: markdown for assistant output (bold, code, links, lists, headers).
     el.innerHTML = `<span class="ts">${ts}</span>${renderMarkdown(displayTranscriptText(ev.text || ''))}`;
-    enhanceMarkdownContent(el);
+    enhanceMarkdownContent(el, { clippySources: rec?.agentId === 'pkg-clippy-intel--clippy' });
     addAskGladosAction(el, displayTranscriptText(ev.text || ''), rec);
   } else if (kind === 'thinking' || kind === 'user-message') {
     const displayText = kind === 'thinking' ? displayTranscriptText(ev.text || '') : (ev.text || '');
@@ -3802,7 +4108,7 @@ function appendEntry(container, ev, rec) {
       traffic.title = `Open proxy traffic for ${targetUrl}`;
       traffic.addEventListener('click', event => {
         event.stopPropagation();
-        openRelatedTraffic(rec.agentId, ev);
+        openRelatedTraffic(rec.agentId, ev, rec.sessionId || state.currentSessionId);
       });
       el.appendChild(traffic);
     }
@@ -3880,6 +4186,10 @@ function appendEntry(container, ev, rec) {
   }
 
   container.appendChild(el);
+  if (kind === 'prompt-error') {
+    finishWorkActivities(rec || { el: container }, ev);
+    compactCompletedWork(container, workTurnBoundary(rec, ev), rec);
+  }
   if (rec?.agentId && ['assistant-text', 'tool-call', 'tool-result', 'prompt-error', 'permission-denied'].includes(kind)) {
     const detail = kind === 'assistant-text' ? ''
       : kind === 'tool-call' ? `Used ${ev.toolName || 'a tool'}`
@@ -5087,784 +5397,31 @@ function renderTerminalPane() {
   setTimeout(onResize, 50);
 }
 
-// --- Proxy ---
-// One long-lived state object across tab switches so the table keeps scrollback
-// and the EventSource isn't reopened on every render.
-const _proxyState = {
-  rows: [], es: null,
-  filterText: '', filterStatus: '', filterAgent: '',
-  maxRows: 2000, paused: false, selectedId: null, detailCache: new Map(),
-  // v4 Tier 2 — click-to-sort column state, persisted in localStorage.
-  sortKey: (() => { try { return localStorage.getItem('glados-dash.proxy.sortKey') || 'ts'; } catch { return 'ts'; } })(),
-  sortDir: (() => { try { return localStorage.getItem('glados-dash.proxy.sortDir') || 'asc'; } catch { return 'asc'; } })(),
-  // v4 Tier 3 #9 — multi-row selection for bulk export. `selectedId` still
-  // tracks the single row that populates the detail panes (last click); the
-  // set below covers Shift+click ranges and Cmd/Ctrl+click toggles.
-  selectedIds: new Set(),
-  lastClickedId: null, // anchor for Shift+click range selection
-  pendingFocus: null,
-  generation: 0,
-};
-
+// --- Proxy: each tab keeps an explicit investigation-session identity. ---
 function clearProxyClientState() {
-  if (_proxyState.es) {
-    try { _proxyState.es.close(); } catch {}
-    _proxyState.es = null;
-  }
-  _proxyState.generation += 1;
-  _proxyState.rows = [];
-  _proxyState.filterText = '';
-  _proxyState.filterStatus = '';
-  _proxyState.filterAgent = '';
-  _proxyState.paused = false;
-  _proxyState.selectedId = null;
-  _proxyState.selectedIds.clear();
-  _proxyState.lastClickedId = null;
-  _proxyState.pendingFocus = null;
-  _proxyState.detailCache.clear();
+  GladosProxyWorkspace.clear();
 }
 
 function renderProxyPane() {
-  const proxyGeneration = _proxyState.generation;
-  const wrap = document.createElement('div');
-  wrap.className = 'proxy-pane';
-  wrap.innerHTML = `
-    <div class="proxy-toolbar">
-      <span class="proxy-status" id="proxy-connection">connecting…</span>
-      <input type="text" id="proxy-filter-text" placeholder="URL contains…" />
-      <select id="proxy-filter-status">
-        <option value="">all statuses</option>
-        <option value="2xx">2xx</option>
-        <option value="3xx">3xx</option>
-        <option value="4xx">4xx</option>
-        <option value="5xx">5xx</option>
-        <option value="429">429</option>
-      </select>
-      <input type="text" id="proxy-filter-agent" placeholder="agent tag…" />
-      <button id="proxy-pause" title="Pause the live stream (keeps existing rows)">Pause</button>
-      <button id="proxy-clear" title="Clear the table (does not affect captured traffic)">Clear</button>
-      <span class="proxy-count" id="proxy-count">0 rows</span>
-      <span class="proxy-multi-count" id="proxy-multi-count"></span>
-      <button id="proxy-export-csv" title="Export CSV — selected rows if any, else all visible">CSV</button>
-      <button id="proxy-export-har" title="Export HAR — selected rows if any, else all visible. Fetches detail for each.">HAR</button>
-    </div>
-    <div class="proxy-body">
-      <div class="proxy-table-host">
-        <table class="proxy-table proxy-table-sortable">
-          <thead>
-            <tr>
-              <th class="col-time"   data-sort="ts">Time</th>
-              <th class="col-method" data-sort="method">Method</th>
-              <th class="col-url"    data-sort="url">URL</th>
-              <th class="col-status" data-sort="status">Status</th>
-              <th class="col-len"    data-sort="respLen">Len</th>
-              <th class="col-mime"   data-sort="mime">MIME</th>
-              <th class="col-agent"  data-sort="agentTag">Agent</th>
-            </tr>
-          </thead>
-          <tbody id="proxy-tbody"></tbody>
-        </table>
-      </div>
-      <aside class="proxy-agents-sidebar" id="proxy-agents-sidebar" title="Per-agent metrics — click an agent to filter">
-        <div class="proxy-agents-head">Per-agent (10s)</div>
-        <div class="proxy-agents-list" id="proxy-agents-list">
-          <div class="proxy-agents-empty">no agent traffic yet</div>
-        </div>
-      </aside>
-    </div>
-    <div class="proxy-splitter" id="proxy-splitter" title="Drag to resize"></div>
-    <div class="proxy-detail-row">
-      <div class="proxy-detail-col">
-        <div class="proxy-detail-head">
-          <span class="proxy-detail-label">Request</span>
-          <span class="proxy-detail-meta" id="proxy-req-meta"></span>
-          <input type="search" class="proxy-detail-search" id="proxy-req-search" placeholder="find in request (Ctrl-F)" />
-          <span class="proxy-detail-search-count" id="proxy-req-search-count"></span>
-          <button class="proxy-detail-copy" id="proxy-open-agent" title="Open the related agent transcript" disabled>Agent</button>
-          <button class="proxy-detail-copy" id="proxy-copy-req" title="Copy raw request">Copy</button>
-          <button class="proxy-detail-copy" id="proxy-replay-btn" title="Replay this request through the configured proxy">Replay...</button>
-        </div>
-        <pre class="proxy-detail-body" id="proxy-req-body">Select a row above.</pre>
-      </div>
-      <div class="proxy-detail-col">
-        <div class="proxy-detail-head">
-          <span class="proxy-detail-label">Response</span>
-          <span class="proxy-detail-meta" id="proxy-resp-meta"></span>
-          <input type="search" class="proxy-detail-search" id="proxy-resp-search" placeholder="find in response (Ctrl-F)" />
-          <span class="proxy-detail-search-count" id="proxy-resp-search-count"></span>
-          <button class="proxy-detail-copy" id="proxy-copy-curl" title="Copy as curl command">curl</button>
-        </div>
-        <pre class="proxy-detail-body" id="proxy-resp-body"></pre>
-      </div>
-    </div>
-  `;
-  paneEl.appendChild(wrap);
-
-  const tbody = wrap.querySelector('#proxy-tbody');
-  const filterText = wrap.querySelector('#proxy-filter-text');
-  const filterStatus = wrap.querySelector('#proxy-filter-status');
-  const filterAgent = wrap.querySelector('#proxy-filter-agent');
-  const pauseBtn = wrap.querySelector('#proxy-pause');
-  const clearBtn = wrap.querySelector('#proxy-clear');
-  const connEl = wrap.querySelector('#proxy-connection');
-  const countEl = wrap.querySelector('#proxy-count');
-  const reqMetaEl = wrap.querySelector('#proxy-req-meta');
-  const respMetaEl = wrap.querySelector('#proxy-resp-meta');
-  const reqBodyEl = wrap.querySelector('#proxy-req-body');
-  const respBodyEl = wrap.querySelector('#proxy-resp-body');
-  const copyReqBtn = wrap.querySelector('#proxy-copy-req');
-  const copyCurlBtn = wrap.querySelector('#proxy-copy-curl');
-  const openAgentBtn = wrap.querySelector('#proxy-open-agent');
-  const splitter = wrap.querySelector('#proxy-splitter');
-  const tableHost = wrap.querySelector('.proxy-table-host');
-  const detailRow = wrap.querySelector('.proxy-detail-row');
-
-  filterText.value = _proxyState.filterText;
-  filterStatus.value = _proxyState.filterStatus;
-  filterAgent.value = _proxyState.filterAgent;
-  pauseBtn.textContent = _proxyState.paused ? 'Resume' : 'Pause';
-
-  function proxyRowMatches(r) {
-    if (_proxyState.filterText && !(r.url || '').toLowerCase().includes(_proxyState.filterText.toLowerCase())) return false;
-    if (_proxyState.filterAgent && !(r.agentTag || '').toLowerCase().includes(_proxyState.filterAgent.toLowerCase())) return false;
-    const f = _proxyState.filterStatus;
-    if (!f) return true;
-    if (f === '429') return r.status === 429;
-    if (f === '2xx') return r.status >= 200 && r.status < 300;
-    if (f === '3xx') return r.status >= 300 && r.status < 400;
-    if (f === '4xx') return r.status >= 400 && r.status < 500;
-    if (f === '5xx') return r.status >= 500 && r.status < 600;
-    return true;
+  const tab = state.openTabs.find(item => item.id === state.currentTab);
+  const sessionId = tab?.sessionId;
+  if (!sessionId) {
+    paneEl.innerHTML = '<div class="pane-empty">Open a session, then choose Proxy.</div>';
+    return;
   }
-
-  function statusClass(s) {
-    if (!s) return '';
-    if (s >= 500) return 's5xx';
-    if (s === 429) return 's429';
-    if (s >= 400) return 's4xx';
-    if (s >= 300) return 's3xx';
-    return 's2xx';
-  }
-
-  function paintRow(r) {
-    const tr = document.createElement('tr');
-    tr.dataset.id = r.id;
-    if (_proxyState.selectedId === r.id) tr.classList.add('selected');
-    if (_proxyState.selectedIds.has(r.id)) tr.classList.add('multi-selected');
-    tr.innerHTML = `
-      <td class="col-time">${new Date(r.ts).toLocaleTimeString()}</td>
-      <td class="col-method">${escapeHtml(r.method || '')}</td>
-      <td class="col-url" title="${escapeHtml(r.url || '')}">${escapeHtml(r.url || '')}</td>
-      <td class="col-status ${statusClass(r.status)}">${r.status || '—'}</td>
-      <td class="col-len">${r.respLen || 0}</td>
-      <td class="col-mime">${escapeHtml(r.mime || '')}</td>
-      <td class="col-agent">${escapeHtml(r.agentTag || '')}</td>
-    `;
-    tr.addEventListener('click', ev => handleRowClick(r, ev));
-    return tr;
-  }
-
-  // v4 Tier 3 #9 — Shift+click = range select (across currently visible rows
-  // under the active sort), Cmd/Ctrl+click = toggle, plain click = single.
-  function handleRowClick(r, ev) {
-    const visible = sortRows(_proxyState.rows.filter(proxyRowMatches));
-    if (ev.shiftKey && _proxyState.lastClickedId != null) {
-      const a = visible.findIndex(x => x.id === _proxyState.lastClickedId);
-      const b = visible.findIndex(x => x.id === r.id);
-      if (a >= 0 && b >= 0) {
-        const [lo, hi] = a < b ? [a, b] : [b, a];
-        _proxyState.selectedIds.clear();
-        for (let i = lo; i <= hi; i++) _proxyState.selectedIds.add(visible[i].id);
-      }
-    } else if (ev.metaKey || ev.ctrlKey) {
-      if (_proxyState.selectedIds.has(r.id)) _proxyState.selectedIds.delete(r.id);
-      else _proxyState.selectedIds.add(r.id);
-    } else {
-      _proxyState.selectedIds.clear();
-    }
-    _proxyState.lastClickedId = r.id;
-    selectRow(r);
-    // Re-paint only the multi-selected class state on visible rows (cheap).
-    for (const el of tbody.querySelectorAll('tr')) {
-      const id = Number(el.dataset.id);
-      el.classList.toggle('multi-selected', _proxyState.selectedIds.has(id));
-    }
-    updateMultiCount();
-  }
-
-  function updateMultiCount() {
-    const el = wrap.querySelector('#proxy-multi-count');
-    if (!el) return;
-    const n = _proxyState.selectedIds.size;
-    el.textContent = n > 0 ? `· ${n} selected` : '';
-  }
-
-  function headersToString(h) {
-    if (!h) return '';
-    return Object.entries(h).map(([k, v]) => `${k}: ${v}`).join('\n');
-  }
-
-  function formatRequest(d, r) {
-    const line = d?.requestLine || `${r.method} ${new URL(r.url).pathname}${new URL(r.url).search} HTTP/1.1`;
-    const headers = headersToString(d?.requestHeaders);
-    const body = d?.requestBody || '';
-    const truncated = d?.requestBodyTruncated ? `\n\n[... body truncated; full length ${d.requestBodyLen} bytes ...]` : '';
-    return `${line}\n${headers}${body ? '\n\n' + body : ''}${truncated}`;
-  }
-
-  function formatResponse(d, r) {
-    const line = d?.statusLine || `HTTP/1.1 ${r.status || '—'}`;
-    const headers = headersToString(d?.responseHeaders);
-    const body = d?.responseBody || '';
-    const truncated = d?.responseBodyTruncated ? `\n\n[... body truncated; full length ${d.responseBodyLen} bytes ...]` : '';
-    return `${line}\n${headers}${body ? '\n\n' + body : ''}${truncated}`;
-  }
-
-  function selectRow(r) {
-    _proxyState.selectedId = r.id;
-    for (const el of tbody.querySelectorAll('tr')) {
-      el.classList.toggle('selected', Number(el.dataset.id) === r.id);
-    }
-    reqMetaEl.textContent = `${r.method} ${r.url}`;
-    respMetaEl.textContent = `${r.status || '—'} · ${r.mime || ''} · ${r.respLen}B · ${r.agentTag ? 'agent=' + r.agentTag : 'no tag'}`;
-    openAgentBtn.disabled = !r.agentTag;
-    openAgentBtn.textContent = r.agentTag ? `Open ${r.agentTag}` : 'Agent';
-    openAgentBtn.onclick = () => openAgentProvenance(r);
-    reqBodyEl.textContent = 'loading…';
-    respBodyEl.textContent = 'loading…';
-
-    const cached = _proxyState.detailCache.get(r.id);
-    if (cached) {
-      reqBodyEl.textContent = formatRequest(cached, r);
-      respBodyEl.textContent = formatResponse(cached, r);
-      return;
-    }
-
-    fetch(`/api/proxy/detail?id=${encodeURIComponent(r.id)}`)
-      .then(res => res.ok ? res.json() : Promise.reject(new Error('detail fetch failed')))
-      .then(d => {
-        // Cap cache at 200 entries so long sessions don't bloat memory.
-        if (_proxyState.detailCache.size > 200) {
-          const firstKey = _proxyState.detailCache.keys().next().value;
-          _proxyState.detailCache.delete(firstKey);
-        }
-        _proxyState.detailCache.set(r.id, d);
-        if (_proxyState.selectedId !== r.id) return; // user moved on
-        reqBodyEl.textContent = formatRequest(d, r);
-        respBodyEl.textContent = formatResponse(d, r);
-      })
-      .catch(() => {
-        if (_proxyState.selectedId !== r.id) return;
-        reqBodyEl.textContent = formatRequest(null, r);
-        respBodyEl.textContent = '(detail endpoint unavailable for the selected proxy backend)';
-      });
-  }
-
-  function sortRows(rows) {
-    const key = _proxyState.sortKey, dir = _proxyState.sortDir === 'asc' ? 1 : -1;
-    const out = rows.slice();
-    out.sort((a, b) => {
-      let av = a?.[key], bv = b?.[key];
-      if (av == null && bv == null) return 0;
-      if (av == null) return 1; // nulls last
-      if (bv == null) return -1;
-      if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
-      return String(av).localeCompare(String(bv), undefined, { numeric: true }) * dir;
-    });
-    return out;
-  }
-
-  function refreshAll() {
-    tbody.innerHTML = '';
-    const visible = sortRows(_proxyState.rows.filter(proxyRowMatches));
-    for (const r of visible) tbody.appendChild(paintRow(r));
-    countEl.textContent = `${visible.length} / ${_proxyState.rows.length} rows`;
-    paintSortIndicators();
-  }
-
-  function focusPendingTraffic() {
-    const focus = _proxyState.pendingFocus;
-    if (!focus || !_proxyState.rows.length) return;
-    const host = (() => { try { return new URL(focus.url).hostname; } catch { return focus.url || ''; } })();
-    let best = null;
-    let bestScore = Number.POSITIVE_INFINITY;
-    let bestHasHost = false;
-    for (const row of _proxyState.rows) {
-      if (focus.agentId && row.agentTag !== focus.agentId) continue;
-      const hasHost = !!(host && String(row.url || '').includes(host));
-      const urlPenalty = hasHost ? 0 : 120_000;
-      const rowTs = Number(row.ts) || Date.parse(row.ts || '') || 0;
-      const timePenalty = rowTs && focus.ts ? Math.abs(rowTs - focus.ts) : 60_000;
-      const score = urlPenalty + timePenalty;
-      if (score < bestScore) { best = row; bestScore = score; bestHasHost = hasHost; }
-    }
-    if (!best || (!bestHasHost && bestScore > 300_000)) return;
-    _proxyState.pendingFocus = null;
-    selectRow(best);
-    const rowEl = tbody.querySelector(`tr[data-id="${best.id}"]`);
-    rowEl?.classList.add('provenance-focus');
-    rowEl?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    setTimeout(() => rowEl?.classList.remove('provenance-focus'), 4500);
-  }
-
-  function paintSortIndicators() {
-    wrap.querySelectorAll('thead th[data-sort]').forEach(th => {
-      const k = th.dataset.sort;
-      th.classList.toggle('sort-active', k === _proxyState.sortKey);
-      th.classList.toggle('sort-asc',    k === _proxyState.sortKey && _proxyState.sortDir === 'asc');
-      th.classList.toggle('sort-desc',   k === _proxyState.sortKey && _proxyState.sortDir === 'desc');
-    });
-  }
-
-  // Click-to-sort column headers (persisted in localStorage).
-  wrap.querySelectorAll('thead th[data-sort]').forEach(th => {
-    th.addEventListener('click', () => {
-      const k = th.dataset.sort;
-      if (_proxyState.sortKey === k) {
-        _proxyState.sortDir = _proxyState.sortDir === 'asc' ? 'desc' : 'asc';
-      } else {
-        _proxyState.sortKey = k;
-        _proxyState.sortDir = (k === 'respLen' || k === 'status') ? 'desc' : 'asc';
-      }
-      try {
-        localStorage.setItem('glados-dash.proxy.sortKey', _proxyState.sortKey);
-        localStorage.setItem('glados-dash.proxy.sortDir', _proxyState.sortDir);
-      } catch {}
-      refreshAll();
-    });
+  const session = state.investigationSessions.find(item => item.id === sessionId);
+  const host = document.createElement('div');
+  paneEl.appendChild(host);
+  GladosProxyWorkspace.mount(host, {
+    sessionId,
+    sessionName: session?.name || tab.sessionName || sessionId,
+    archived: session?.state === 'archived',
+    onSession: id => activateInvestigationSession(id),
+    onAgent: async row => {
+      if (state.currentSessionId !== sessionId) await activateInvestigationSession(sessionId);
+      openAgentProvenance(row);
+    },
   });
-
-  let _refreshAllQueued = false;
-  function appendLive(r) {
-    if (_proxyState.paused) return;
-    _proxyState.rows.push(r);
-    if (_proxyState.rows.length > _proxyState.maxRows) {
-      _proxyState.rows.splice(0, _proxyState.rows.length - _proxyState.maxRows);
-    }
-    // Fast path: default chronological sort (ts asc) — append to bottom, autoscroll.
-    // Any other sort: debounce a full refreshAll (sort-aware re-paint).
-    const isDefault = _proxyState.sortKey === 'ts' && _proxyState.sortDir === 'asc';
-    if (isDefault) {
-      if (proxyRowMatches(r)) {
-        tbody.appendChild(paintRow(r));
-        countEl.textContent = `${tbody.children.length} / ${_proxyState.rows.length} rows`;
-        if (tableHost.scrollTop + tableHost.clientHeight + 50 >= tableHost.scrollHeight) tableHost.scrollTop = tableHost.scrollHeight;
-      }
-    } else if (!_refreshAllQueued) {
-      _refreshAllQueued = true;
-      setTimeout(() => { _refreshAllQueued = false; refreshAll(); }, 120);
-    }
-    if (_proxyState.pendingFocus) focusPendingTraffic();
-  }
-
-  // Filter wiring
-  const onFilterChange = () => {
-    _proxyState.filterText = filterText.value;
-    _proxyState.filterStatus = filterStatus.value;
-    _proxyState.filterAgent = filterAgent.value;
-    refreshAll();
-  };
-  filterText.addEventListener('input', onFilterChange);
-  filterStatus.addEventListener('change', onFilterChange);
-  filterAgent.addEventListener('input', onFilterChange);
-  pauseBtn.addEventListener('click', () => {
-    _proxyState.paused = !_proxyState.paused;
-    pauseBtn.textContent = _proxyState.paused ? 'Resume' : 'Pause';
-  });
-  clearBtn.addEventListener('click', () => {
-    _proxyState.rows = [];
-    _proxyState.detailCache.clear();
-    _proxyState.selectedIds.clear();
-    _proxyState.lastClickedId = null;
-    refreshAll();
-    updateMultiCount();
-  });
-
-  // v4 Tier 3 #9 — Export helpers. If any rows are multi-selected, export
-  // only those; otherwise export all currently-visible (filtered + sorted).
-  function rowsForExport() {
-    if (_proxyState.selectedIds.size > 0) {
-      return _proxyState.rows.filter(r => _proxyState.selectedIds.has(r.id));
-    }
-    return sortRows(_proxyState.rows.filter(proxyRowMatches));
-  }
-
-  function downloadBlob(filename, content, mime) {
-    const blob = new Blob([content], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename;
-    document.body.appendChild(a); a.click();
-    setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 0);
-  }
-
-  function csvEscape(v) {
-    const s = v == null ? '' : String(v);
-    // RFC 4180: quote if contains quote/comma/newline; escape internal quotes.
-    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  }
-
-  wrap.querySelector('#proxy-export-csv').addEventListener('click', () => {
-    const rows = rowsForExport();
-    if (!rows.length) return;
-    const cols = ['id', 'ts', 'method', 'url', 'status', 'respLen', 'mime', 'agentTag'];
-    const lines = [cols.join(',')];
-    for (const r of rows) {
-      lines.push(cols.map(c => {
-        if (c === 'ts') return csvEscape(new Date(r.ts).toISOString());
-        return csvEscape(r[c]);
-      }).join(','));
-    }
-    downloadBlob(`glados-proxy-${Date.now()}.csv`, lines.join('\n'), 'text/csv');
-  });
-
-  wrap.querySelector('#proxy-export-har').addEventListener('click', async () => {
-    const rows = rowsForExport();
-    if (!rows.length) return;
-    // Fetch details for rows not already in cache (in parallel, capped).
-    const missing = rows.filter(r => !_proxyState.detailCache.has(r.id));
-    if (missing.length) {
-      const chunkSize = 8;
-      for (let i = 0; i < missing.length; i += chunkSize) {
-        const slice = missing.slice(i, i + chunkSize);
-        await Promise.all(slice.map(r =>
-          fetch(`/api/proxy/detail?id=${encodeURIComponent(r.id)}`)
-            .then(res => res.ok ? res.json() : null)
-            .then(d => { if (d) _proxyState.detailCache.set(r.id, d); })
-            .catch(() => {})
-        ));
-      }
-    }
-    const entries = rows.map(r => {
-      const d = _proxyState.detailCache.get(r.id) || {};
-      const u = (() => { try { return new URL(r.url); } catch { return null; } })();
-      const reqHeaders = Object.entries(d.requestHeaders || {}).map(([n, v]) => ({ name: n, value: String(v) }));
-      const respHeaders = Object.entries(d.responseHeaders || {}).map(([n, v]) => ({ name: n, value: String(v) }));
-      const queryString = u ? [...u.searchParams].map(([n, v]) => ({ name: n, value: v })) : [];
-      return {
-        startedDateTime: new Date(r.ts).toISOString(),
-        time: 0,
-        request: {
-          method: r.method,
-          url: r.url,
-          httpVersion: 'HTTP/1.1',
-          headers: reqHeaders,
-          queryString,
-          headersSize: -1,
-          bodySize: r.reqLen || 0,
-          cookies: [],
-          postData: d.requestBody ? { mimeType: '', text: d.requestBody } : undefined,
-        },
-        response: {
-          status: r.status || 0,
-          statusText: (d.statusLine || '').split(' ').slice(2).join(' ') || '',
-          httpVersion: 'HTTP/1.1',
-          headers: respHeaders,
-          cookies: [],
-          content: {
-            size: r.respLen || 0,
-            mimeType: r.mime || '',
-            text: d.responseBody || '',
-          },
-          redirectURL: '',
-          headersSize: -1,
-          bodySize: r.respLen || 0,
-        },
-        cache: {},
-        timings: { send: 0, wait: 0, receive: 0 },
-        _gladosAgent: r.agentTag || '',
-      };
-    });
-    const har = {
-      log: {
-        version: '1.2',
-        creator: { name: 'GLaDOS Dashboard', version: '3.1.04242026' },
-        entries,
-      },
-    };
-    downloadBlob(`glados-proxy-${Date.now()}.har`, JSON.stringify(har, null, 2), 'application/json');
-  });
-
-  copyReqBtn.addEventListener('click', () => {
-    navigator.clipboard.writeText(reqBodyEl.textContent || '').catch(() => {});
-  });
-  copyCurlBtn.addEventListener('click', () => {
-    const id = _proxyState.selectedId;
-    const row = _proxyState.rows.find(x => x.id === id);
-    if (!row) return;
-    const d = _proxyState.detailCache.get(id);
-    navigator.clipboard.writeText(toCurl(row, d)).catch(() => {});
-  });
-
-  // v4 — In-detail search. Highlights matches in the <pre>; arrows cycle.
-  function attachDetailSearch(preEl, inputEl, countEl) {
-    let matches = [], cursor = 0, baseText = '';
-    const originalTextOf = () => preEl.dataset.plain || preEl.textContent || '';
-
-    function cacheBase() {
-      if (preEl.dataset.plain === undefined) preEl.dataset.plain = preEl.textContent || '';
-      baseText = preEl.dataset.plain;
-    }
-    function clear() {
-      cacheBase();
-      preEl.textContent = baseText;
-      matches = []; cursor = 0;
-      countEl.textContent = '';
-    }
-    function apply() {
-      cacheBase();
-      const q = inputEl.value;
-      if (!q) { clear(); return; }
-      const needle = q.toLowerCase();
-      const hay = baseText.toLowerCase();
-      matches = [];
-      let i = 0;
-      while ((i = hay.indexOf(needle, i)) !== -1) { matches.push(i); i += Math.max(1, needle.length); }
-      if (!matches.length) { preEl.textContent = baseText; countEl.textContent = '0'; return; }
-      // Rebuild HTML with <mark> spans around each match.
-      const frag = document.createDocumentFragment();
-      let pos = 0;
-      for (const [idx, start] of matches.entries()) {
-        if (start > pos) frag.appendChild(document.createTextNode(baseText.slice(pos, start)));
-        const mark = document.createElement('mark');
-        mark.className = 'proxy-detail-mark' + (idx === cursor ? ' current' : '');
-        mark.textContent = baseText.slice(start, start + q.length);
-        frag.appendChild(mark);
-        pos = start + q.length;
-      }
-      if (pos < baseText.length) frag.appendChild(document.createTextNode(baseText.slice(pos)));
-      preEl.innerHTML = '';
-      preEl.appendChild(frag);
-      cursor = Math.min(cursor, matches.length - 1);
-      countEl.textContent = `${cursor + 1} / ${matches.length}`;
-      const cur = preEl.querySelector('mark.current');
-      cur?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    }
-    function step(dir) {
-      if (!matches.length) return;
-      cursor = (cursor + dir + matches.length) % matches.length;
-      apply();
-    }
-    inputEl.addEventListener('input', () => { cursor = 0; apply(); });
-    inputEl.addEventListener('keydown', ev => {
-      if (ev.key === 'Enter') { ev.preventDefault(); step(ev.shiftKey ? -1 : 1); }
-      else if (ev.key === 'Escape') { inputEl.value = ''; clear(); }
-    });
-    return { clear, apply, invalidateBase: () => { delete preEl.dataset.plain; apply(); } };
-  }
-
-  const reqSearch  = attachDetailSearch(reqBodyEl,  wrap.querySelector('#proxy-req-search'),  wrap.querySelector('#proxy-req-search-count'));
-  const respSearch = attachDetailSearch(respBodyEl, wrap.querySelector('#proxy-resp-search'), wrap.querySelector('#proxy-resp-search-count'));
-  // Global Ctrl-F: when focus is inside the proxy pane, redirect to the nearer search box.
-  wrap.addEventListener('keydown', ev => {
-    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'f') {
-      ev.preventDefault();
-      wrap.querySelector('#proxy-req-search').focus();
-    }
-  });
-  // When the selected row's text changes we must re-run search highlighting.
-  const origSelectRow = selectRow;
-  selectRow = function patchedSelectRow(r) {
-    origSelectRow(r);
-    setTimeout(() => { reqSearch.invalidateBase(); respSearch.invalidateBase(); }, 0);
-  };
-
-  // Replay modal. Opens with the selected row's method/url/headers/body
-  // pre-filled, fires through the configured proxy with the row's agent tag,
-  // and shows the response inline.
-  wrap.querySelector('#proxy-replay-btn').addEventListener('click', () => openReplayModal());
-
-  function openReplayModal() {
-    const id = _proxyState.selectedId;
-    const row = _proxyState.rows.find(x => x.id === id);
-    if (!row) { showToast('Select a proxy row first.', { kind: 'warning', label: 'Replay' }); return; }
-    const d = _proxyState.detailCache.get(id) || {};
-    const headersText = d.requestHeaders
-      ? Object.entries(d.requestHeaders).map(([k, v]) => `${k}: ${v}`).join('\n')
-      : '';
-    const bodyText = d.requestBody || '';
-    const backdrop = document.createElement('div');
-    backdrop.className = 'modal-backdrop';
-    backdrop.innerHTML = `
-      <div class="modal replay-modal">
-        <div class="modal-head">
-          <span>Replay request</span>
-          <button class="modal-close" title="Close">✕</button>
-        </div>
-        <div class="replay-form">
-          <div class="replay-row">
-            <select id="replay-method">
-              ${['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS']
-                .map(m => `<option${m === (row.method || 'GET').toUpperCase() ? ' selected' : ''}>${m}</option>`).join('')}
-            </select>
-            <input id="replay-url" type="text" value="${escapeHtml(row.url || '')}" />
-            <input id="replay-agent" type="text" value="${escapeHtml(row.agentTag || 'replay')}" title="X-GLaDOS-Agent tag for this replay" />
-            <button class="primary" id="replay-send">Send</button>
-          </div>
-          <label>Headers (one per line, <code>Key: Value</code>)</label>
-          <textarea id="replay-headers" spellcheck="false">${escapeHtml(headersText)}</textarea>
-          <label>Body</label>
-          <textarea id="replay-body" spellcheck="false">${escapeHtml(bodyText)}</textarea>
-          <div class="replay-status" id="replay-status"></div>
-          <label>Response</label>
-          <pre class="replay-response" id="replay-response">(no response yet)</pre>
-        </div>
-      </div>`;
-    document.body.appendChild(backdrop);
-    const close = () => backdrop.remove();
-    backdrop.addEventListener('click', e => { if (e.target === backdrop) close(); });
-    backdrop.querySelector('.modal-close').addEventListener('click', close);
-    window.addEventListener('keydown', function onKey(ev) {
-      if (ev.key === 'Escape') { close(); window.removeEventListener('keydown', onKey); }
-    });
-
-    backdrop.querySelector('#replay-send').addEventListener('click', async () => {
-      const statusEl = backdrop.querySelector('#replay-status');
-      const respEl = backdrop.querySelector('#replay-response');
-      statusEl.textContent = 'sending…';
-      respEl.textContent = '';
-      const hdrsRaw = backdrop.querySelector('#replay-headers').value;
-      const hdrs = {};
-      for (const line of hdrsRaw.split(/\r?\n/)) {
-        const m = /^([^:]+):\s*(.*)$/.exec(line.trim());
-        if (m) hdrs[m[1]] = m[2];
-      }
-      // Drop hop-by-hop / auto-managed headers — fetch() will set them itself.
-      for (const k of ['host','content-length','connection','transfer-encoding','accept-encoding']) {
-        Object.keys(hdrs).forEach(h => { if (h.toLowerCase() === k) delete hdrs[h]; });
-      }
-      const payload = {
-        method: backdrop.querySelector('#replay-method').value,
-        url: backdrop.querySelector('#replay-url').value,
-        headers: hdrs,
-        body: backdrop.querySelector('#replay-body').value || null,
-        agentTag: backdrop.querySelector('#replay-agent').value || 'replay',
-        timeoutMs: 15000,
-      };
-      try {
-        const t0 = performance.now();
-        const r = await fetch('/api/proxy/replay', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        const data = await r.json();
-        const elapsed = (performance.now() - t0).toFixed(0);
-        if (!r.ok || data.ok === false) {
-          statusEl.textContent = `error: ${data.error || r.status} (${elapsed}ms)`;
-          respEl.textContent = JSON.stringify(data, null, 2);
-          return;
-        }
-        statusEl.textContent = `${data.status} ${data.statusText || ''} · ${data.elapsedMs}ms${data.proxied ? ' · through proxy' : ' · direct'}`;
-        const respHdrs = Object.entries(data.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n');
-        respEl.textContent = `HTTP ${data.status} ${data.statusText || ''}\n${respHdrs}\n\n${data.body || ''}`;
-      } catch (e) {
-        statusEl.textContent = 'fetch failed: ' + e.message;
-      }
-    });
-  }
-
-  // Drag splitter for request/response bottom panel resize.
-  let dragging = false;
-  splitter.addEventListener('mousedown', () => { dragging = true; document.body.style.userSelect = 'none'; });
-  window.addEventListener('mousemove', e => {
-    if (!dragging) return;
-    const paneRect = wrap.getBoundingClientRect();
-    const bottomHeight = Math.max(120, Math.min(paneRect.bottom - e.clientY, paneRect.height - 180));
-    detailRow.style.height = `${bottomHeight}px`;
-  });
-  window.addEventListener('mouseup', () => { dragging = false; document.body.style.userSelect = ''; });
-
-  // Initial backfill + live stream
-  connEl.textContent = 'connecting…';
-  connEl.className = 'proxy-status connecting';
-
-  fetchJson('/api/proxy/history?limit=500', { timeoutMs: 20000, retries: 1 })
-    .then(rows => {
-      if (proxyGeneration !== _proxyState.generation) return;
-      if (!Array.isArray(rows)) return;
-      _proxyState.rows = rows;
-      refreshAll();
-      focusPendingTraffic();
-    })
-    .catch(() => {
-      tbody.innerHTML = `<tr><td colspan="7" class="proxy-empty">No proxy traffic yet. Traffic will appear when the configured proxy backend is running.</td></tr>`;
-    });
-
-  if (_proxyState.es) { try { _proxyState.es.close(); } catch {} _proxyState.es = null; }
-  const es = new EventSource('/api/proxy/stream');
-  es.onopen = async () => {
-    try {
-      const health = await fetchJson('/api/health/proxy', { timeoutMs: 10000, retries: 1 });
-      if (!health.healthy) {
-        connEl.textContent = `offline — ${health.processStatus || 'proxy unavailable'}`;
-        connEl.title = health.error || '';
-        connEl.className = 'proxy-status offline';
-        return;
-      }
-      connEl.textContent = 'live';
-      connEl.title = '';
-      connEl.className = 'proxy-status live';
-    } catch {
-      connEl.textContent = 'offline — health unavailable';
-      connEl.className = 'proxy-status offline';
-    }
-  };
-  es.onmessage = ev => {
-    if (proxyGeneration !== _proxyState.generation) return;
-    try {
-      const r = JSON.parse(ev.data);
-      appendLive(r);
-    } catch {}
-  };
-  es.onerror = () => {
-    connEl.textContent = 'offline — retrying…';
-    connEl.className = 'proxy-status offline';
-  };
-  _proxyState.es = es;
-
-  // v4 — per-agent metrics poll. Refreshes the sidebar every 2s.
-  const sidebarList = wrap.querySelector('#proxy-agents-list');
-  async function refreshAgentMetrics() {
-    if (!sidebarList.isConnected) return; // pane was replaced
-    try {
-      const r = await fetch('/api/proxy/metrics?window=10');
-      const data = await r.json();
-      const agents = data.agents || [];
-      if (!agents.length) {
-        sidebarList.innerHTML = '<div class="proxy-agents-empty">no agent traffic (10s)</div>';
-        return;
-      }
-      sidebarList.innerHTML = agents.map(a => {
-        const isFiltered = _proxyState.filterAgent && a.agent.toLowerCase() === _proxyState.filterAgent.toLowerCase();
-        const errClass = a.errorRate >= 0.1 ? 'hot' : a.errorRate >= 0.02 ? 'warn' : 'ok';
-        return `<div class="proxy-agent-card ${isFiltered ? 'filtered' : ''}" data-agent="${escapeHtml(a.agent)}">
-          <div class="proxy-agent-name">${escapeHtml(a.agent)}</div>
-          <div class="proxy-agent-stats">
-            <span class="proxy-agent-rps">${a.rps.toFixed(1)} rps</span>
-            <span class="proxy-agent-err ${errClass}">${(a.errorRate * 100).toFixed(0)}% err</span>
-            <span class="proxy-agent-count">${a.requests} req</span>
-          </div>
-        </div>`;
-      }).join('');
-      sidebarList.querySelectorAll('.proxy-agent-card').forEach(card => {
-        card.addEventListener('click', () => {
-          const agent = card.dataset.agent;
-          // Toggle: click same agent to clear filter, different agent to replace.
-          const newVal = (_proxyState.filterAgent === agent) ? '' : agent;
-          _proxyState.filterAgent = newVal;
-          filterAgent.value = newVal;
-          refreshAll();
-          refreshAgentMetrics();
-        });
-      });
-    } catch { /* silent — healthy banner covers extension-down */ }
-  }
-  refreshAgentMetrics();
-  const metricsTimer = setInterval(() => {
-    if (!sidebarList.isConnected) { clearInterval(metricsTimer); return; }
-    refreshAgentMetrics();
-  }, 2000);
 }
 
 function toCurl(r) {
@@ -6138,6 +5695,48 @@ function openSetupAssistant(initialStatus, onStatus) {
   });
 }
 
+async function wireDefaultTeamSettings(wrap) {
+  const select = wrap.querySelector('[data-default-team]');
+  const save = wrap.querySelector('[data-save-default-team]');
+  const status = wrap.querySelector('[data-default-team-status]');
+  let preference;
+  const validChoice = () => preference?.teams?.some(team => team.id === select.value && team.available !== false);
+  function render(result) {
+    preference = result;
+    const teams = result.teams || [];
+    const missing = !teams.some(team => team.id === result.defaultTeamId);
+    select.innerHTML = `${missing ? `<option value="${escapeHtml(result.defaultTeamId)}" selected disabled>Unavailable saved team</option>` : ''}${teams.map(team => `<option value="${escapeHtml(team.id)}"${team.id === result.defaultTeamId ? ' selected' : ''}${team.available === false ? ' disabled' : ''}>${escapeHtml(team.name)}${team.available === false ? ' (unavailable)' : ''}</option>`).join('')}`;
+    select.disabled = false;
+    save.disabled = true;
+    status.textContent = result.fallback ? 'Your saved team is unavailable. New chats currently start with GLaDOS.' : 'Used when you open a new chat. You can choose another team for an individual chat.';
+  }
+  select.addEventListener('change', () => { save.disabled = !validChoice() || select.value === preference.defaultTeamId; });
+  save.addEventListener('click', async () => {
+    if (!validChoice()) return;
+    save.disabled = true;
+    select.disabled = true;
+    try {
+      const result = await packageApi('PATCH', '/api/settings/default-team', { defaultTeamId: select.value });
+      state.defaultTeamPreference = result;
+      if (!wrap.isConnected) return;
+      render(result);
+      const team = result.teams.find(team => team.id === result.effectiveTeamId);
+      status.textContent = `Saved. New chats will start with ${team?.name || 'GLaDOS'}.`;
+    } catch (error) {
+      if (!wrap.isConnected) return;
+      select.disabled = false;
+      save.disabled = !validChoice();
+      status.textContent = error.message;
+    }
+  });
+  try {
+    const result = await loadDefaultTeamPreference();
+    if (wrap.isConnected) render(result);
+  } catch (error) {
+    if (wrap.isConnected) status.textContent = `Could not load the default team: ${error.message}`;
+  }
+}
+
 async function renderSettingsPane() {
   const wrap = document.createElement('div');
   wrap.className = 'settings-pane';
@@ -6146,6 +5745,15 @@ async function renderSettingsPane() {
     <section class="settings-section setup-assistant-section">
       <div class="settings-section-heading"><div><h2>Setup Assistant</h2><p class="settings-section-copy">Configure the workstation from start to finish: LiteLLM, optional local credentials, the unique proxy CA, and live verification.</p></div><button id="launch-setup-assistant" type="button" class="safe">Open Setup Assistant</button></div>
       <div id="setup-summary" class="setup-summary"><div class="setup-summary-loading">Checking setup…</div></div>
+    </section>
+    <section class="settings-section default-team-section">
+      <h2>New chats</h2>
+      <p class="settings-section-copy">Choose the Agentic Team selected when you start a new chat. Existing chats keep their assigned team.</p>
+      <div class="default-team-card">
+        <label><span>Default Agentic Team</span><select data-default-team aria-label="Default Agentic Team" disabled><option>Loading teams…</option></select></label>
+        <button type="button" class="safe" data-save-default-team disabled>Save default</button>
+      </div>
+      <p class="settings-section-copy" data-default-team-status role="status">Loading your default team…</p>
     </section>
     <section class="settings-section full-access-section">
       <div class="settings-section-heading"><div><h2>Computer Use</h2><p class="settings-section-copy">Choose whether GLaDOS stays inside its normal safety boundary or may operate this workstation directly when supported. Full Access is always off by default and requires an explicit confirmation.</p></div></div>
@@ -6197,6 +5805,7 @@ async function renderSettingsPane() {
   wireOperationControls(wrap);
   wireSetupAssistant(wrap);
   wireFullAccessControl(wrap);
+  wireDefaultTeamSettings(wrap);
   const operatorName = wrap.querySelector('#operator-name');
   const operatorPreview = wrap.querySelector('#operator-initials-preview');
   const saveOperator = wrap.querySelector('#save-operator-profile');
@@ -6240,11 +5849,11 @@ function gladosTeamSettingsAgents(agents, { catalog = state.agentLibrary.catalog
   return (agents || []).filter(agent => assigned.has(agent.id) || (builtInIds.size ? builtInIds.has(agent.id) : !agent.packageId && !String(agent.id || '').startsWith('pkg-')));
 }
 
-function builtInAgentsMarkup() {
+function builtInAgentsMarkup({ teamName = 'GLaDOS', packageTeam = false } = {}) {
   return `    <section class="settings-section">
       <h2>Team agents</h2>
       <div id="settings-model-catalog" class="settings-version">LiteLLM model catalog loading…</div>
-      <p class="settings-section-copy">Choose one model for the whole GLaDOS team, or adjust agents individually. Save Changes applies your pending assignments.</p>
+      <p class="settings-section-copy">Choose one model for the whole ${escapeHtml(teamName)} team, or adjust agents individually. Save Changes applies your pending assignments.</p>
       <label class="team-model-selector editor-field"><span>Model for all team agents</span><select data-all-agent-model disabled><option value="">Loading models…</option></select></label>
       <div class="settings-agent-controls">
         <input id="settings-agent-search" type="search" placeholder="Search agents or models…" aria-label="Search agent settings" />
@@ -6256,13 +5865,13 @@ function builtInAgentsMarkup() {
       </div>
       <div class="settings-save-bar">
         <span id="settings-pending-models">No pending model changes</span>
-        <button id="settings-save-models" type="button" class="safe" disabled>Save Changes</button>
+        <div class="settings-model-actions"><button id="settings-discard-models" type="button" disabled>Discard model changes</button><button id="settings-save-models" type="button" class="safe" disabled>Save Changes</button></div>
       </div>
-      <div id="settings-list">loading…</div>
+      <div class="agent-library-grid built-in-team-grid"><aside class="built-in-agent-roster" aria-label="${escapeHtml(teamName)} team agents"><div id="settings-list">loading…</div></aside><div class="agent-package-editor" data-built-in-editor${packageTeam ? ' data-package-editor' : ''}><div class="agent-editor-empty"><h2>Select an agent</h2><p>Edit its instruction documents and reasoning preference. Model changes use Save Changes above.</p></div></div></div>
     </section>`;
 }
 
-async function loadBuiltInAgentSettings(wrap) {
+async function loadBuiltInAgentSettings(wrap, { teamId = 'glados', manifest = null, team = null, onEditAgent = null } = {}) {
   try {
     const [modelsResp, settingsResp] = await Promise.all([
       fetchJson('/api/models', { timeoutMs: 8000 }),
@@ -6276,11 +5885,16 @@ async function loadBuiltInAgentSettings(wrap) {
     } else {
       modelCatalogEl.innerHTML = `<span class="settings-version-label">LiteLLM Models</span><code>unavailable</code><span class="settings-version-hint">${escapeHtml(modelsResp.message || 'model discovery failed')}</span>`;
     }
-    const settingsAgents = gladosTeamSettingsAgents(settingsResp.agents || []);
+    const teamIds = teamId === 'glados' ? null : new Set(packageTeamModelAgentIds(manifest, team, (state.teamCatalog.teams || []).find(row => row.id === teamId)));
+    const settingsAgents = teamIds ? (settingsResp.agents || []).filter(agent => teamIds.has(agent.id)) : gladosTeamSettingsAgents(settingsResp.agents || []);
+    const visibleAgents = settingsAgents.filter(agent => teamId === 'glados' || agent.id !== teamId);
+    const modelEditState = { dirty: false, saving: false };
+    state.agentLibrary.teamModelEdits = modelEditState;
     const listEl = wrap.querySelector('#settings-list');
     const settingsSearch = wrap.querySelector('#settings-agent-search');
     const saveModels = wrap.querySelector('#settings-save-models');
     const pendingModels = wrap.querySelector('#settings-pending-models');
+    const discardModels = wrap.querySelector('#settings-discard-models');
     const allAgentModel = wrap.querySelector('[data-all-agent-model]');
     allAgentModel.innerHTML = '<option value="">Keep individual models</option>' + models.map(model => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join('');
     allAgentModel.disabled = !modelsResp.available;
@@ -6289,8 +5903,11 @@ async function loadBuiltInAgentSettings(wrap) {
 
     const refreshModelSaveBar = () => {
       const count = modelDrafts.size;
+      modelEditState.dirty = count > 0;
+      modelEditState.saving = savingModels;
       pendingModels.textContent = count ? `${count} pending model change${count === 1 ? '' : 's'}` : 'No pending model changes';
       saveModels.disabled = !count || savingModels;
+      if (discardModels) discardModels.disabled = !count || savingModels;
       allAgentModel.disabled = savingModels || !modelsResp.available;
       saveModels.textContent = savingModels ? 'Saving...' : `Save Changes${count ? ` (${count})` : ''}`;
     };
@@ -6298,10 +5915,10 @@ async function loadBuiltInAgentSettings(wrap) {
     const stageModelChange = (agentId, expectedModel, model, card, select) => {
       if (model === expectedModel) modelDrafts.delete(agentId);
       else modelDrafts.set(agentId, { agentId, expectedModel, model });
-      card.dataset.model = model;
-      card.classList.toggle('model-dirty', modelDrafts.has(agentId));
-      select.classList.toggle('model-dirty', modelDrafts.has(agentId));
-      card.querySelector('[data-model-error]')?.remove();
+      if (card) card.dataset.model = model;
+      card?.classList.toggle('model-dirty', modelDrafts.has(agentId));
+      select?.classList.toggle('model-dirty', modelDrafts.has(agentId));
+      card?.querySelector('[data-model-error]')?.remove();
       refreshModelSaveBar();
     };
 
@@ -6310,14 +5927,32 @@ async function loadBuiltInAgentSettings(wrap) {
       for (const agent of settingsAgents) {
         const card = listEl.querySelector(`.agent-card[data-agent-id="${CSS.escape(agent.id)}"]`);
         const select = card?.querySelector('[data-model-select]');
-        if (!card || !select) continue;
-        select.value = allAgentModel.value;
-        stageModelChange(agent.id, card.dataset.committedModel, allAgentModel.value, card, select);
+        if (select) select.value = allAgentModel.value;
+        stageModelChange(agent.id, card?.dataset.committedModel ?? agent.model ?? '', allAgentModel.value, card, select);
       }
+    });
+    discardModels?.addEventListener('click', () => {
+      if (savingModels) return;
+      modelDrafts.clear();
+      allAgentModel.value = '';
+      listEl.querySelectorAll('.agent-card').forEach(card => {
+        card.dataset.model = card.dataset.committedModel;
+        card.classList.remove('model-dirty');
+        const select = card.querySelector('[data-model-select]');
+        if (select) { select.value = card.dataset.committedModel; select.classList.remove('model-dirty'); }
+        card.querySelector('[data-model-error]')?.remove();
+      });
+      refreshModelSaveBar();
     });
     saveModels.addEventListener('click', async () => {
       const submitted = [...modelDrafts.values()].map(change => ({ ...change }));
       if (!submitted.length || savingModels) return;
+      if (teamId !== 'glados' && state.agentLibrary.dirty) {
+        showToast('Save your agent edits before changing team models.', { kind: 'warning', label: 'Agents' }); return;
+      }
+      if (state.agentLibrary.builtInEditor?.dirty) {
+        showToast('Save your agent edits before changing team models.', { kind: 'warning', label: 'Agents' }); return;
+      }
       savingModels = true;
       refreshModelSaveBar();
       try {
@@ -6338,6 +5973,15 @@ async function loadBuiltInAgentSettings(wrap) {
           card?.querySelector('[data-model-error]')?.remove();
           if (result.ok) {
             saved++;
+            const savedAgent = settingsAgents.find(agent => agent.id === result.agentId);
+            if (savedAgent) savedAgent.model = result.newModel;
+            const runtimeAgent = (state.teamCatalog.agents || []).find(agent => agent.id === result.agentId);
+            if (runtimeAgent) runtimeAgent.model = result.newModel;
+            const effectiveModel = wrap.querySelector(`[data-effective-agent-model="${CSS.escape(result.agentId)}"]`);
+            if (effectiveModel) {
+              if ('value' in effectiveModel) effectiveModel.value = result.newModel;
+              else effectiveModel.textContent = result.newModel;
+            }
             if (currentDraft?.model === submittedDraft?.model) modelDrafts.delete(result.agentId);
             else if (currentDraft) modelDrafts.set(result.agentId, { ...currentDraft, expectedModel: result.newModel });
             if (card) {
@@ -6348,6 +5992,10 @@ async function loadBuiltInAgentSettings(wrap) {
               if (savedModel) savedModel.textContent = result.newModel;
             }
             if (select) select.classList.toggle('model-dirty', modelDrafts.has(result.agentId));
+            if (state.agentLibrary.builtInEditor?.agentId === result.agentId) {
+              const displayedModel = wrap.querySelector('[data-built-in-model]');
+              if (displayedModel) displayedModel.value = result.newModel;
+            }
           } else {
             failed++;
             if (card) card.classList.add('model-dirty');
@@ -6380,7 +6028,7 @@ async function loadBuiltInAgentSettings(wrap) {
       listEl.querySelectorAll('.agent-card').forEach(card => {
         const enabled = card.dataset.enabled === 'true';
         const matchesState = settingsFilter === 'all' || (settingsFilter === 'enabled' ? enabled : !enabled);
-        const matchesQuery = !query || `${card.dataset.agentId} ${card.dataset.model || ''}`.toLowerCase().includes(query);
+        const matchesQuery = !query || `${card.dataset.agentId} ${card.dataset.name || ''} ${card.dataset.model || ''}`.toLowerCase().includes(query);
         card.hidden = !(matchesState && matchesQuery);
         if (!card.hidden) visible++;
       });
@@ -6398,10 +6046,13 @@ async function loadBuiltInAgentSettings(wrap) {
       listEl.innerHTML = '<div style="color:var(--fg-dim);">no agents found</div>';
       return;
     }
-    for (const agent of settingsAgents) {
+    for (const agent of visibleAgents) {
       const card = document.createElement('div');
       card.className = `agent-card settings-agent-row ${agent.enabled ? '' : 'disabled-agent'}`;
       card.dataset.agentId = agent.id;
+      card.dataset.name = agent.name || agent.id;
+      const selected = teamId !== 'glados' && agent.id === `pkg-${manifest.id}--${state.agentLibrary.selectedAgentId}`;
+      card.classList.toggle('open', selected);
       card.dataset.enabled = String(!!agent.enabled);
       card.dataset.model = agent.model || '';
       card.dataset.committedModel = agent.model || '';
@@ -6422,26 +6073,31 @@ async function loadBuiltInAgentSettings(wrap) {
           <select data-model-select ${modelsResp.available ? '' : 'disabled'}>${modelOptions}</select>
           <small>Saved: <code data-saved-model>${escapeHtml(agent.model || '?')}</code></small>
         </div>
-        <button type="button" class="settings-agent-details-toggle" data-agent-details-toggle aria-expanded="false">Details</button>
-        <div class="agent-card-body settings-agent-details" data-loaded="false" hidden>
-          <div style="color:var(--fg-dim);">loading details…</div>
-        </div>`;
+        <button type="button" class="settings-agent-details-toggle" data-agent-details-toggle aria-label="Edit ${escapeHtml(agent.name || agent.id)} agent" aria-expanded="${selected}">Edit agent</button>
+        `;
       const inlineSelect = card.querySelector('[data-model-select]');
       inlineSelect.addEventListener('change', () => stageModelChange(agent.id, card.dataset.committedModel, inlineSelect.value, card, inlineSelect));
-      card.querySelector('[data-agent-details-toggle]').addEventListener('click', async event => {
-        const isOpen = !card.classList.contains('open');
-        card.classList.toggle('open', isOpen);
-        event.currentTarget.setAttribute('aria-expanded', String(isOpen));
-        event.currentTarget.textContent = isOpen ? 'Hide' : 'Details';
-        const body = card.querySelector('.agent-card-body');
-        body.hidden = !isOpen;
-        if (isOpen && body.dataset.loaded === 'false') {
-          await hydrateAgentCard(agent.id, body, models, {
-            draft: modelDrafts.get(agent.id),
-            includeModel: false,
-          });
-          body.dataset.loaded = 'true';
+      card.querySelector('[data-agent-details-toggle]').addEventListener('click', async () => {
+        if (!await confirmBuiltInEditorDiscard()) return;
+        const markSelected = () => listEl.querySelectorAll('.agent-card').forEach(row => {
+          row.classList.toggle('open', row === card);
+          row.querySelector('[data-agent-details-toggle]').ariaExpanded = String(row === card);
+        });
+        markSelected();
+        if (onEditAgent) { await onEditAgent(agent, models); return; }
+        if (agent.packageId) {
+          if (!await confirmAgentPackageDiscard()) return;
+          const pane = wrap.closest('.agent-library-pane');
+          await selectAgentPackage(agent.packageId, pane);
+          const localId = agent.id.slice(`pkg-${agent.packageId}--`.length);
+          if (state.agentLibrary.draft?.agents.some(row => row.id === localId)) {
+            state.agentLibrary.selectedAgentId = localId;
+            drawAgentsLibrary(pane);
+          }
+          return;
         }
+        const body = wrap.querySelector('[data-built-in-editor]');
+        await hydrateAgentCard(agent.id, body, models, { includeModel: false });
       });
       listEl.appendChild(card);
     }
@@ -6464,86 +6120,113 @@ function renderSettingsVersion(info) {
     <code>${escapeHtml(info.version || 'unknown')}</code>`;
 }
 
-async function hydrateAgentCard(agentId, body, models, { draft = null, onModelChange = null, includeModel = true } = {}) {
-  try {
-    const d = await fetchJson(`/api/agents/${encodeURIComponent(agentId)}/details`, { timeoutMs: 8000 });
-    if (d.error) { body.textContent = 'error: ' + d.error; return; }
-    const liveModels = new Set(models || []);
-    const selectedModel = draft?.model || d.model;
-    const modelChoices = [...new Set([selectedModel, d.model, ...liveModels].filter(Boolean))];
-    const modelOpts = modelChoices.map(m => {
-      const unavailable = m === d.model && !liveModels.has(m);
-      return `<option value="${escapeHtml(m)}"${m === selectedModel ? ' selected' : ''}>${escapeHtml(m)}${unavailable ? ' (unavailable on LiteLLM)' : ''}</option>`;
-    }).join('');
-    const skills = (d.skills || []).map(s =>
-      `<div class="skill"><strong>${escapeHtml(s.name)}</strong>${s.description ? `<span class="desc">${escapeHtml(s.description.slice(0, 300))}${s.description.length > 300 ? '…' : ''}</span>` : ''}</div>`
-    ).join('') || '<div style="color:var(--fg-dim);">no skills</div>';
-    body.innerHTML = `
-      <label>Agent State</label>
-      <div class="agent-state-row">
-        <span class="agent-state-copy">
-          <strong>${d.enabled ? 'Enabled' : 'Disabled'}</strong>
-          ${d.registered ? 'loaded by Agent SDK runtime' : (d.enabled ? 'enabled locally for next turn' : 'not loaded while disabled')}
-          ${d.dispatch ? ` · ${escapeHtml(d.dispatch)}` : ''}
-          ${d.subagent === false ? ' · not dispatchable as subagent' : ''}
-        </span>
-        <button data-toggle-enabled ${agentId === 'glados' ? 'disabled title="GLaDOS cannot be disabled"' : ''}>
-          ${d.enabled ? 'Disable' : 'Enable'}
-        </button>
-      </div>
+function instructionDisabledTools(snapshot, fields) {
+  const available = new Set(snapshot.availableTools || []);
+  const unknown = (snapshot.disabledTools || []).filter(tool => !available.has(tool));
+  return [...new Set([...unknown, ...fields.filter(field => !field.checked).map(field => field.value)])].sort();
+}
 
-      ${includeModel ? `<label>Model (saved: <code data-saved-model>${escapeHtml(d.model || '?')}</code>)</label>
-      <div class="model-row"><select data-model-select>${modelOpts}</select></div>` : ''}
-
-      <label>Workspace</label>
-      <div class="doc" style="max-height:none;font-size:11px;color:var(--fg-dim);">${escapeHtml(d.workspace || '')}</div>
-
-      <label>MCP Servers</label>
-      <div class="doc" style="max-height:none;">${(d.mcp || []).map(m => escapeHtml(m)).join(', ') || '(none)'}</div>
-
-      <label>Skills (${(d.skills || []).length})</label>
-      <div class="skill-list">${skills}</div>
-
-      <label>AGENTS.md</label>
-      <div class="doc">${escapeHtml(d.agentsDoc || '(missing)')}</div>
-
-      <label>TOOLS.md</label>
-      <div class="doc">${escapeHtml(d.toolsDoc || '(missing)')}</div>
-
-      <label>RUNBOOK.md</label>
-      <div class="doc">${escapeHtml(d.runbook || '(missing)')}</div>
-
-      <label>IDENTITY.md</label>
-      <div class="doc">${escapeHtml(d.identity || '(missing)')}</div>
-    `;
-    const modelSelect = includeModel ? body.querySelector('[data-model-select]') : null;
-    if (draft) modelSelect?.classList.add('model-dirty');
-    modelSelect?.addEventListener('change', () => onModelChange?.(d.model, modelSelect.value, modelSelect));
-    body.querySelector('[data-toggle-enabled]')?.addEventListener('click', async () => {
-      const nextEnabled = !d.enabled;
-      const action = nextEnabled ? 'enable' : 'disable';
-      if (!await confirmAction({
-        title: `${action[0].toUpperCase()}${action.slice(1)} agent`,
-        message: `${action[0].toUpperCase()}${action.slice(1)} ${agentId}?\n\nThis updates its local agent.json. New Agent SDK turns pick it up automatically.`,
-        confirmLabel: `${action[0].toUpperCase()}${action.slice(1)} ${agentId}`,
-        danger: !nextEnabled,
-      })) return;
-      const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/enabled`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: nextEnabled }),
-      }).then(r => r.json());
-      if (r.ok) {
-        logEvent('started', `${agentId} ${nextEnabled ? 'enabled' : 'disabled'}`);
-        await loadAgents();
-        renderPane();
-      } else {
-        pushNotification('error', 'Update failed: ' + (r.error || 'unknown'), { toast: true, label: agentId });
-      }
-    });
-  } catch (e) {
-    body.textContent = 'error: ' + e.message;
+function changedInstructionDocuments(snapshot, fields) {
+  const changed = {};
+  const normalize = value => String(value ?? '').replace(/\r\n?/g, '\n');
+  for (const field of fields) {
+    const original = snapshot.documents.find(doc => doc.name === field.dataset.instructionDocument);
+    if (original && normalize(original.content) !== field.value) changed[original.name] = field.value;
   }
+  return changed;
+}
+
+async function confirmBuiltInEditorDiscard() {
+  const editor = state.agentLibrary.builtInEditor;
+  if (editor?.saving) { showToast('Wait for the current save to finish.', { kind: 'warning', label: 'Agents' }); return false; }
+  if (editor?.dirty && !await confirmAction({ title: 'Discard unsaved edits?', message: 'Your instruction and reasoning edits have not been saved.', confirmLabel: 'Discard edits' })) return false;
+  state.agentLibrary.builtInEditor = null;
+  return true;
+}
+
+async function hydrateAgentCard(agentId, body, models, { includeModel = false } = {}) {
+  const generation = (state.agentLibrary.builtInGeneration || 0) + 1;
+  state.agentLibrary.builtInGeneration = generation;
+  body.innerHTML = '<p class="collection-loading">Loading agent editor…</p>';
+  try {
+    const [d, snapshot] = await Promise.all([
+      fetchJson(`/api/agents/${encodeURIComponent(agentId)}/details`),
+      fetchJson(`/api/agents/${encodeURIComponent(agentId)}/instructions`),
+    ]);
+    if (!body.isConnected || state.agentLibrary.builtInGeneration !== generation) return;
+    if (d.error || snapshot.error) throw new Error(d.error || snapshot.error);
+    const composer = d;
+    const editorState = { agentId, dirty: false, saving: false };
+    state.agentLibrary.builtInEditor = editorState;
+    body.innerHTML = `<div class="package-editor-heading"><div><span class="collection-eyebrow">GLaDOS Agentic Team</span><h2>${escapeHtml(d.name || agentId)}</h2></div><button type="button" data-toggle-enabled${agentId === 'glados' ? ' disabled' : ''}>${d.enabled ? 'Disable' : 'Enable'}</button></div>
+      <div class="editor-field-grid"><label class="editor-field"><span>Name</span><input readonly value="${escapeHtml(d.name || agentId)}" /></label><label class="editor-field"><span>Agent ID</span><input readonly value="${escapeHtml(agentId)}" /></label></div>
+      <div class="editor-field-grid"><label class="editor-field"><span>Model</span><input readonly data-built-in-model value="${escapeHtml(d.model || '')}" /><small>Use the model controls above. Save Changes applies staged models.</small></label><label class="editor-field"><span>Reasoning</span><select data-built-in-effort>${(composer.effortLevels || []).map(value => `<option value="${escapeHtml(value)}"${value === composer.effort ? ' selected' : ''}>${escapeHtml(value)}</option>`).join('')}</select><small>${escapeHtml(composer.effortNote || 'Saved for this agent’s next turn.')}</small></label></div>
+      <h3>Instructions</h3><p class="field-note">These workspace documents load in their existing order: ${snapshot.loadOrder.map(escapeHtml).join(' → ')}. Saving applies only the documents you change. Saved changes affect future turns.</p>
+      <div class="agent-instruction-documents">${snapshot.documents.map(doc => `<details class="agent-instruction-document"${doc.name === 'AGENTS.md' ? ' open' : ''}><summary>${escapeHtml(doc.name)}${doc.exists ? '' : ' · Not present'}</summary><label class="editor-field"><span class="sr-only">${escapeHtml(doc.name)}</span><textarea class="agent-instructions-input" data-instruction-document="${escapeHtml(doc.name)}" rows="14" spellcheck="false"></textarea></label></details>`).join('')}</div>
+      <fieldset class="capability-fieldset"><legend>Connectors · MCP servers</legend><p class="field-note">Choose the tools this agent can use below. Server controls toggle all of that server’s tools. Connections are managed in Tools → Connectors.</p><div class="capability-choices">${[...new Set(snapshot.availableTools.filter(tool => tool.startsWith('mcp__')).map(tool => tool.split('__')[1]))].map(server => `<label class="capability-choice"><input type="checkbox" data-built-in-server="${escapeHtml(server)}" /><span>${escapeHtml(server)}</span></label>`).join('') || 'No MCP tools available for this role.'}</div></fieldset>
+      <fieldset class="capability-fieldset"><legend>Tools</legend><p class="field-note">These choices can narrow the role’s existing permissions. TOOLS.md provides guidance. Save agent applies your changes to future turns.</p><details class="package-tool-group"><summary>Tool selections · ${snapshot.availableTools.length} available</summary><div class="built-in-tool-list">${snapshot.availableTools.map(tool => `<label class="capability-choice"><input type="checkbox" data-built-in-tool value="${escapeHtml(tool)}"${snapshot.disabledTools.includes(tool) ? '' : ' checked'} /><span>${escapeHtml(tool)}</span></label>`).join('')}</div></details></fieldset>
+      <div class="package-save-bar"><span data-instruction-status role="status">No unsaved changes</span><div><button type="button" data-discard-instructions>Reload</button><button type="button" class="safe" data-save-instructions disabled>Save agent</button></div></div>
+      <label class="editor-field"><span>Workspace</span><input readonly value="${escapeHtml(snapshot.workspace)}" /></label>`;
+    const fields = [...body.querySelectorAll('[data-instruction-document]')];
+    for (const field of fields) field.value = snapshot.documents.find(doc => doc.name === field.dataset.instructionDocument)?.content || '';
+    const toolFields = [...body.querySelectorAll('[data-built-in-tool]')];
+    const serverFields = [...body.querySelectorAll('[data-built-in-server]')];
+    const syncServers = () => serverFields.forEach(field => {
+      const tools = toolFields.filter(tool => (tool.value === `mcp__${field.dataset.builtInServer}` || tool.value.startsWith(`mcp__${field.dataset.builtInServer}__`)));
+      field.checked = tools.length > 0 && tools.every(tool => tool.checked);
+      field.indeterminate = tools.some(tool => tool.checked) && !field.checked;
+    });
+    syncServers();
+    const effort = body.querySelector('[data-built-in-effort]');
+    let savedEffort = composer.effort;
+    const save = body.querySelector('[data-save-instructions]');
+    const reload = body.querySelector('[data-discard-instructions]');
+    const status = body.querySelector('[data-instruction-status]');
+    const update = () => {
+      editorState.dirty = Object.keys(changedInstructionDocuments(snapshot, fields)).length > 0 || effort.value !== savedEffort || JSON.stringify(instructionDisabledTools(snapshot, toolFields)) !== JSON.stringify([...snapshot.disabledTools].sort());
+      save.disabled = !editorState.dirty || editorState.saving;
+      reload.disabled = editorState.saving;
+      status.textContent = editorState.saving ? 'Saving…' : editorState.dirty ? 'Unsaved changes' : 'No unsaved changes';
+    };
+    fields.forEach(field => field.addEventListener('input', update));
+    effort.addEventListener('change', update);
+    toolFields.forEach(field => field.addEventListener('change', () => { syncServers(); update(); }));
+    serverFields.forEach(field => field.addEventListener('change', () => {
+      toolFields.filter(tool => (tool.value === `mcp__${field.dataset.builtInServer}` || tool.value.startsWith(`mcp__${field.dataset.builtInServer}__`))).forEach(tool => { tool.checked = field.checked; });
+      syncServers(); update();
+    }));
+    reload.addEventListener('click', async () => { if (await confirmBuiltInEditorDiscard()) await hydrateAgentCard(agentId, body, models); });
+    save.addEventListener('click', async () => {
+      if (editorState.saving || !editorState.dirty) return;
+      const documents = changedInstructionDocuments(snapshot, fields);
+      const disabledTools = instructionDisabledTools(snapshot, toolFields);
+      editorState.saving = true;
+      [...fields, ...toolFields, ...serverFields].forEach(field => { field.disabled = true; }); effort.disabled = true; update();
+      let errorMessage = null;
+      try {
+        if (Object.keys(documents).length || JSON.stringify(disabledTools) !== JSON.stringify([...snapshot.disabledTools].sort())) {
+          const result = await packageApi('PATCH', `/api/agents/${encodeURIComponent(agentId)}/instructions`, { expectedRevision: snapshot.revision, documents, disabledTools });
+          Object.assign(snapshot, result);
+        }
+        if (effort.value !== savedEffort) {
+          await packageApi('PATCH', `/api/settings/agents/${encodeURIComponent(agentId)}/effort`, { effort: effort.value });
+          savedEffort = effort.value;
+        }
+        showToast('Agent saved. Future turns use your changes.', { kind: 'success', label: d.name || agentId });
+      } catch (error) { errorMessage = error.message; }
+      finally { editorState.saving = false; [...fields, ...toolFields, ...serverFields].forEach(field => { field.disabled = false; }); effort.disabled = false; update(); if (errorMessage) status.textContent = errorMessage; }
+    });
+    body.querySelector('[data-toggle-enabled]').addEventListener('click', async () => {
+      if (!await confirmBuiltInEditorDiscard()) return;
+      try {
+        await packageApi('POST', `/api/agents/${encodeURIComponent(agentId)}/enabled`, { enabled: !d.enabled });
+        await loadAgents();
+        const row = body.closest('.collection-content')?.querySelector(`.agent-card[data-agent-id="${CSS.escape(agentId)}"]`);
+        if (row) { row.dataset.enabled = String(!d.enabled); row.classList.toggle('disabled-agent', d.enabled); }
+        await hydrateAgentCard(agentId, body, models);
+      } catch (error) { showToast(error.message, { kind: 'warning', label: 'Agents' }); }
+    });
+  } catch (error) { if (body.isConnected && state.agentLibrary.builtInGeneration === generation) body.textContent = `Could not load agent editor: ${error.message}`; }
 }
 
 // --- Durable agent and connector collections ---
@@ -6562,7 +6245,7 @@ function packageLineItems(value) {
   return [...new Set(String(value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean))];
 }
 
-function agentPackageIssues(manifest) {
+function agentPackageIssues(manifest, { allowInheritedModel = false } = {}) {
   const issues = [];
   if (!String(manifest?.name || '').trim()) issues.push('Give the package a name.');
   if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(manifest?.id || '') || manifest.id.length > 64) issues.push('Use a lowercase package ID with letters, numbers, and hyphens.');
@@ -6575,7 +6258,7 @@ function agentPackageIssues(manifest) {
     ids.add(agent.id);
     if (!String(agent.name || '').trim()) issues.push('Give each agent a name.');
     if (!String(agent.instructions || '').trim()) issues.push(`Add instructions for ${agent.name || 'each agent'}.`);
-    if (!String(agent.model || '').trim()) issues.push(`Choose a model for ${agent.name || 'each agent'}.`);
+    if (!allowInheritedModel && !String(agent.model || '').trim()) issues.push(`Choose a model for ${agent.name || 'each agent'}.`);
   }
   for (const team of manifest?.teams || []) {
     if (!String(team.name || '').trim()) issues.push('Give each team a name.');
@@ -6625,9 +6308,174 @@ async function refreshAgentLibraryCatalog() {
   return catalog;
 }
 
+function fordAgenticTeamForPackage(value, catalog = state.agentLibrary.fordCatalog) {
+  const pkg = typeof value === 'string'
+    ? (state.agentLibrary.catalog?.packages || []).map(agentPackageSummary).find(item => item.id === value)
+    : value ? agentPackageSummary(value) : null;
+  if (!pkg?.managedIntegration) return null;
+  const id = pkg.id;
+  const team = (catalog?.teams || []).find(item => (item.packageId || item.id) === id)
+    || (['herbie', 'jarvis', 'chappie'].includes(id) ? { id, packageId: id, name: `${id[0].toUpperCase()}${id.slice(1)} Agentic Team` } : null);
+  return team && pkg.managedSource === `${team.id}.glados-agent.json` ? team : null;
+}
+
+function fordAgenticTeamTitle(team) {
+  const name = team?.name || team?.id || 'Ford RT';
+  return / Agentic Team$/i.test(name) ? name : `${name} Agentic Team`;
+}
+
+function customAgentPackages(catalog) {
+  return (catalog?.packages || []).filter(item => !fordAgenticTeamForPackage(item));
+}
+
+function installedFordAgenticTeams(catalog = state.agentLibrary.catalog) {
+  return (catalog?.packages || []).map(agentPackageSummary).map(item => {
+    const team = fordAgenticTeamForPackage(item);
+    return team ? { ...team, package: item } : null;
+  }).filter(Boolean);
+}
+
+async function refreshFordAgenticTeams() {
+  const catalog = await fetchJson('/api/ford-rt-teams', { timeoutMs: 15000 });
+  if (catalog.ok === false) throw new Error(catalog.error || 'Ford RT Agentic Teams could not load.');
+  state.agentLibrary.fordCatalog = catalog;
+  return catalog;
+}
+
+function fordTeamDependencyReady(team) {
+  return team?.dependency?.available === true || team?.dependency?.installed === true;
+}
+
+function fordAgenticTeamCatalogMarkup(catalog) {
+  return (catalog?.teams || []).map(team => {
+    const installation = team.installation || {};
+    const busy = team.status === 'installing' || installation.state === 'installing';
+    const comingSoon = team.comingSoon === true || team.status === 'coming-soon';
+    const conflict = team.status === 'conflict' || team.conflictingPackage === true;
+    const installed = team.installed === true;
+    const ready = installed && fordTeamDependencyReady(team) && !busy && installation.state !== 'failed';
+    const failure = installation.state === 'failed' || team.status === 'failed';
+    const status = conflict ? team.error || 'A custom package already uses this team’s identity. Rename that package before installing this team.' : busy ? installation.message || 'Installing the team and its tools…' : failure ? installation.error || installation.message || 'Installation did not finish.' : ready ? `${team.agentCount || 0} agents installed${team.enabled === false ? ' · Disabled' : ''}. tshark is ready.` : installed ? 'The team is installed; tshark still needs setup.' : comingSoon ? 'Coming soon' : 'Available to install';
+    const remediation = failure ? installation.remediation || team.dependency?.remediation : !comingSoon && team.dependency?.canInstall === false ? team.dependency?.remediation : '';
+    const dependencyReason = !comingSoon && !busy && !failure && !fordTeamDependencyReady(team) ? team.dependency?.reason || '' : '';
+    return `<article class="ford-team-card${failure || conflict ? ' installation-failed' : ''}" data-ford-team-card="${escapeHtml(team.id)}"><div class="ford-team-card-heading"><div><span class="collection-eyebrow">${comingSoon ? 'Future team' : 'Ford RT'}</span><h3>${escapeHtml(team.name)}</h3></div><span class="package-status${ready ? ' active' : ''}">${busy ? 'Installing' : ready ? 'Installed' : comingSoon ? 'Coming soon' : failure || conflict ? 'Needs attention' : 'Optional'}</span></div><p>${escapeHtml(team.description || '')}</p>${!comingSoon ? '<p class="field-note">Includes the team’s agents and local tshark for offline packet analysis.</p>' : ''}<p class="ford-team-installation-status${failure || conflict ? ' error' : ''}" role="status" aria-live="polite">${busy ? '<span class="ford-team-installation-spinner" aria-hidden="true"></span>' : ''}${escapeHtml(status)}</p>${dependencyReason ? `<p class="field-note">${escapeHtml(dependencyReason)}</p>` : ''}${remediation ? `<p class="ford-team-remediation">${escapeHtml(remediation)}</p>` : ''}<div class="ford-team-actions">${comingSoon ? '<button type="button" disabled>Coming soon</button>' : conflict ? '<button type="button" disabled>Resolve package conflict</button>' : ready ? `<button type="button" class="safe" data-open-ford-team="${escapeHtml(team.packageId || team.id)}">Open team</button>` : `<button type="button" class="safe" data-install-ford-team="${escapeHtml(team.id)}"${busy || team.canInstall === false ? ' disabled' : ''}>${busy ? 'Installing…' : failure ? 'Retry installation' : installed ? 'Set up tshark' : `Install ${escapeHtml(team.name.replace(/ Agentic Team$/i, ''))}`}</button>`}${installed && !busy ? `<button type="button" class="text-action danger-text" data-remove-ford-team="${escapeHtml(team.id)}">Uninstall team</button>` : ''}</div></article>`;
+  }).join('');
+}
+
+function openFordAgenticTeams(wrap) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<div class="app-modal ford-team-catalog-modal" role="dialog" aria-modal="true" aria-labelledby="ford-teams-title"><header><div><h2 id="ford-teams-title">Ford RT Agentic Teams</h2><small>Install the teams you want to use.</small></div><button type="button" data-ford-teams-close aria-label="Close team catalog">×</button></header><div class="app-modal-copy"><p class="collection-note">Teams are optional. Installing Herbie adds its agents and sets up tshark on this computer. You can edit the installed agents and add GLaDOS specialists or custom agents to their team.</p><div class="ford-team-catalog" data-ford-team-catalog>Loading available teams…</div><p class="package-editor-status" data-ford-team-status role="status" aria-live="polite"></p></div></div>`;
+  document.getElementById('modal-root').appendChild(backdrop);
+  let timer = null;
+  let busy = false;
+  let generation = 0;
+  const requestedInstalls = new Set();
+  const target = backdrop.querySelector('[data-ford-team-catalog]');
+  const status = backdrop.querySelector('[data-ford-team-status]');
+  const close = prepareCollectionDialog(backdrop, { onClose: () => { clearTimeout(timer); generation++; } });
+  backdrop.querySelector('[data-ford-teams-close]').addEventListener('click', close);
+  const updateLibrary = async () => {
+    await Promise.all([refreshAgentLibraryCatalog(), loadAgentTeams(), loadAgents()]);
+    if (wrap.isConnected) drawAgentsLibrary(wrap);
+  };
+  const show = catalog => {
+    target.innerHTML = fordAgenticTeamCatalogMarkup(catalog);
+    target.querySelectorAll('[data-open-ford-team]').forEach(button => button.addEventListener('click', async () => {
+      if (!await confirmAgentPackageDiscard()) return;
+      close();
+      state.agentLibrary.view = `team:${button.dataset.openFordTeam}`;
+      try { await selectAgentPackage(button.dataset.openFordTeam, wrap); }
+      catch (error) { showToast(error.message, { kind: 'warning', label: 'Agents' }); }
+    }));
+    target.querySelectorAll('[data-install-ford-team]').forEach(button => button.addEventListener('click', async () => {
+      if (busy) return;
+      busy = true;
+      button.disabled = true;
+      status.classList.remove('error');
+      status.textContent = 'Starting installation…';
+      try {
+        requestedInstalls.add(button.dataset.installFordTeam);
+        const team = catalog.teams.find(item => item.id === button.dataset.installFordTeam);
+        const result = await packageApi('POST', `/api/ford-rt-teams/${encodeURIComponent(button.dataset.installFordTeam)}/install`, { ...(team?.revision ? { expectedRevision: team.revision } : {}) });
+        if (!backdrop.isConnected) return;
+        if (result.teams) { state.agentLibrary.fordCatalog = result; show(result); }
+        status.textContent = 'Checking installation progress…';
+        await refresh();
+      } catch (error) {
+        requestedInstalls.delete(button.dataset.installFordTeam);
+        if (!backdrop.isConnected) return;
+        status.textContent = error.message;
+        status.classList.add('error');
+        button.disabled = false;
+      } finally { busy = false; }
+    }));
+    target.querySelectorAll('[data-remove-ford-team]').forEach(button => button.addEventListener('click', async () => {
+      if (busy || !await confirmAgentPackageDiscard()) return;
+      const team = catalog.teams.find(item => item.id === button.dataset.removeFordTeam);
+      if (!await confirmAction({ title: `Uninstall ${team.name}?`, message: 'Remove this team from Agents? Its saved revisions stay recoverable. Shared tools such as tshark stay installed.', confirmLabel: 'Uninstall team', danger: true })) return;
+      busy = true;
+      button.disabled = true;
+      try {
+        const result = await packageApi('DELETE', `/api/ford-rt-teams/${encodeURIComponent(team.id)}`, { expectedRevision: team.revision });
+        state.agentLibrary.fordCatalog = result;
+        if (state.agentLibrary.selectedId === (team.packageId || team.id)) {
+          Object.assign(state.agentLibrary, { view: 'built-in', selectedId: null, details: null, draft: null, dirty: false });
+        }
+        await updateLibrary();
+        if (!backdrop.isConnected) return;
+        show(result);
+        status.textContent = 'Team uninstalled. Saved revisions remain recoverable.';
+        status.classList.remove('error');
+      } catch (error) { if (backdrop.isConnected) { status.textContent = error.message; status.classList.add('error'); button.disabled = false; } }
+      finally { busy = false; }
+    }));
+  };
+  const refresh = async () => {
+    clearTimeout(timer);
+    const current = ++generation;
+    try {
+      const previous = state.agentLibrary.fordCatalog;
+      const catalog = await refreshFordAgenticTeams();
+      if (!backdrop.isConnected || current !== generation) return;
+      show(catalog);
+      const completed = (catalog.teams || []).filter(team => team.installed && team.status === 'installed' && fordTeamDependencyReady(team) && (requestedInstalls.has(team.id) || (previous?.teams || []).find(item => item.id === team.id)?.status === 'installing'));
+      const installedIds = new Set((state.agentLibrary.catalog?.packages || []).map(item => agentPackageSummary(item).id));
+      const missingFromLibrary = (catalog.teams || []).some(team => team.installed && !installedIds.has(team.packageId || team.id));
+      if (completed.length || missingFromLibrary) {
+        await updateLibrary();
+        if (!backdrop.isConnected || current !== generation) return;
+        if (completed.length) {
+          completed.forEach(team => requestedInstalls.delete(team.id));
+          status.textContent = `${completed.map(team => team.name).join(', ')} installed. Open the team to review its agents.`;
+          status.classList.remove('error');
+        }
+      }
+      const running = (catalog.teams || []).some(team => team.status === 'installing' || team.installation?.state === 'installing');
+      const failed = (catalog.teams || []).filter(team => requestedInstalls.has(team.id) && (team.status === 'failed' || team.installation?.state === 'failed'));
+      if (failed.length) {
+        failed.forEach(team => requestedInstalls.delete(team.id));
+        status.textContent = failed.map(team => team.installation?.error || team.installation?.message || `${team.name} could not be installed.`).join(' ');
+        status.classList.add('error');
+      }
+      if (running) {
+        if (!failed.length) { status.textContent = 'Installation is running. You can close this window and return to check its progress.'; status.classList.remove('error'); }
+        timer = setTimeout(refresh, 1500);
+      }
+    } catch (error) {
+      if (!backdrop.isConnected || current !== generation) return;
+      status.textContent = error.message;
+      status.classList.add('error');
+      target.innerHTML = '<button type="button" data-retry-ford-teams>Refresh team status</button>';
+      target.querySelector('[data-retry-ford-teams]').addEventListener('click', refresh);
+    }
+  };
+  refresh();
+}
+
 function agentCollectionCards(catalog) {
   const query = state.agentLibrary.query.trim().toLowerCase();
-  const packages = (catalog?.packages || []).map(agentPackageSummary).filter(item => !query || `${item.name} ${item.description} ${item.id}`.toLowerCase().includes(query));
+  const packages = customAgentPackages(catalog).map(agentPackageSummary).filter(item => !query || `${item.name} ${item.description} ${item.id}`.toLowerCase().includes(query));
   if (!packages.length) return `<div class="collection-empty"><strong>${query ? 'No matching packages' : 'Your collection is ready'}</strong><p>${query ? 'Try another name or description.' : 'Create a specialist or upload an agent. Your collection stays with you when GLaDOS updates.'}</p></div>`;
   return packages.map(item => `<button type="button" class="agent-package-row${state.agentLibrary.selectedId === item.id ? ' selected' : ''}" data-package-open="${escapeHtml(item.id)}" aria-pressed="${state.agentLibrary.selectedId === item.id}">
     <span class="package-row-title"><strong>${escapeHtml(item.name)}</strong>${!item.enabled ? '<span class="package-status muted">Disabled</span>' : item.active ? '<span class="package-status active">Active</span>' : ''}</span>
@@ -6639,8 +6487,8 @@ function agentCollectionCards(catalog) {
 async function renderAgentsLibraryPane() {
   const wrap = document.createElement('div');
   wrap.className = 'settings-pane agent-library-pane collection-pane';
-  wrap.innerHTML = `<div class="collection-page-heading"><div><span class="collection-eyebrow">Tools</span><h1>Agents</h1><p>Create specialists and teams, upload agents, and manage the tools they can use.</p></div><div class="collection-page-actions"><button type="button" data-import-package>Upload agent</button><button type="button" data-new-team>New team</button><button type="button" class="safe" data-new-agent>New agent</button></div></div>
-    <div class="collection-tabs" role="tablist" aria-label="Agent collection"><button type="button" role="tab" data-library-view="built-in" aria-selected="${state.agentLibrary.view === 'built-in'}">GLaDOS Agentic Team</button><button type="button" role="tab" data-library-view="collection" aria-selected="${state.agentLibrary.view === 'collection'}">Custom Agents <span data-package-count></span></button></div>
+  wrap.innerHTML = `<div class="collection-page-heading"><div><span class="collection-eyebrow">Tools</span><h1>Agents</h1><p>Create specialists and teams, upload agents, and manage the tools they can use.</p></div><div class="collection-page-actions"><button type="button" data-ford-agentic-teams>Ford RT Agentic Teams</button><button type="button" data-import-package>Upload agent</button><button type="button" data-new-team>New team</button><button type="button" class="safe" data-new-agent>New agent</button></div></div>
+    <div class="collection-tabs" role="tablist" aria-label="Agent collection" data-agent-library-tabs></div>
     <div class="collection-loading" data-library-content>Loading your collection…</div>`;
   paneEl.appendChild(wrap);
   const startDraft = async kind => {
@@ -6659,6 +6507,7 @@ async function renderAgentsLibraryPane() {
   };
   wrap.querySelector('[data-new-agent]').addEventListener('click', () => startDraft('agent'));
   wrap.querySelector('[data-new-team]').addEventListener('click', () => startDraft('team'));
+  wrap.querySelector('[data-ford-agentic-teams]').addEventListener('click', () => openFordAgenticTeams(wrap));
   wrap.querySelector('[data-import-package]').addEventListener('click', async () => {
     if (!await confirmAgentPackageDiscard()) return;
     openAgentPackageImport(async (id, selector) => {
@@ -6668,17 +6517,64 @@ async function renderAgentsLibraryPane() {
     await selectAgentPackage(id, wrap, selector);
     });
   });
-  wrap.querySelectorAll('[data-library-view]').forEach(button => button.addEventListener('click', () => {
-    state.agentLibrary.view = button.dataset.libraryView;
-    drawAgentsLibrary(wrap);
-  }));
   try {
-    await Promise.all([refreshAgentLibraryCatalog(), loadAgentTeams()]);
+    await Promise.all([refreshAgentLibraryCatalog(), loadAgentTeams(), refreshFordAgenticTeams().catch(() => null)]);
     if (wrap.isConnected) drawAgentsLibrary(wrap);
   } catch (error) {
     wrap.querySelector('[data-library-content]').innerHTML = `<div class="collection-empty"><strong>Your agent collection could not load.</strong><p>${escapeHtml(error.message)}</p><button type="button" data-retry-library>Try again</button></div>`;
     wrap.querySelector('[data-retry-library]').addEventListener('click', () => renderPane());
   }
+}
+
+function packageTeamModelAgentIds(manifest, team, runtimeTeam) {
+  const members = new Set([team.coordinator, ...(team.members || [])]);
+  return [...new Set([`pkg-${manifest.id}--${team.id}`,
+    ...(manifest.agents || []).filter(agent => members.has(agent.id)).map(agent => `pkg-${manifest.id}--${agent.id}`),
+    ...(runtimeTeam?.assignedAgentIds || [])])];
+}
+
+async function renderPackageTeamModels(target, manifest, team, details) {
+  if (!target || !details || (details.selectedRevision || details.revision) !== details.activeRevision) return;
+  const teamId = `pkg-${manifest.id}--${team.id}`;
+  const runtimeTeam = (state.teamCatalog.teams || []).find(row => row.id === teamId);
+  const ids = new Set(packageTeamModelAgentIds(manifest, team, runtimeTeam));
+  target.innerHTML = '<p class="field-note">Loading team model controls…</p>';
+  try {
+    const [catalog, settings] = await Promise.all([fetchJson('/api/models'), fetchJson('/api/settings/agents')]);
+    if (!target.isConnected) return;
+    const agents = (settings.agents || []).filter(row => ids.has(row.id));
+    target.innerHTML = `<h3>Team model</h3><label class="editor-field team-model-selector"><span>Model for all team agents</span><select data-package-team-model${catalog.available ? '' : ' disabled'}><option value="">Keep individual models</option>${(catalog.models || []).map(model => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join('')}</select></label><p class="field-note">Includes the coordinator, disabled members, and additional assigned agents. Shared agents use the saved model in every team.</p><div class="package-save-bar"><span data-team-model-status role="status">No pending model changes</span><button class="safe" type="button" data-save-team-model disabled>Save team models</button></div>`;
+    const field = target.querySelector('[data-package-team-model]');
+    const save = target.querySelector('[data-save-team-model]');
+    const status = target.querySelector('[data-team-model-status]');
+    let changes = [];
+    const stage = () => {
+      changes = field.value ? agents.filter(row => row.model !== field.value).map(row => ({ agentId: row.id, expectedModel: row.model || '', model: field.value })) : [];
+      save.disabled = !changes.length;
+      status.textContent = changes.length ? `${changes.length} pending model changes` : 'No pending model changes';
+    };
+    field.addEventListener('change', stage);
+    save.addEventListener('click', async () => {
+      if (!changes.length || save.disabled) return;
+      if (state.agentLibrary.dirty) { status.textContent = 'Save or discard your package edits before changing team models.'; return; }
+      field.disabled = true; save.disabled = true;
+      try {
+        const result = await fetchJson('/api/settings/agents/models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes }) });
+        for (const row of result.results || []) if (row.ok) {
+          const agent = agents.find(agent => agent.id === row.agentId);
+          if (agent) agent.model = row.newModel;
+          const displayedModel = target.closest?.('[data-package-editor]')?.querySelector(`[data-effective-agent-model="${CSS.escape(row.agentId)}"]`);
+          if (displayedModel) displayedModel.textContent = row.newModel;
+        }
+        await Promise.all([loadAgentTeams(), loadAgents()]);
+        stage();
+        const failed = (result.results || []).filter(row => !row.ok);
+        status.textContent = failed.length ? failed.map(row => `${row.agentId}: ${row.error}`).join('; ') : 'Team models saved. Instructions are unchanged.';
+        showToast(failed.length ? 'Some team models need attention.' : 'Team models saved.', { kind: failed.length ? 'warning' : 'success', label: 'Agents' });
+      } catch (error) { status.textContent = error.message; save.disabled = false; }
+      finally { field.disabled = !catalog.available; }
+    });
+  } catch (error) { if (target.isConnected) target.textContent = `Could not load team models: ${error.message}`; }
 }
 
 function teamAssignableAgents(team, { agents = state.teamCatalog.agents } = {}) {
@@ -6688,12 +6584,18 @@ function teamAssignableAgents(team, { agents = state.teamCatalog.agents } = {}) 
     && (team?.id !== 'glados' || agent.packageId || String(agent.id).startsWith('pkg-')));
 }
 
+function agentOriginLabel(agent) {
+  const rtTeam = agent.packageId ? fordAgenticTeamForPackage(agent.packageId) : null;
+  return rtTeam ? `${fordAgenticTeamTitle(rtTeam).replace(/ Agentic Team$/i, '')} · RT Agentic Team`
+    : agent.packageId || String(agent.id).startsWith('pkg-') ? 'Custom agent' : 'GLaDOS agent';
+}
+
 function teamAssignmentsMarkup(team) {
   if (!team) return '<p class="field-note">Save this team before assigning additional specialists.</p>';
   const agents = teamAssignableAgents(team);
   const assigned = new Set(team.assignedAgentIds || []);
-  return `<div class="settings-section-heading"><div><h2>${team.id === 'glados' ? 'Custom agents in the GLaDOS team' : 'Additional team agents'}</h2><p class="settings-section-copy">${team.id === 'glados' ? 'Assign custom specialists GLaDOS can use alongside its built-in team.' : 'Add specialists from GLaDOS or another package. This changes this team’s roster while keeping each agent’s own capabilities.'}</p></div></div>
-    ${agents.length ? `<label class="team-assignment-search"><span class="sr-only">Find an assignable agent</span><input type="search" data-assignment-search placeholder="Find an agent to assign…" /></label><div class="team-assignment-list">${agents.map(agent => `<label class="team-assignment-choice" data-assignment-name="${escapeHtml(`${agent.name || ''} ${agent.id}`.toLowerCase())}" title="${escapeHtml(agent.id)}"><input type="checkbox" data-assigned-agent value="${escapeHtml(agent.id)}"${assigned.has(agent.id) ? ' checked' : ''}${agent.available === false && !assigned.has(agent.id) ? ' disabled' : ''} /><span><strong>${escapeHtml(agentDisplayName(agent))}</strong><small>${agent.packageId || String(agent.id).startsWith('pkg-') ? 'Custom agent' : 'GLaDOS agent'}${agent.available === false ? ' · Disabled' : ''}</small></span></label>`).join('')}</div><div class="team-assignment-save"><span data-assignment-status role="status">${assigned.size} added agent${assigned.size === 1 ? '' : 's'}</span><button type="button" class="safe" data-save-team-assignments disabled>Save assignments</button></div>` : '<p class="field-note">No additional specialists are available. Create or import a custom agent to add one here.</p>'}`;
+  return `<div class="settings-section-heading"><div><h2>${team.id === 'glados' ? 'Custom agents in the GLaDOS team' : 'Additional team agents'}</h2><p class="settings-section-copy">${team.id === 'glados' ? 'Assign custom specialists GLaDOS can use alongside its built-in team.' : 'Add GLaDOS specialists and custom agents from other packages. This changes this team’s roster while keeping each agent’s own capabilities.'}</p></div></div>
+    ${agents.length ? `<label class="team-assignment-search"><span class="sr-only">Find an assignable agent</span><input type="search" data-assignment-search placeholder="Find an agent to assign…" /></label><div class="team-assignment-list">${agents.map(agent => `<label class="team-assignment-choice" data-assignment-name="${escapeHtml(`${agent.name || ''} ${agent.id} ${agentOriginLabel(agent)}`.toLowerCase())}" title="${escapeHtml(agent.id)}"><input type="checkbox" data-assigned-agent value="${escapeHtml(agent.id)}"${assigned.has(agent.id) ? ' checked' : ''}${agent.available === false && !assigned.has(agent.id) ? ' disabled' : ''} /><span><strong>${escapeHtml(agentDisplayName(agent))}</strong><small>${escapeHtml(agentOriginLabel(agent))}${agent.available === false ? ' · Disabled' : ''}</small></span></label>`).join('')}</div><div class="team-assignment-save"><span data-assignment-status role="status">${assigned.size} added agent${assigned.size === 1 ? '' : 's'}</span><button type="button" class="safe" data-save-team-assignments disabled>Save assignments</button></div>` : '<p class="field-note">No additional specialists are available. Create or import a custom agent to add one here.</p>'}`;
 }
 
 function renderTeamAssignments(target, teamId) {
@@ -6734,12 +6636,46 @@ function drawAgentsLibrary(wrap) {
   const library = state.agentLibrary;
   const content = wrap.querySelector('[data-library-content]');
   content.className = 'collection-content';
-  wrap.querySelector('[data-package-count]').textContent = (library.catalog?.packages || []).length || '';
-  wrap.querySelectorAll('[data-library-view]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.libraryView === library.view)));
+  drawAgentLibraryTabs(wrap);
   if (library.view === 'built-in') {
-    content.innerHTML = `<p class="collection-note">GLaDOS coordinates its built-in agents and the custom specialists you assign to this team.</p><section class="team-assignments-section" data-built-in-team-assignments></section>${builtInAgentsMarkup()}`;
+    content.innerHTML = `<p class="collection-note">GLaDOS coordinates its built-in agents and the custom specialists you assign to this team.</p>${builtInAgentsMarkup()}<section class="team-assignments-section" data-built-in-team-assignments></section>`;
     renderTeamAssignments(content.querySelector('[data-built-in-team-assignments]'), 'glados');
     loadBuiltInAgentSettings(content);
+    return;
+  }
+  if (library.view.startsWith('team:')) {
+    const packageId = library.view.slice(5);
+    const installed = installedFordAgenticTeams().find(team => team.package.id === packageId);
+    if (!installed) { library.view = 'built-in'; drawAgentsLibrary(wrap); return; }
+    if (library.selectedId !== packageId || !library.draft) {
+      content.innerHTML = '<p class="collection-loading">Loading the team’s agents…</p>';
+      selectAgentPackage(packageId, wrap).catch(error => { if (content.isConnected) content.textContent = error.message; });
+      return;
+    }
+    const manifest = library.draft;
+    const team = manifest.teams.find(row => row.id === library.selectedTeamId) || manifest.teams[0];
+    const teamId = `pkg-${manifest.id}--${team.id}`;
+    content.innerHTML = `<p class="collection-note">${escapeHtml(installed.description || installed.package.description)}</p>${builtInAgentsMarkup({ teamName: installed.name || manifest.name, packageTeam: true })}<section class="team-assignments-section" data-built-in-team-assignments></section>`;
+    const editor = content.querySelector('[data-package-editor]');
+    renderAgentPackageEditor(editor, wrap);
+    renderTeamAssignments(content.querySelector('[data-built-in-team-assignments]'), teamId);
+    loadBuiltInAgentSettings(content, { teamId, manifest, team, onEditAgent: async (agent, models) => {
+      if (agent.packageId === packageId) {
+        const localId = agent.id.slice(`pkg-${packageId}--`.length);
+        if (!manifest.agents.some(row => row.id === localId)) return;
+        library.selectedAgentId = localId;
+        resetAgentPackageTest();
+        renderAgentPackageEditor(editor, wrap);
+      } else if (agent.packageId) {
+        if (!await confirmAgentPackageDiscard()) return;
+        await selectAgentPackage(agent.packageId, wrap);
+        const localId = agent.id.slice(`pkg-${agent.packageId}--`.length);
+        if (library.draft.agents.some(row => row.id === localId)) { library.selectedAgentId = localId; drawAgentsLibrary(wrap); }
+      } else {
+        if (library.dirty) { showToast('Save your team agent edits before opening a GLaDOS specialist.', { kind: 'warning', label: 'Agents' }); return; }
+        await hydrateAgentCard(agent.id, editor, models);
+      }
+    } });
     return;
   }
   content.innerHTML = `<div class="agent-library-grid"><aside class="agent-collection-rail" aria-label="Your agent packages"><label class="collection-search"><span class="sr-only">Find an agent package</span><input type="search" data-package-search placeholder="Find a package…" value="${escapeHtml(library.query)}" /></label><div data-package-list>${agentCollectionCards(library.catalog)}</div></aside><div class="agent-package-editor" data-package-editor></div></div>`;
@@ -6751,6 +6687,34 @@ function drawAgentsLibrary(wrap) {
   });
   wirePackageCollection(content, wrap);
   renderAgentPackageEditor(content.querySelector('[data-package-editor]'), wrap);
+}
+
+function fordTeamAgentRosterMarkup(manifest, selectedId) {
+  const coordinatorIds = new Set((manifest?.teams || []).map(team => team.coordinator));
+  return (manifest?.agents || []).map(agent => `<button type="button" class="agent-package-row${selectedId === agent.id ? ' selected' : ''}" data-ford-roster-agent="${escapeHtml(agent.id)}" aria-pressed="${selectedId === agent.id}"><span class="package-row-title"><strong>${escapeHtml(agent.name || agent.id)}</strong>${coordinatorIds.has(agent.id) ? '<span class="package-status">Coordinator</span>' : ''}</span><span class="package-row-description">${escapeHtml(agent.description || '')}</span><span class="package-row-meta">${escapeHtml(agent.model || 'Use current model')} · ${escapeHtml(agent.effort || 'medium')} reasoning</span></button>`).join('');
+}
+
+function drawAgentLibraryTabs(wrap) {
+  const library = state.agentLibrary;
+  const target = wrap.querySelector('[data-agent-library-tabs]');
+  if (!target) return;
+  const teams = installedFordAgenticTeams();
+  const count = customAgentPackages(library.catalog).length;
+  target.innerHTML = `<button type="button" role="tab" data-library-view="built-in" aria-selected="${library.view === 'built-in'}">GLaDOS Agentic Team</button>${teams.map(team => `<button type="button" role="tab" data-library-view="team:${escapeHtml(team.package.id)}" aria-selected="${library.view === `team:${team.package.id}`}">${escapeHtml(fordAgenticTeamTitle(team))}</button>`).join('')}<button type="button" role="tab" data-library-view="collection" aria-selected="${library.view === 'collection'}">Custom Agents${count ? ` <span data-package-count>${count}</span>` : ''}</button>`;
+  target.querySelectorAll('[data-library-view]').forEach(button => button.addEventListener('click', async () => {
+    const view = button.dataset.libraryView;
+    if (view === library.view || !await confirmAgentPackageDiscard()) return;
+    if (library.dirty) {
+      library.draft = library.details ? portablePackageManifest(library.details) : null;
+      library.dirty = false;
+      resetAgentPackageTest();
+    }
+    library.view = view;
+    if (view === 'collection' && fordAgenticTeamForPackage(library.selectedId)) {
+      Object.assign(library, { selectedId: null, details: null, draft: null, dirty: false });
+    }
+    drawAgentsLibrary(wrap);
+  }));
 }
 
 function wirePackageCollection(content, wrap) {
@@ -6768,6 +6732,8 @@ async function selectAgentPackage(id, wrap, selector = null) {
   const selectionQuery = selector ? `?version=${encodeURIComponent(selector.version)}&revision=${encodeURIComponent(selector.revision)}` : '';
   const details = await fetchJson(`/api/agent-packages/${encodeURIComponent(id)}${selectionQuery}`);
   if (!wrap.isConnected || generation !== state.agentLibrary.selectionGeneration) return;
+  if (fordAgenticTeamForPackage(id)) state.agentLibrary.view = `team:${id}`;
+  else if (state.agentLibrary.view.startsWith('team:')) state.agentLibrary.view = 'collection';
   state.agentLibrary.selectedId = id;
   state.agentLibrary.details = details.package || details;
   const previousAgentId = state.agentLibrary.selectedAgentId;
@@ -6839,10 +6805,10 @@ function agentEditorMarkup(agent, catalog) {
     <fieldset class="capability-fieldset package-skills"><legend>Skills</legend><div>${(agent.skills || []).map((skill, index) => `<div class="package-skill-row"><span><strong>${escapeHtml(typeof skill === 'string' ? skill : skill.name || skill.id)}</strong><small>${escapeHtml(typeof skill === 'string' ? `skills/${skill}/SKILL.md` : skill.path || '')}</small></span><button type="button" class="text-action" data-remove-package-skill="${index}">Remove</button></div>`).join('') || '<p class="field-note">Add a skill instruction file to teach this agent a repeatable workflow.</p>'}</div><label class="skill-file-upload text-action">Add skill file<input type="file" data-package-skill-file accept=".md,.markdown,text/markdown" /></label></fieldset>`;
 }
 
-function packageEditorCatalog(details, catalog) {
+function packageEditorCatalog(details, catalog, agent = null) {
   const limits = details?.editableIntegration && details.integrationCapabilities;
   if (!limits) return catalog;
-  const tools = new Set(limits.tools || []);
+  const tools = new Set(limits.agentTools && agent ? limits.agentTools[agent.id] || limits.defaultAgentTools || [] : limits.tools || []);
   const connectors = new Set(limits.connectors || []);
   return { ...catalog, tools: (catalog?.tools || []).filter(item => tools.has(typeof item === 'string' ? item : item.id || item.name)), connectors: (catalog?.connectors || []).filter(item => connectors.has(item.id || item.serverName)) };
 }
@@ -6893,6 +6859,53 @@ function syncPackageInvocationControls() {
   });
 }
 
+function arrangeTeamAgentEditor(editor, agent, effectiveAgent) {
+  const advanced = document.createElement('details');
+  advanced.className = 'team-package-settings package-identity';
+  advanced.innerHTML = '<summary>Team settings and package history</summary>';
+  const selectors = ['[data-package-field="name"]', '[data-package-field="description"]', '.package-identity', '.package-agent-switch', '[data-select-package-team]', '.team-editor'];
+  for (const selector of selectors) {
+    const field = editor.querySelector(selector);
+    const block = selector === '[data-package-field="name"]' ? field?.closest('.editor-field-grid')
+      : selector === '[data-package-field="description"]' || selector === '[data-select-package-team]' ? field?.closest('.editor-field') : field;
+    if (block) advanced.appendChild(block);
+  }
+  editor.querySelector('[data-package-team-models]')?.remove();
+  editor.querySelector('[data-custom-team-assignments]')?.remove();
+  editor.querySelector('.package-managed-note')?.remove();
+  const title = editor.querySelector('.package-editor-heading h2');
+  if (title) title.textContent = agent.name || agent.id;
+  const eyebrow = editor.querySelector('.package-editor-heading .collection-eyebrow');
+  if (eyebrow) eyebrow.textContent = fordAgenticTeamTitle(fordAgenticTeamForPackage(state.agentLibrary.selectedId));
+  const model = editor.querySelector('[data-agent-field="model"]');
+  if (model) {
+    model.value = effectiveAgent?.model || agent.model || '';
+    model.readOnly = true;
+    model.removeAttribute('data-agent-field');
+    model.removeAttribute('list');
+    model.dataset.effectiveAgentModel = `pkg-${state.agentLibrary.draft.id}--${agent.id}`;
+    const note = document.createElement('small');
+    note.textContent = 'Use the model controls above. Save Changes applies staged models.';
+    model.closest('.editor-field').appendChild(note);
+  }
+  editor.querySelector('[data-effective-agent-model]:not(input)')?.closest('.field-note')?.remove();
+  const form = editor.querySelector('.package-agent-form');
+  const save = editor.querySelector('[data-save-package]');
+  if (save) save.textContent = 'Save agent';
+  const saveBar = save?.closest('.package-save-bar');
+  const status = editor.querySelector('[data-package-status]');
+  if (status) form.after(status);
+  if (saveBar) (status || form).after(saveBar);
+  if (saveBar) saveBar.after(advanced); else form.after(advanced);
+  const test = editor.querySelector('.package-test');
+  if (test) {
+    const collapsedTest = document.createElement('details');
+    collapsedTest.className = 'package-identity';
+    collapsedTest.innerHTML = '<summary>Try a conversation</summary>';
+    test.before(collapsedTest); collapsedTest.appendChild(test);
+  }
+}
+
 function renderAgentPackageEditor(editor, wrap) {
   const library = state.agentLibrary;
   const draft = library.draft;
@@ -6908,6 +6921,7 @@ function renderAgentPackageEditor(editor, wrap) {
   const details = library.details;
   const summary = details ? agentPackageSummary(details) : null;
   const revision = details?.selectedRevision || details?.revision || details?.latestRevision;
+  const effectiveAgent = (state.teamCatalog.agents || []).find(row => row.id === `pkg-${draft.id}--${agent.id}`);
   const active = details?.active || details?.activeVersion;
   const revisions = details?.revisions || details?.versions || [];
   const team = draft.teams?.find(item => item.id === library.selectedTeamId) || draft.teams?.[0];
@@ -6918,8 +6932,8 @@ function renderAgentPackageEditor(editor, wrap) {
     <label class="editor-field"><span>Package description</span><textarea data-package-field="description" rows="2" placeholder="When should GLaDOS call on this package?">${escapeHtml(draft.description || '')}</textarea></label>
     <details class="package-identity"><summary>Package identity & history</summary><label class="editor-field"><span>Stable package ID</span><input data-package-field="id" value="${escapeHtml(draft.id)}"${details ? ' readonly' : ''} spellcheck="false" /></label><p class="field-note">${revision ? `Saved revision: ${escapeHtml(String(revision).slice(0, 10))}. ` : ''}Saving creates and selects a new revision. Imported updates wait for you to activate them; previous revisions stay available.</p>${revisions.length ? `<div class="package-history">${revisions.map(item => `<button type="button" class="text-action" data-package-revision="${escapeHtml(item.revision)}" data-package-version="${escapeHtml(item.version)}">v${escapeHtml(item.version || draft.version)} · ${escapeHtml(String(item.revision).slice(0, 10))}${item.active ? ' · Active' : item.staged ? ' · Imported, awaiting activation' : ''}</button>`).join('')}</div>` : ''}</details>
     ${draft.agents.length > 1 || team ? `<div class="package-agent-switch"><label class="editor-field"><span>Agent in this package</span><select data-select-package-agent>${draft.agents.map(item => `<option value="${escapeHtml(item.id)}"${item.id === agent.id ? ' selected' : ''}>${escapeHtml(item.name || item.id)}</option>`).join('')}</select></label><button type="button" data-add-package-agent>Add agent</button>${draft.agents.length > 1 ? '<button type="button" class="text-action" data-remove-package-agent>Remove from draft</button>' : ''}</div>` : ''}
-    <section class="package-agent-form"><div class="editor-subsection-heading"><h3>${team ? 'Agent instructions & capabilities' : 'Instructions & capabilities'}</h3>${details ? `<button type="button" class="text-action danger-text" data-delete-package-entry="agent" data-delete-local-id="${escapeHtml(agent.id)}"${library.dirty || revision !== details.activeRevision ? ' disabled' : ''}>Delete agent</button>` : ''}</div>${agentEditorMarkup(agent, packageEditorCatalog(details, library.catalog))}</section>
-    ${draft.teams?.length > 1 ? `<label class="editor-field"><span>Team in this package</span><select data-select-package-team>${draft.teams.map(item => `<option value="${escapeHtml(item.id)}"${item === team ? ' selected' : ''}>${escapeHtml(item.name || item.id)}</option>`).join('')}</select></label>` : ''}${team ? teamEditorMarkup(team, draft.agents, { saved: !!details, disabled: library.dirty || revision !== details?.activeRevision }) : ''}${team ? '<section class="team-assignments-section" data-custom-team-assignments></section>' : ''}
+    <section class="package-agent-form"><div class="editor-subsection-heading"><h3>${team ? 'Agent instructions & capabilities' : 'Instructions & capabilities'}</h3>${details ? `<button type="button" class="text-action danger-text" data-delete-package-entry="agent" data-delete-local-id="${escapeHtml(agent.id)}"${library.dirty || revision !== details.activeRevision ? ' disabled' : ''}>Delete agent</button>` : ''}</div>${agentEditorMarkup(agent, packageEditorCatalog(details, library.catalog, agent))}${effectiveAgent?.model ? `<p class="field-note">Current runtime model: <strong data-effective-agent-model="${escapeHtml(effectiveAgent.id)}">${escapeHtml(effectiveAgent.model)}</strong>. A saved team model override takes precedence for this revision.</p>` : ''}</section>
+    ${draft.teams?.length > 1 ? `<label class="editor-field"><span>Team in this package</span><select data-select-package-team>${draft.teams.map(item => `<option value="${escapeHtml(item.id)}"${item === team ? ' selected' : ''}>${escapeHtml(item.name || item.id)}</option>`).join('')}</select></label>` : ''}${team ? '<section class="package-team-models" data-package-team-models></section>' : ''}${team ? teamEditorMarkup(team, draft.agents, { saved: !!details, disabled: library.dirty || revision !== details?.activeRevision }) : ''}${team ? '<section class="team-assignments-section" data-custom-team-assignments></section>' : ''}
     ${(draft.resources || []).length ? `<details class="package-resources"><summary>Supporting resources (${draft.resources.length})</summary><ul>${draft.resources.map(item => `<li><code>${escapeHtml(item.path)}</code><span>${String(item.text || '').length.toLocaleString()} characters</span></li>`).join('')}</ul></details>` : ''}
     <section class="package-test"><div class="package-test-heading"><div><h3>Try a conversation</h3><p>Test this agent’s instructions and response before saving. Tools stay off during the test.</p></div><button type="button" class="text-action" data-clear-package-test>Clear</button></div><div class="package-test-messages" data-package-test-messages role="log" aria-label="Agent test conversation"></div><div class="package-test-composer"><textarea data-package-test-prompt rows="2" placeholder="Give this agent a sample task…" aria-label="Sample task"></textarea><button type="button" data-run-package-test>Test agent</button></div><p class="field-note" data-package-test-status role="status"></p></section>
     <div class="package-editor-status" data-package-status role="status" aria-live="polite"></div>
@@ -6929,8 +6943,11 @@ function renderAgentPackageEditor(editor, wrap) {
     editor.querySelectorAll('[data-package-field="id"], [data-agent-field="id"]').forEach(field => { field.readOnly = true; });
     editor.querySelectorAll('[data-add-package-agent], [data-remove-package-agent], [data-delete-package-entry], [data-delete-package]').forEach(control => { control.hidden = true; });
   }
+  const installedTeamView = library.view.startsWith('team:');
+  if (installedTeamView) arrangeTeamAgentEditor(editor, agent, effectiveAgent);
   wireAgentPackageEditor(editor, wrap, agent, team);
-  if (team) {
+  if (team && !installedTeamView) {
+    renderPackageTeamModels(editor.querySelector('[data-package-team-models]'), draft, team, details);
     const assignments = editor.querySelector('[data-custom-team-assignments]');
     if (!details) assignments.innerHTML = '<p class="field-note">Save this team to assign additional specialists.</p>';
     else if (revision !== details.activeRevision) assignments.innerHTML = '<p class="field-note">Activate this revision to manage its team assignments.</p>';
@@ -6999,7 +7016,7 @@ function wireAgentPackageEditor(editor, wrap, agent, team) {
       agent[kind] = [...editor.querySelectorAll(`[data-capability="${kind}"]:checked`)].map(item => item.value);
       if (kind === 'connectors') {
         agent.requiredConnectors = [...agent.connectors];
-        editor.querySelector('[data-package-tools]').innerHTML = packageToolsMarkup(agent, packageEditorCatalog(library.details, library.catalog));
+        editor.querySelector('[data-package-tools]').innerHTML = packageToolsMarkup(agent, packageEditorCatalog(library.details, library.catalog, agent));
         wireCapabilities('tools');
         wirePackageToolSearch(editor);
       }
@@ -7056,6 +7073,7 @@ function wireAgentPackageEditor(editor, wrap, agent, team) {
     library.selectedAgentId = event.target.value;
     resetAgentPackageTest();
     renderAgentPackageEditor(editor, wrap);
+    if (library.view.startsWith('team:')) wrap.querySelectorAll('.agent-card').forEach(card => card.classList.toggle('open', card.dataset.agentId === `pkg-${draft.id}--${library.selectedAgentId}`));
   });
   editor.querySelector('[data-add-package-agent]')?.addEventListener('click', () => {
     const next = newPackageDraft().agents[0];
@@ -7087,7 +7105,8 @@ function wireAgentPackageEditor(editor, wrap, agent, team) {
   editor.querySelectorAll('[data-team-field]').forEach(field => field.addEventListener(field.tagName === 'SELECT' ? 'change' : 'input', () => { team[field.dataset.teamField] = field.value; markChanged(); }));
   editor.querySelectorAll('[data-team-member]').forEach(field => field.addEventListener('change', () => { team.members = [...editor.querySelectorAll('[data-team-member]:checked')].map(item => item.value); markChanged(); }));
   editor.querySelector('[data-save-package]').addEventListener('click', async event => {
-    const issues = agentPackageIssues(draft);
+    if (library.teamModelEdits?.dirty || library.teamModelEdits?.saving) { setStatus('Save or discard pending model changes before saving agent instructions.', true); return; }
+    const issues = agentPackageIssues(draft, { allowInheritedModel: library.details?.editableIntegration === true });
     if (issues.length) { setStatus(issues.join(' '), true); return; }
     const button = event.currentTarget;
     button.disabled = true;
@@ -7194,8 +7213,13 @@ function resetAgentPackageTest() {
 }
 
 async function confirmAgentPackageDiscard() {
-  if (!state.agentLibrary.dirty) return true;
-  return confirmAction({ title: 'Discard unsaved edits?', message: 'Save your package first to keep these edits as a revision. Saved packages and earlier revisions stay available.', confirmLabel: 'Discard edits' });
+  const models = state.agentLibrary.teamModelEdits;
+  if (models?.saving) { showToast('Wait for the model save to finish.', { kind: 'warning', label: 'Agents' }); return false; }
+  if (models?.dirty && !await confirmAction({ title: 'Discard pending model changes?', message: 'Your staged model assignments have not been saved.', confirmLabel: 'Discard changes' })) return false;
+  if (!await confirmBuiltInEditorDiscard()) return false;
+  if (state.agentLibrary.dirty && !await confirmAction({ title: 'Discard unsaved edits?', message: 'Save your package first to keep these edits as a revision. Saved packages and earlier revisions stay available.', confirmLabel: 'Discard edits' })) return false;
+  state.agentLibrary.teamModelEdits = null;
+  return true;
 }
 
 function renderPackageTestMessages(editor) {
@@ -7333,6 +7357,86 @@ function openAgentPackageImport(onImported) {
 // --- Clippy intelligence workspace ---
 const CLIPPY_SEVERITIES = ['critical', 'high', 'medium', 'low', 'info', 'unknown'];
 let activeClippyView = null;
+let activeClippySourcePreview = null;
+
+function clippySourceReference(value, { allowRelative = false, source = null } = {}) {
+  if (typeof value !== 'string' || !value.trim() || value.length > 4096 || /[\\\0-\x1f\x7f]/.test(value)) return null;
+  let raw = value.trim();
+  // Never fetch a citation's host. Legacy localhost URLs only supply a path to
+  // the connected Clippy reader; network URLs retain normal browser behavior.
+  if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(raw)) {
+    const authority = raw.match(/^(?:https?:)?\/\/([^/?#]+)([^]*)$/i);
+    if (!authority) return null;
+    let url;
+    try { url = new URL(`http://${authority[1]}/`); } catch { return null; }
+    if (url.username || url.password || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) return null;
+    raw = authority[2] || '/';
+  }
+  const hashIndex = raw.indexOf('#');
+  const fragment = hashIndex < 0 ? '' : raw.slice(hashIndex + 1);
+  const withoutHash = hashIndex < 0 ? raw : raw.slice(0, hashIndex);
+  const queryIndex = withoutHash.indexOf('?');
+  const rawPath = queryIndex < 0 ? withoutHash : withoutHash.slice(0, queryIndex);
+  const query = new URLSearchParams(queryIndex < 0 ? '' : withoutHash.slice(queryIndex + 1));
+  let filename;
+  let repo;
+  const api = rawPath === '/api/clippy/file';
+  if (api) {
+    if ([...query.keys()].some(key => !['repo', 'path', 'offset', 'limit'].includes(key)) || query.getAll('repo').length !== 1 || query.getAll('path').length !== 1) return null;
+    repo = query.get('repo');
+    filename = query.get('path');
+  } else {
+    if (!allowRelative || queryIndex >= 0) return null;
+    try { filename = decodeURIComponent(rawPath); } catch { return null; }
+    if (!filename && source && /^L?\d+(?:-L?\d+)?$/i.test(fragment)) filename = source.path;
+    else if (!filename.startsWith('/') && source?.repo && source?.path && !filename.startsWith(`${source.repo}/`)) {
+      // Source documents may use ../ links, but they must stay inside the
+      // current engagement repo. Standalone chat citations cannot traverse.
+      const parts = source.path.split('/').slice(0, -1);
+      for (const part of filename.split('/')) {
+        if (part === '..') { if (parts.length <= 1) return null; parts.pop(); }
+        else if (part && part !== '.') parts.push(part);
+      }
+      filename = parts.join('/');
+    }
+    filename = filename.replace(/^\//, '');
+    repo = filename.split('/')[0];
+  }
+  if (typeof filename !== 'string' || filename.length > 2048 || typeof repo !== 'string' || !repo || repo.length > 255 || /[\\/\0-\x1f\x7f]/.test(repo)) return null;
+  const parts = filename.split('/');
+  if (parts.length < 2 || parts[0] !== repo || parts.some(part => !part || part === '.' || part === '..' || /[\\\0-\x1f\x7f?#:]|%(?:2e|2f|5c|00)/i.test(part))) return null;
+  if (!api && (!/\.[a-z\d]{1,12}$/i.test(parts.at(-1)) || ['api', 'assets', 'node_modules'].includes(repo))) return null;
+  const lineMatch = fragment.match(/^L?(\d+)(?:-L?\d+)?$/i);
+  const line = Number(lineMatch?.[1] || (api ? query.get('offset') : '') || 1);
+  if (!Number.isSafeInteger(line) || line < 1 || line > 10000000) return null;
+  return { repo, path: filename, line };
+}
+
+function clippySourceHref(source) {
+  return `/api/clippy/file?${new URLSearchParams({ repo: source.repo, path: source.path })}${source.line > 1 ? `#L${source.line}` : ''}`;
+}
+
+function clippySourcePathsFromText(text) {
+  const paths = [];
+  const seen = new Set();
+  const add = href => {
+    if (paths.length >= 6) return;
+    const source = clippySourceReference(href, { allowRelative: true });
+    if (!source || !/\/findings\/.+\.(?:md|markdown)$/i.test(source.path) || seen.has(source.path)) return;
+    seen.add(source.path);
+    paths.push(source.path);
+  };
+  // Inspect destinations separately so a foreign URL cannot be mistaken for a
+  // repository path embedded inside that URL. Extraction never reads sources.
+  let remaining = String(text || '').slice(0, 120000).replace(/\[[^\]\n]*\]\(\s*(?:<([^>\n]+)>|([^\s)]+))(?:\s+["'][^\n]*?["'])?\s*\)/g, (_link, angle, plain) => { add(angle || plain); return ' '; });
+  remaining = remaining.replace(/(?:https?:\/\/|\/\/)[^\s<>"'`]+/gi, href => { add(href.replace(/[),.;]+$/, '')); return ' '; });
+  const references = remaining.match(/(?:^|[\s`"'(\[])\/?[a-z\d][a-z\d_.-]*\/[^\s`"'<>()[\]?#]+\/findings\/[^\s`"'<>()[\]?#]+\.(?:md|markdown)(?:#L\d+(?:-L?\d+)?)?/gi) || [];
+  for (const reference of references) add(reference.replace(/^[\s`"'(\[]+/, ''));
+  // Findings can also live directly at the repository root.
+  const direct = remaining.match(/(?:^|[\s`"'(\[])\/?[a-z\d][a-z\d_.-]*\/findings\/[^\s`"'<>()[\]?#]+\.(?:md|markdown)(?:#L\d+(?:-L?\d+)?)?/gi) || [];
+  for (const reference of direct) add(reference.replace(/^[\s`"'(\[]+/, ''));
+  return paths;
+}
 
 function openClippy() {
   if (!state.openTabs.some(tab => tab.id === 'clippy')) state.openTabs.push({ id: 'clippy', kind: 'clippy', label: 'Clippy' });
@@ -7345,6 +7449,9 @@ function disposeClippyPane() {
   activeClippyView.controllers.forEach(controller => controller.abort());
   clearTimeout(activeClippyView.searchTimer);
   clearTimeout(activeClippyView.indexTimer);
+  clearTimeout(activeClippyView.leadsTimer);
+  activeClippyView.closeEvidence?.();
+  activeClippyView.closeCoverage?.();
   const composer = activeClippyView.wrap.querySelector?.('[data-clippy-chat] textarea');
   const record = state.transcripts?.get('clippy-chat');
   if (record && composer) record.composerDraft = composer.value;
@@ -7387,18 +7494,19 @@ function clippySeverity(value) {
 }
 
 function clippyFindingSeverityMarkup(finding) {
-  if (finding.metadataPending) return '<span class="clippy-severity-badge pending" title="Severity is available when this finding’s metadata loads">Loading metadata</span>';
+  if (finding.metadataPending) return '<span class="clippy-severity-badge pending" title="This finding has not been parsed in the optional local cache">Not parsed</span>';
   const severity = clippySeverity(finding.severity);
   return `<span class="clippy-severity-badge ${severity}">${severity === 'unknown' ? 'Unspecified' : severity}</span>`;
 }
 
 function clippyFindingCountScope(result) {
+  if (result.browseSource === 'live') return 'Live search · parsed matches';
   if (!['indexed_findings', 'parsed_indexed_findings'].includes(result.countsScope)) return result.partial || result.countsScope === 'loaded_matches' ? 'Loaded matches' : 'Findings';
   const pending = Number(result.metadataPending ?? result.index?.metadataPending ?? 0);
-  if (!pending) return 'Indexed findings';
+  if (!pending) return 'Local cache';
   const parsed = Number(result.metadataLoaded ?? result.index?.metadataLoaded ?? 0);
   const total = Number(result.totalUnfiltered ?? result.index?.findings ?? parsed + pending);
-  return `Indexed findings · ${parsed.toLocaleString()}/${total.toLocaleString()} parsed · ${pending.toLocaleString()} pending`;
+  return `Local cache · ${parsed.toLocaleString()}/${total.toLocaleString()} parsed · ${pending.toLocaleString()} not parsed`;
 }
 
 function clippyRepoId(repo) {
@@ -7448,6 +7556,10 @@ async function openClippyAgentChat(prompt = '', { askForAgent = true } = {}) {
   const view = activeClippyView;
   if (!view || !clippyViewAlive(view)) return;
   const dashboard = state.clippyDashboard;
+  if (dashboard.view && dashboard.view !== 'leads') {
+    dashboard.view = 'leads';
+    renderClippyWorkspace(view);
+  }
   dashboard.chatOpen = true;
   view.wrap.classList.add('clippy-chat-open');
   const panel = view.wrap.querySelector('[data-clippy-chat-panel]');
@@ -7478,7 +7590,8 @@ async function openClippyAgentChat(prompt = '', { askForAgent = true } = {}) {
       const chat = renderAgentChatSurface(result.agentId, 'clippy-chat', false, { container: target, sessionId: result.sessionId, viewTabId: 'clippy', label: 'Clippy Agent', hideToolbar: true });
       chat.classList.add('clippy-agent-chat');
       const record = state.transcripts.get('clippy-chat');
-      if (!record.events.length) chat.querySelector('.transcript').innerHTML = '<div class="clippy-chat-welcome"><span>✦</span><h2>Where should we start?</h2><p>Ask about critical findings, domains, engagement history, or gaps in reporting.</p></div>';
+      if (!record.events.length) chat.querySelector('.transcript').innerHTML = '<div class="clippy-chat-welcome"><span>✦</span><h2>Find your next starting point.</h2><p>Investigate Clippy intelligence together. Ask for evidence, check Dradis coverage, and plan the next scoped verification.</p><small>Clippy can query the connected intelligence directly. A local index is optional.</small><button type="button" data-clippy-chat-starter>Help me find an actionable lead</button></div>';
+      wireClippyAgentButton(chat.querySelector('[data-clippy-chat-starter]'), clippyLeadSearchPrompt());
     })().finally(() => { view.chatOpening = null; });
     await view.chatOpening;
   }
@@ -7505,7 +7618,7 @@ async function editClippyAgent() {
 }
 
 function wireClippyAgentButton(button, prompt = '') {
-  button?.addEventListener('click', async () => {
+  button?.addEventListener?.('click', async () => {
     if (button.disabled) return;
     button.disabled = true;
     const label = button.textContent;
@@ -7516,21 +7629,42 @@ function wireClippyAgentButton(button, prompt = '') {
   });
 }
 
+function clippyLeadSearchPrompt(query = '') {
+  return `Help me choose up to three actionable leads for an authorized assessment${query ? ` focused on ${query}` : ''}. Query the connected Clippy intelligence directly, including findings, repo evidence, domains, infrastructure, and assessment history as relevant. Do not restrict yourself to the local index. For each candidate cite the exact target and source, explain the vulnerability evidence and a specific safe next verification step, and check current Dradis report coverage. Exclude candidates with a matching report. If report coverage cannot be checked completely or is stale, withhold the candidate from recommendations and state what needs verification. Stop after a bounded evidence pass and return fewer leads when the evidence is insufficient. Do not launch an assessment.`;
+}
+
+async function syncClippyChatCandidates(rec, boundary) {
+  const key = String(boundary.id || rec.turnStartedAt || '');
+  if (rec.clippyLeadSyncedTurn === key) return;
+  const answer = [...(rec.events || [])].reverse().find(event => event.kind === 'assistant-text'
+    && (!rec.turnStartedAt || transcriptEventMs(event) >= rec.turnStartedAt - 1000));
+  const paths = clippySourcePathsFromText(answer?.text || '');
+  if (!paths.length) return;
+  rec.clippyLeadSyncedTurn = key;
+  try {
+    await packageApi('POST', '/api/clippy/leads/from-sources', { paths });
+    const view = activeClippyView;
+    if (view && clippyViewAlive(view) && state.clippyDashboard.view === 'leads') await loadClippyLeads(view);
+  } catch (error) {
+    showToast(`The answer is saved, but its sources could not be added to lead review: ${error.message}`, { kind: 'warning', label: 'Clippy evidence' });
+  }
+}
+
 async function renderClippyPane() {
   const wrap = document.createElement('div');
   wrap.className = 'clippy-pane';
   const dashboard = state.clippyDashboard;
+  if (!['leads', 'findings', 'repos', 'maintenance'].includes(dashboard.view)) dashboard.view = 'leads';
   const view = { wrap, controllers: new Map(), disposed: false, selectedFinding: null, selectedRepo: null, selectedFile: null };
   activeClippyView = view;
-  wrap.innerHTML = `<header class="clippy-page-heading"><div class="clippy-brand"><span class="clippy-logo" aria-hidden="true">C</span><div><span class="collection-eyebrow">Intelligence</span><h1>Clippy</h1></div><span class="clippy-server-status" data-clippy-status role="status">Checking connection…</span></div><div class="clippy-heading-actions"><button type="button" data-clippy-refresh>↻ Refresh</button><button type="button" class="clippy-chat-button" data-clippy-agent aria-expanded="false" disabled>✦ Clippy Agent</button></div></header><div class="clippy-index-status" data-clippy-index-status role="status"><span>Checking intelligence index…</span></div><div class="clippy-main-layout"><section class="clippy-intelligence"><nav class="clippy-view-tabs" aria-label="Clippy views"><button type="button" data-clippy-view="opportunities" aria-selected="${dashboard.view === 'opportunities'}">Where to start</button><button type="button" data-clippy-view="findings" aria-selected="${dashboard.view === 'findings'}">Security findings</button><button type="button" data-clippy-view="repos" aria-selected="${dashboard.view === 'repos'}">Engagement repos</button></nav><div class="clippy-workspace" data-clippy-workspace>${clippyEmpty('Connecting to Clippy', 'Loading your intelligence workspace…')}</div></section><aside class="clippy-chat-panel" data-clippy-chat-panel aria-label="Clippy Agent conversation" hidden><header><div><strong>✦ Clippy Agent</strong><small>Intelligence & engagement planning</small></div><button type="button" class="text-action" data-clippy-edit-agent hidden>Edit agent</button><button type="button" class="text-action" data-clippy-close-chat aria-label="Hide Clippy Agent">×</button></header><div data-clippy-chat></div></aside></div>`;
+  wrap.innerHTML = `<header class="clippy-page-heading"><div class="clippy-brand"><span class="clippy-logo" aria-hidden="true">C</span><div><span class="collection-eyebrow">Intelligence workspace</span><h1>Clippy</h1></div><span class="clippy-server-status" data-clippy-status role="status">Checking connection…</span></div><div class="clippy-heading-actions"><button type="button" data-clippy-refresh aria-label="Reload Clippy workspace">↻ Refresh</button><button type="button" class="clippy-chat-button" data-clippy-agent aria-expanded="true" disabled>✦ Ask Clippy</button></div></header><nav class="clippy-view-tabs clippy-primary-tabs" aria-label="Clippy views"><button type="button" data-clippy-view="leads">Workspace</button><button type="button" data-clippy-browse>Browse evidence</button></nav><div class="clippy-main-layout"><section class="clippy-chat-panel" data-clippy-chat-panel aria-label="Clippy Agent conversation"><header><div><strong>✦ Clippy Agent</strong><small>Explore the intelligence. Build a plan.</small></div><button type="button" class="text-action" data-clippy-focus-chat aria-pressed="false">Focus chat</button><button type="button" class="text-action" data-clippy-edit-agent hidden>Edit agent</button></header><div data-clippy-chat>${clippyEmpty('Connecting to Clippy', 'Your conversation will appear here.')}</div></section><section class="clippy-intelligence" aria-label="Clippy evidence and leads"><nav class="clippy-view-tabs clippy-browse-tabs" data-clippy-browse-tabs aria-label="Browse intelligence" hidden><button type="button" data-clippy-view="findings">Security findings</button><button type="button" data-clippy-view="repos">Engagement repos</button><button type="button" data-clippy-view="maintenance">Local cache</button></nav><div class="clippy-workspace" data-clippy-workspace>${clippyEmpty('Connecting to Clippy', 'Loading your intelligence workspace…')}</div></section></div>`;
   paneEl.appendChild(wrap);
   const agentButton = wrap.querySelector('[data-clippy-agent]');
   wireClippyAgentButton(agentButton);
-  wrap.querySelector('[data-clippy-close-chat]').addEventListener('click', () => {
-    dashboard.chatOpen = false;
-    wrap.classList.remove('clippy-chat-open');
-    wrap.querySelector('[data-clippy-chat-panel]').hidden = true;
-    agentButton.setAttribute('aria-expanded', 'false');
+  wrap.querySelector('[data-clippy-focus-chat]').addEventListener('click', event => {
+    const focused = wrap.classList.toggle('clippy-chat-focused');
+    event.currentTarget.setAttribute('aria-pressed', String(focused));
+    event.currentTarget.textContent = focused ? 'Show leads' : 'Focus chat';
   });
   wrap.querySelector('[data-clippy-edit-agent]').addEventListener('click', () => editClippyAgent().catch(error => showToast(error.message, { kind: 'warning', label: 'Agents' })));
   const load = async () => {
@@ -7544,14 +7678,14 @@ async function renderClippyPane() {
       indicator.classList.toggle('connected', connected);
       agentButton.disabled = !connected;
       if (!connected) {
-        target.innerHTML = clippyEmpty('Connect Clippy to get started', status.message || 'Browse security findings and engagement repositories, then ask Clippy Agent about what you find.', '<button type="button" class="safe" data-clippy-connect>Connect Clippy</button>');
+        wrap.querySelector('[data-clippy-chat-panel]').hidden = true;
+        target.innerHTML = clippyEmpty('Connect Clippy to get started', status.message || 'Find evidence-backed starting points and investigate them with Clippy Agent.', '<button type="button" class="safe" data-clippy-connect>Connect Clippy</button>');
         target.querySelector('[data-clippy-connect]').addEventListener('click', () => openSmartConnectLibrary(async () => { if (clippyViewAlive(view)) await load(); }, { connect: true }));
         return;
       }
       renderClippyWorkspace(view);
-      refreshClippyIndex(view);
       wrap.querySelector('[data-clippy-edit-agent]').hidden = status.agentExists !== true;
-      if (dashboard.chatOpen) openClippyAgentChat('', { askForAgent: false }).catch(error => clippyError(wrap.querySelector('[data-clippy-chat]'), error, () => openClippyAgentChat()));
+      if (dashboard.view === 'leads') openClippyAgentChat('', { askForAgent: false }).catch(error => clippyError(wrap.querySelector('[data-clippy-chat]'), error, () => openClippyAgentChat()));
     } catch (error) {
       if (!clippyViewAlive(view) || error.name === 'AbortError') return;
       indicator.textContent = 'Connection unavailable';
@@ -7561,19 +7695,41 @@ async function renderClippyPane() {
   wrap.querySelector('[data-clippy-refresh]').addEventListener('click', load);
   wrap.querySelectorAll('[data-clippy-view]').forEach(button => button.addEventListener('click', () => {
     dashboard.view = button.dataset.clippyView;
-    wrap.querySelectorAll('[data-clippy-view]').forEach(tab => tab.setAttribute('aria-selected', String(tab === button)));
-    if (view.status?.connected || (view.status?.configured && view.status?.enabled !== false)) renderClippyWorkspace(view);
+    if (dashboard.view !== 'leads') dashboard.browseView = dashboard.view;
+    if (view.status?.connected || (view.status?.configured && view.status?.enabled !== false)) {
+      renderClippyWorkspace(view);
+      if (dashboard.view === 'leads') openClippyAgentChat('', { askForAgent: false }).catch(error => showToast(error.message, { kind: 'warning', label: 'Clippy Agent' }));
+    }
   }));
+  wrap.querySelector('[data-clippy-browse]').addEventListener('click', () => {
+    dashboard.view = dashboard.browseView || 'findings';
+    if (view.status?.connected || (view.status?.configured && view.status?.enabled !== false)) renderClippyWorkspace(view);
+  });
   await load();
 }
 
 function renderClippyWorkspace(view) {
-  for (const [key, controller] of view.controllers) if (!['status', 'index'].includes(key)) { controller.abort(); view.controllers.delete(key); }
+  for (const [key, controller] of view.controllers) if (key !== 'status') { controller.abort(); view.controllers.delete(key); }
   clearTimeout(view.searchTimer);
+  clearTimeout(view.indexTimer);
+  clearTimeout(view.leadsTimer);
   view.selectedFinding = view.selectedRepo = view.selectedFile = null;
-  if (state.clippyDashboard.view === 'opportunities') renderClippyOpportunities(view);
+  const browsing = state.clippyDashboard.view !== 'leads';
+  view.wrap.classList.toggle('clippy-browsing', browsing);
+  view.wrap.querySelector('[data-clippy-chat-panel]').hidden = browsing;
+  view.wrap.querySelector('[data-clippy-browse-tabs]').hidden = !browsing;
+  view.wrap.querySelector('[data-clippy-browse]').setAttribute('aria-selected', String(browsing));
+  view.wrap.querySelectorAll('[data-clippy-view]').forEach(tab => tab.setAttribute('aria-selected', String(tab.dataset.clippyView === state.clippyDashboard.view)));
+  if (state.clippyDashboard.view === 'leads') renderClippyLeads(view);
   else if (state.clippyDashboard.view === 'repos') renderClippyRepos(view);
+  else if (state.clippyDashboard.view === 'maintenance') renderClippyMaintenance(view);
   else renderClippyFindings(view);
+}
+
+function renderClippyMaintenance(view) {
+  const target = view.wrap.querySelector('[data-clippy-workspace]');
+  target.innerHTML = '<div class="clippy-maintenance"><span class="collection-eyebrow">Optional local cache</span><h2>Keep a local inventory for browsing.</h2><p>Lead discovery and Clippy Agent query the connected intelligence directly. They do not wait for this cache. Use indexing only when you want a local metadata inventory.</p><div class="clippy-index-status" data-clippy-index-status role="status">Loading cache status…</div></div>';
+  refreshClippyIndex(view);
 }
 
 function clippyIndexSummary(index = {}) {
@@ -7589,8 +7745,10 @@ async function refreshClippyIndex(view) {
   clearTimeout(view.indexTimer);
   if (!clippyViewAlive(view)) return;
   const target = view.wrap.querySelector('[data-clippy-index-status]');
+  if (!target) return;
   try {
     const response = await clippyRead(view, '/index', 'index');
+    if (!target.isConnected || state.clippyDashboard.view !== 'maintenance') return;
     const index = response.index || response;
     const running = index.state === 'running' || index.running;
     const previous = view.index;
@@ -7604,23 +7762,27 @@ async function refreshClippyIndex(view) {
       } catch (error) { showToast(error.message, { kind: 'warning', label: 'Clippy index' }); event.currentTarget.disabled = false; }
     });
     if (previous && JSON.stringify(previous) !== JSON.stringify(index)) {
-      if (state.clippyDashboard.view === 'opportunities') loadClippyOpportunities(view);
       if (state.clippyDashboard.view === 'findings') loadClippyFindings(view);
     }
-    if (running) view.indexTimer = setTimeout(() => refreshClippyIndex(view), 2500);
+    if (running && state.clippyDashboard.view === 'maintenance') view.indexTimer = setTimeout(() => refreshClippyIndex(view), 2500);
   } catch (error) {
     if (clippyViewAlive(view) && error.name !== 'AbortError') target.textContent = `Index status unavailable: ${error.message}`;
   }
 }
 
-function clippyOpportunityPrompt(item) {
-  const counts = item.counts || {};
-  return `Help me decide whether to start an authorized assessment at ${item.domain}. Review the Clippy evidence and the cached Dradis project/report coverage, then explain the strongest starting point, the evidence gaps, and the next scoped verification steps. Do not launch an assessment.\n\nDomain: ${item.domain}\nFindings: ${Number(counts.critical || 0)} critical, ${Number(counts.high || 0)} high\nEngagement repos: ${(item.repos || [item.repo]).filter(Boolean).join(', ')}\nReport coverage: ${item.reportCoverage?.label || 'Not checked'}. Cached feed absence does not establish that no live Dradis report exists.`;
+function clippyLeadPrompt(item) {
+  const coverage = item.reportCoverage || {};
+  const source = item.targetKind === 'source';
+  return `Help me plan the next scoped verification for this historical intelligence candidate. Query Clippy directly for related intelligence, beyond the local cache. Cite exact evidence, distinguish historical evidence from current exploitability, and recheck Dradis coverage before recommending assessment work. Attribute an analyst Dradis check to its recorded receipt, rather than claiming you performed it. Clippy MCP cannot establish complete current Dradis coverage: an authorized analyst must check Dradis directly and record the result. Do not launch an assessment.${source ? ' This is a source-code review candidate. Do not infer a live hostname or deployed service from its repository name; verify deployment and attacker prerequisites separately.' : ''}\n\nTarget: ${item.targetLabel || item.domain || item.repository || 'Unverified'}\nTarget kind: ${source ? 'Source code review; deployment unverified' : 'Network target'}\nExact scope: ${item.scope || item.domain || 'Unverified'}${item.repository ? `\nRepository: ${item.repository}` : ''}${item.commit ? `\nAssessed commit: ${item.commit}` : ''}\nLead: ${item.title || ''}\nWhy: ${item.why || ''}\nNext verification: ${item.nextStep || ''}\nEvidence: ${(item.evidence || []).map(source => [source.repo, source.path, source.line && `line ${source.line}`].filter(Boolean).join(' / ')).join('; ')}\nDradis coverage: ${coverage.label || 'Unverified'}\nChecked: ${coverage.checkedAt || 'Not checked'}\nCheck kind: ${coverage.kind || 'Unspecified'}\nDradis source: ${coverage.sourceUrl || 'Not recorded'}\nChecked scope: ${coverage.scope || 'Not recorded'}\nAnalyst notes: ${coverage.notes || 'Not recorded'}\nCheck expires: ${coverage.expiresAt || 'Not recorded'}\nEvidence digest: ${item.evidenceDigest || 'Not recorded'}. Missing cached matches do not establish the absence of a report.`;
+}
+
+function clippyKnownReportTie(coverage = {}) {
+  return coverage.confirmedTie === true || coverage.status === 'tied_report' || (coverage.projectDispositions || []).some(project => project.disposition === 'tied');
 }
 
 function clippyCoverageMarkup(coverage = {}) {
   const status = coverage.status || 'unknown';
-  const label = coverage.label || (status === 'indexed_report_found' ? 'Report evidence indexed' : 'Report coverage not checked');
+  const label = coverage.label || 'Report coverage not checked';
   const checked = coverage.checkedAt ? new Date(coverage.checkedAt).toLocaleString() : '';
   const age = coverage.cacheAgeSeconds == null ? '' : `Feed age ${Math.round(Number(coverage.cacheAgeSeconds) / 60)} min`;
   const projects = (coverage.projects || []).slice(0, 5).map(project => {
@@ -7628,80 +7790,250 @@ function clippyCoverageMarkup(coverage = {}) {
     return /^https?:\/\/[^\s]+$/i.test(String(project.url || '')) ? `<a href="${escapeHtml(project.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(title)} ↗</a>` : `<span>${escapeHtml(title)}</span>`;
   }).join('');
   const evidence = (coverage.evidence || []).slice(0, 5).map(item => `<span>${escapeHtml([item.repo, item.path].filter(Boolean).join(' / '))}</span>`).join('');
-  return `<span class="clippy-coverage-badge ${['reported', 'indexed_report_found'].includes(status) ? 'reported' : 'unknown'}">${escapeHtml(label)}</span>${checked || age ? `<small>${escapeHtml([checked && `Checked ${checked}`, age].filter(Boolean).join(' · '))}</small>` : ''}${projects || evidence ? `<div class="clippy-coverage-evidence">${projects}${evidence}</div>` : ''}`;
+  const receipt = coverage.kind === 'analyst_attestation' ? `${/^https:\/\/[^\s]+$/i.test(String(coverage.sourceUrl || '')) ? `<a href="${escapeHtml(coverage.sourceUrl)}" target="_blank" rel="noopener noreferrer">Recorded Dradis source ↗</a>` : ''}${coverage.notes ? `<span>${escapeHtml(coverage.notes)}</span>` : ''}${coverage.expiresAt ? `<span>Check expires ${escapeHtml(new Date(coverage.expiresAt).toLocaleString())}</span>` : ''}` : '';
+  return `<span class="clippy-coverage-badge ${['reported', 'indexed_report_found'].includes(status) ? 'reported' : status === 'no_report_verified' ? 'verified' : 'unknown'}">${escapeHtml(label)}</span>${checked || age ? `<small>${escapeHtml([checked && `Checked ${checked}`, age].filter(Boolean).join(' · '))}</small>` : ''}${coverage.note ? `<small>${escapeHtml(coverage.note)}</small>` : ''}${projects || evidence || receipt ? `<div class="clippy-coverage-evidence">${projects}${evidence}${receipt}</div>` : ''}`;
 }
 
-function renderClippyOpportunities(view) {
-  const dashboard = state.clippyDashboard;
+function clippyLeadCollections(result = {}) {
+  const supplied = clippyCollection(result, 'leads');
+  const readyItem = item => item.reportCoverage?.status === 'no_report_verified' && !item.relatedTarget && !clippyKnownReportTie(item.reportCoverage);
+  const ready = supplied.filter(readyItem).slice(0, 5);
+  const seen = new Set(ready.map(item => item.id));
+  const review = [...supplied.filter(item => !readyItem(item)), ...clippyCollection(result, 'review')].filter(item => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+  return { ready, review };
+}
+
+function clippyLeadCard(item, index, { review = false, expanded = false } = {}) {
+  const possibleReport = item.reportCoverage?.status === 'reported';
+  const tied = clippyKnownReportTie(item.reportCoverage);
+  const sourceReview = item.targetKind === 'source';
+  const evidence = (item.evidence || []).slice(0, 6);
+  const checkedAt = item.evidenceCheckedAt ? new Date(item.evidenceCheckedAt).toLocaleString() : '';
+  const targetLabel = item.targetLabel || (sourceReview ? item.repository : item.domain) || 'Target unverified';
+  return `<article class="clippy-lead-card${review ? ' clippy-lead-review' : ''}" data-clippy-lead-id="${escapeHtml(item.id)}"><div class="clippy-lead-title"><div><span class="clippy-lead-domain">${sourceReview ? 'Source review · ' : ''}${escapeHtml(targetLabel)}</span><h3>${escapeHtml(item.title || 'Evidence needs review')}</h3>${sourceReview ? `<small class="clippy-evidence-date">Assessed commit: ${escapeHtml(item.commit || 'Unverified')}<br>Deployment and current exploitability unverified.</small>` : ''}</div><span class="clippy-severity-badge ${clippySeverity(item.severity)}">${escapeHtml(clippySeverity(item.severity))}</span></div>${item.relatedTarget ? `<p class="clippy-lead-note">This source also lists ${escapeHtml(item.relatedTarget)}. This card’s exact scope is ${escapeHtml(item.scope || item.domain)}; refresh the searched hostname before recording its report coverage.</p>` : ''}<p class="clippy-lead-why">${escapeHtml(item.why || 'Inspect the cited evidence before planning work.')}</p>${item.nextStep ? `<div class="clippy-lead-next"><strong>Next verification</strong><p>${escapeHtml(item.nextStep)}</p></div>` : ''}${review ? `<p class="clippy-lead-withheld">${tied ? 'Excluded: an analyst identified a tied Dradis report.' : possibleReport ? 'Withheld: possible Dradis matches need a direct analyst check.' : 'Dradis coverage is unverified. Review the evidence, then record a direct analyst check.'}</p>` : ''}<details class="clippy-lead-details" data-clippy-lead-details="${escapeHtml(item.id)}"${expanded ? ' open' : ''}><summary>Evidence & report check${evidence.length ? ` · ${evidence.length} sources` : ''}</summary><div class="clippy-opportunity-coverage">${clippyCoverageMarkup(item.reportCoverage)}</div>${item.scope ? `<small class="clippy-evidence-date">Exact report-check scope: ${escapeHtml(item.scope)}</small>` : ''}${item.evidenceDate ? `<small class="clippy-evidence-date">Historical evidence date: ${escapeHtml(item.evidenceDate)}</small>` : ''}${checkedAt ? `<small class="clippy-evidence-date">Evidence retrieved ${escapeHtml(checkedAt)}. Source age may differ.</small>` : ''}${evidence.length ? `<ul class="clippy-lead-sources">${evidence.map((source, sourceIndex) => `<li><button type="button" data-clippy-lead-source="${index}:${sourceIndex}"${source.path && source.repo ? '' : ' disabled'}>${escapeHtml([source.repo, source.path, source.line && `line ${source.line}`].filter(Boolean).join(' / ') || 'Source details unavailable')} ↗</button></li>`).join('')}</ul>` : '<p class="field-note">No source references available.</p>'}</details><footer>${review ? tied || item.relatedTarget ? '' : `<button type="button" data-clippy-record-coverage="${index}">Record Dradis check</button>` : `<button type="button" data-clippy-save-lead="${index}" aria-pressed="${item.saved === true}">${item.saved ? '★ Saved' : '☆ Save lead'}</button>`}<button type="button" class="clippy-chat-button" data-clippy-ask-lead="${index}">${review ? 'Investigate with Clippy' : 'Plan with Clippy'} ↗</button></footer></article>`;
+}
+
+function renderClippyLeads(view) {
+  view.leadSignature = null;
   const target = view.wrap.querySelector('[data-clippy-workspace]');
-  target.innerHTML = `<div class="clippy-opportunities-heading"><div><span class="collection-eyebrow">Choose the next engagement</span><h2>Turn intelligence into a starting point.</h2><p>Prioritize domains with serious findings and check what has already been reported.</p></div><button type="button" data-clippy-ask-priorities>✦ Ask Clippy to prioritize</button></div><div class="clippy-search-row"><label class="clippy-search"><span class="sr-only">Search domains and repos</span><input type="search" data-clippy-opportunity-search placeholder="Find a domain or engagement repo…" value="${escapeHtml(dashboard.opportunityQuery || '')}" /></label><label><span class="sr-only">Minimum finding severity</span><select data-clippy-opportunity-severity><option value="">All severities</option>${CLIPPY_SEVERITIES.filter(value => value !== 'unknown').map(value => `<option value="${value}"${dashboard.opportunitySeverity === value ? ' selected' : ''}>${value[0].toUpperCase() + value.slice(1)} findings</option>`).join('')}</select></label><label><span class="sr-only">Report coverage</span><select data-clippy-opportunity-coverage><option value="missing"${dashboard.coverage === 'missing' ? ' selected' : ''}>No delivered report found</option><option value="found"${dashboard.coverage === 'found' ? ' selected' : ''}>Delivered report found</option><option value="all"${dashboard.coverage === 'all' ? ' selected' : ''}>All report coverage</option></select></label></div><p class="clippy-data-note">Report coverage comes from Clippy’s cached Dradis feed and indexed evidence. Unchecked or missing matches require verification before concluding a report does not exist.</p><div class="clippy-opportunity-summary" data-clippy-opportunity-total role="status">Loading domains…</div><div class="clippy-opportunity-list" data-clippy-opportunities></div><div class="clippy-pagination" data-clippy-opportunity-pagination></div>`;
-  wireClippyAgentButton(target.querySelector('[data-clippy-ask-priorities]'), 'Use the indexed Clippy intelligence to recommend the strongest domains to assess next. Prioritize critical findings, group related engagement repos, and check cached Dradis report coverage. Cite the evidence and label unknown or stale coverage. Do not launch an assessment.');
-  target.querySelector('[data-clippy-opportunity-search]').addEventListener('input', event => {
-    dashboard.opportunityQuery = event.target.value;
-    dashboard.opportunityOffset = 0;
-    clearTimeout(view.searchTimer);
-    view.searchTimer = setTimeout(() => loadClippyOpportunities(view), 280);
+  target.innerHTML = `<section class="clippy-leads-heading"><span class="collection-eyebrow">Your next assessment</span><h2>A few solid starting points.</h2><p>Specific evidence. A clear next step. Dradis coverage checked before a lead makes the shortlist.</p><form class="clippy-lead-search" data-clippy-lead-search><label><span class="sr-only">Focus the lead search</span><input type="search" data-clippy-lead-query placeholder="Optional domain, technology, or engagement…" value="${escapeHtml(state.clippyDashboard.leadQuery || '')}" /></label><button type="submit" class="safe" data-clippy-find-leads>Find leads</button></form></section><div class="clippy-lead-status" data-clippy-lead-status role="status">Loading saved intelligence…</div><div class="clippy-leads-content" data-clippy-leads-content></div>`;
+  target.querySelector('[data-clippy-lead-query]').addEventListener('input', event => { state.clippyDashboard.leadQuery = event.target.value; });
+  target.querySelector('[data-clippy-lead-search]').addEventListener('submit', async event => {
+    event.preventDefault();
+    const button = target.querySelector('[data-clippy-find-leads]');
+    if (button.disabled) return;
+    button.disabled = true;
+    try {
+      await packageApi('POST', '/api/clippy/leads/search', { query: state.clippyDashboard.leadQuery || '' });
+      await loadClippyLeads(view);
+    } catch (error) { showToast(error.message, { kind: 'warning', label: 'Clippy leads' }); }
+    finally { if (button.isConnected && view.leadResult?.search?.state !== 'running') button.disabled = false; }
   });
-  for (const [selector, key] of [['[data-clippy-opportunity-severity]', 'opportunitySeverity'], ['[data-clippy-opportunity-coverage]', 'coverage']]) target.querySelector(selector).addEventListener('change', event => {
-    dashboard[key] = event.target.value;
-    dashboard.opportunityOffset = 0;
-    loadClippyOpportunities(view);
-  });
-  loadClippyOpportunities(view);
+  loadClippyLeads(view);
 }
 
-async function loadClippyOpportunities(view) {
-  if (!clippyViewAlive(view)) return;
-  const target = view.wrap.querySelector('[data-clippy-opportunities]');
-  if (!target) return;
-  const dashboard = state.clippyDashboard;
-  const query = new URLSearchParams({ q: dashboard.opportunityQuery || '', severity: dashboard.opportunitySeverity || '', reportCoverage: dashboard.coverage || 'missing', offset: String(dashboard.opportunityOffset || 0), limit: '25' });
+async function loadClippyLeads(view) {
+  clearTimeout(view.leadsTimer);
+  if (!clippyViewAlive(view) || state.clippyDashboard.view !== 'leads') return;
+  const content = view.wrap.querySelector('[data-clippy-leads-content]');
+  if (!content) return;
   try {
-    const result = await clippyRead(view, `/opportunities?${query}`, 'opportunities');
-    if (!clippyViewAlive(view) || !target.isConnected) return;
-    const opportunities = clippyCollection(result, 'opportunities');
-    view.opportunities = opportunities;
-    view.wrap.querySelector('[data-clippy-opportunity-total]').textContent = `${Number(result.total ?? opportunities.length).toLocaleString()} domains in indexed intelligence${result.index?.complete ? '' : ' · index still incomplete'}`;
-    target.innerHTML = opportunities.length ? opportunities.map((item, i) => {
-      const counts = item.counts || {};
-      const repos = item.repos || [item.repo].filter(Boolean);
-      return `<article class="clippy-opportunity-card"><div class="clippy-opportunity-title"><div><h3>${escapeHtml(item.domain)}</h3><p>${escapeHtml(repos.join(' · '))}</p></div><div class="clippy-opportunity-counts">${CLIPPY_SEVERITIES.filter(severity => counts[severity]).map(severity => `<span class="clippy-severity-badge ${severity}">${Number(counts[severity]).toLocaleString()} ${severity}</span>`).join('')}</div></div><div class="clippy-opportunity-coverage" data-clippy-coverage-row="${i}">${clippyCoverageMarkup(item.reportCoverage)}</div>${(item.findings || []).length ? `<ul class="clippy-opportunity-evidence">${item.findings.slice(0, 3).map(finding => `<li><span class="clippy-severity-badge ${clippySeverity(finding.severity)}">${escapeHtml(clippySeverity(finding.severity))}</span><span>${escapeHtml(finding.title || finding.id || finding.path)}</span></li>`).join('')}</ul>` : ''}<footer><button type="button" data-clippy-coverage-check="${i}">Check report coverage</button><button type="button" data-clippy-domain-findings="${i}">View findings</button><button type="button" class="clippy-chat-button" data-clippy-start-here="${i}">✦ Start here with Clippy</button></footer></article>`;
-    }).join('') : clippyEmpty('No matching domains yet', 'Only findings with explicit domain or target metadata are grouped here. Other intelligence remains in Security findings. Index more intelligence or adjust your filters to find starting points.', '<button type="button" data-clippy-browse-findings>Browse security findings</button>');
-    target.querySelector('[data-clippy-browse-findings]')?.addEventListener('click', () => {
-      dashboard.view = 'findings';
-      view.wrap.querySelectorAll('[data-clippy-view]').forEach(tab => tab.setAttribute('aria-selected', String(tab.dataset.clippyView === 'findings')));
-      renderClippyWorkspace(view);
+    const result = await clippyRead(view, `/leads?query=${encodeURIComponent(state.clippyDashboard.leadQuery || '')}`, 'leads');
+    if (!clippyViewAlive(view) || !content.isConnected) return;
+    view.leadResult = result;
+    const running = result.search?.state === 'running';
+    const status = view.wrap.querySelector('[data-clippy-lead-status]');
+    const calls = Number(result.search?.calls || 0);
+    status.innerHTML = `<span${running ? ' class="clippy-lead-searching"' : ''}>${escapeHtml(result.search?.reason || (running ? 'Checking relevant intelligence and report coverage…' : 'Ready for an evidence search.'))}${running && calls ? ` · ${calls} lookups` : ''}</span>${running ? '<button type="button" class="text-action" data-clippy-cancel-leads>Stop search</button>' : ''}${!running && result.suggestions?.length ? `<div class="clippy-domain-suggestions"><span>Similar hostname found in source evidence:</span>${result.suggestions.map(domain => `<button type="button" class="text-action" data-clippy-suggested-domain="${escapeHtml(domain)}">Search ${escapeHtml(domain)}</button>`).join('')}</div>` : ''}${result.retainedElsewhere > 0 && (state.clippyDashboard.leadQuery || '').trim() ? `<small>${result.retainedElsewhere} earlier candidate${result.retainedElsewhere === 1 ? '' : 's'} outside this search ${result.retainedElsewhere === 1 ? 'is' : 'are'} hidden. <button type="button" class="text-action" data-clippy-clear-lead-focus>Show all saved evidence</button></small>` : ''}`;
+    view.wrap.querySelector('[data-clippy-find-leads]').disabled = running;
+    status.querySelectorAll?.('[data-clippy-suggested-domain]').forEach(button => button.addEventListener('click', () => {
+      state.clippyDashboard.leadQuery = button.dataset.clippySuggestedDomain;
+      view.wrap.querySelector('[data-clippy-lead-query]').value = button.dataset.clippySuggestedDomain;
+      view.wrap.querySelector('[data-clippy-lead-search]').requestSubmit();
+    }));
+    status.querySelector('[data-clippy-clear-lead-focus]')?.addEventListener('click', () => {
+      state.clippyDashboard.leadQuery = ''; view.wrap.querySelector('[data-clippy-lead-query]').value = ''; loadClippyLeads(view);
     });
-    target.querySelectorAll('[data-clippy-start-here]').forEach(button => wireClippyAgentButton(button, () => clippyOpportunityPrompt(opportunities[Number(button.dataset.clippyStartHere)])));
-    target.querySelectorAll('[data-clippy-domain-findings]').forEach(button => button.addEventListener('click', () => {
-      const item = opportunities[Number(button.dataset.clippyDomainFindings)];
-      Object.assign(dashboard, { view: 'findings', query: item.domain, severity: '', repo: '', category: '', offset: 0 });
-      view.wrap.querySelectorAll('[data-clippy-view]').forEach(tab => tab.setAttribute('aria-selected', String(tab.dataset.clippyView === 'findings')));
-      renderClippyWorkspace(view);
-    }));
-    target.querySelectorAll('[data-clippy-coverage-check]').forEach(button => button.addEventListener('click', async () => {
-      const i = Number(button.dataset.clippyCoverageCheck);
-      button.disabled = true;
-      button.textContent = 'Checking…';
-      try {
-        const checked = await packageApi('POST', '/api/clippy/opportunities/coverage', { domain: opportunities[i].domain });
-        if (!clippyViewAlive(view) || !button.isConnected) return;
-        opportunities[i].reportCoverage = checked.reportCoverage;
-        target.querySelector(`[data-clippy-coverage-row="${i}"]`).innerHTML = `${clippyCoverageMarkup(checked.reportCoverage)}${checked.reportCoverage?.note ? `<small>${escapeHtml(checked.reportCoverage.note)}</small>` : ''}`;
-      } catch (error) { showToast(error.message, { kind: 'warning', label: 'Report coverage' }); }
-      finally { button.disabled = false; button.textContent = 'Check report coverage'; }
-    }));
-    const pagination = view.wrap.querySelector('[data-clippy-opportunity-pagination]');
-    pagination.innerHTML = dashboard.opportunityOffset || result.hasMore ? `<button type="button" data-clippy-opportunity-prev${dashboard.opportunityOffset ? '' : ' disabled'}>← Previous</button><span>Page ${Math.floor((dashboard.opportunityOffset || 0) / 25) + 1}</span><button type="button" data-clippy-opportunity-next${result.hasMore ? '' : ' disabled'}>Next →</button>` : '';
-    pagination.querySelector('[data-clippy-opportunity-prev]')?.addEventListener('click', () => { dashboard.opportunityOffset = Math.max(0, dashboard.opportunityOffset - 25); loadClippyOpportunities(view); });
-    pagination.querySelector('[data-clippy-opportunity-next]')?.addEventListener('click', () => { dashboard.opportunityOffset = Number(result.nextOffset ?? (dashboard.opportunityOffset || 0) + 25); loadClippyOpportunities(view); });
-  } catch (error) { if (clippyViewAlive(view) && target.isConnected && error.name !== 'AbortError') clippyError(target, error, () => loadClippyOpportunities(view)); }
+    status.querySelector('[data-clippy-cancel-leads]')?.addEventListener('click', async event => {
+      event.currentTarget.disabled = true;
+      try { await packageApi('POST', '/api/clippy/leads/cancel', {}); await loadClippyLeads(view); }
+      catch (error) { showToast(error.message, { kind: 'warning', label: 'Clippy leads' }); if (event.currentTarget.isConnected) event.currentTarget.disabled = false; }
+    });
+    const { ready, review } = clippyLeadCollections(result);
+    const signature = JSON.stringify({ ready, review, note: result.note, query: result.query });
+    if (view.leadSignature !== signature) {
+      view.leadSignature = signature;
+      const expanded = state.clippyDashboard.expandedLeads ||= new Set();
+      const items = [...ready, ...review];
+      view.leadItems = items;
+      const reviewOpen = view.reviewExpanded ?? ready.length === 0;
+      content.innerHTML = `<div class="clippy-shortlist-heading"><strong>Ready to investigate</strong><span>${ready.length} / 5</span></div>${ready.length ? ready.map((item, index) => clippyLeadCard(item, index, { expanded: expanded.has(item.id) })).join('') : review.length ? '<p class="clippy-lead-note">Evidence found below. No verified ready leads yet: check the evidence and Dradis coverage before recommending assessment work.</p>' : clippyEmpty('No verified leads yet', 'Run a focused search to find evidence candidates. Clippy MCP cannot establish complete current Dradis coverage; an analyst must check Dradis directly before a candidate is ready.', '<button type="button" data-clippy-ask-search>Explore with Clippy</button>')}${review.length ? `<details class="clippy-review-list" data-clippy-review-list${reviewOpen ? ' open' : ''}><summary>Evidence to review <span>${review.length}</span></summary><p>Review these source-backed candidates with Clippy. They remain outside recommendations until their evidence is actionable and an analyst records a direct Dradis check. Possible project-name matches must each be resolved; tied reports exclude a candidate.</p>${review.map((item, index) => clippyLeadCard(item, index + ready.length, { review: true, expanded: expanded.has(item.id) })).join('')}</details>` : ''}${result.note ? `<p class="clippy-lead-note">${escapeHtml(result.note)}</p>` : ''}`;
+      wireClippyAgentButton(content.querySelector('[data-clippy-ask-search]'), () => clippyLeadSearchPrompt(state.clippyDashboard.leadQuery || ''));
+      content.querySelector('[data-clippy-review-list]')?.addEventListener('toggle', event => { view.reviewExpanded = event.currentTarget.open; });
+      content.querySelectorAll('[data-clippy-lead-details]').forEach(details => details.addEventListener('toggle', () => {
+        if (details.open) expanded.add(details.dataset.clippyLeadDetails);
+        else expanded.delete(details.dataset.clippyLeadDetails);
+      }));
+      content.querySelectorAll('[data-clippy-ask-lead]').forEach(button => wireClippyAgentButton(button, () => clippyLeadPrompt(items[Number(button.dataset.clippyAskLead)])));
+      content.querySelectorAll('[data-clippy-record-coverage]').forEach(button => button.addEventListener('click', () => openClippyCoverageCheck(view, items[Number(button.dataset.clippyRecordCoverage)])));
+      content.querySelectorAll('[data-clippy-lead-source]').forEach(button => button.addEventListener('click', () => {
+        const [itemIndex, sourceIndex] = button.dataset.clippyLeadSource.split(':').map(Number);
+        openClippyLeadSource(view, items[itemIndex].evidence[sourceIndex]);
+      }));
+      content.querySelectorAll('[data-clippy-save-lead]').forEach(button => button.addEventListener('click', async () => {
+        const item = items[Number(button.dataset.clippySaveLead)];
+        button.disabled = true;
+        try { await packageApi('POST', `/api/clippy/leads/${encodeURIComponent(item.id)}/save`, { saved: !item.saved }); await loadClippyLeads(view); }
+        catch (error) { showToast(error.message, { kind: 'warning', label: 'Clippy leads' }); if (button.isConnected) button.disabled = false; }
+      }));
+    }
+    if (running) view.leadsTimer = setTimeout(() => loadClippyLeads(view), 2500);
+  } catch (error) {
+    if (clippyViewAlive(view) && content.isConnected && error.name !== 'AbortError') {
+      view.leadSignature = null;
+      view.wrap.querySelector('[data-clippy-find-leads]').disabled = false;
+      clippyError(content, error, () => loadClippyLeads(view));
+    }
+  }
+}
+
+function openClippyCoverageCheck(view, item) {
+  if (clippyKnownReportTie(item.reportCoverage)) return;
+  view.closeCoverage?.();
+  const coverage = item.reportCoverage || {};
+  const scope = item.scope || item.domain;
+  const reportQuery = item.targetKind === 'source' ? String(item.repository || item.targetLabel || '').split('/').at(-1).split('@')[0] : item.domain || item.targetLabel || '';
+  const dradisTabUrl = `https://dradistab.redteamstuff.com/?filter=${encodeURIComponent(reportQuery)}`;
+  const projects = Array.isArray(coverage.projects) ? coverage.projects : [];
+  const matches = projects.map((project, index) => {
+    const url = /^https:\/\/[^\s]+$/i.test(String(project.url || '')) ? `<a href="${escapeHtml(project.url)}" target="_blank" rel="noopener noreferrer">Open project ↗</a>` : '';
+    return `<fieldset class="clippy-project-disposition"><legend>${escapeHtml(project.name || 'Possible Dradis project match')}</legend><p>${escapeHtml(project.status || 'Status unknown')}${url ? ` · ${url}` : ''}</p><label class="editor-field"><span>Does this project or report cover the exact target?</span><select data-clippy-project-disposition="${index}" required><option value="" selected>Choose after checking Dradis…</option><option value="unrelated">Unrelated to this target</option><option value="tied">Tied to this target — exclude</option><option value="unknown">Unable to establish the relationship</option></select></label><label class="editor-field"><span>Evidence for this relationship</span><textarea data-clippy-project-notes="${index}" minlength="20" maxlength="2000" rows="3" placeholder="Record the project scope, report/finding records, and why this match is unrelated or tied…" required></textarea></label></fieldset>`;
+  }).join('');
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<div class="app-modal clippy-coverage-modal" role="dialog" aria-modal="true" aria-labelledby="clippy-coverage-title"><header><h2 id="clippy-coverage-title">Record a Dradis check</h2><button type="button" data-clippy-close-coverage aria-label="Close Dradis check">×</button></header><div class="app-modal-copy"><p><strong class="clippy-coverage-scope">${escapeHtml(scope || 'Exact target unavailable')}</strong> · ${escapeHtml(item.title || '')}</p><p>Clippy MCP does not provide complete current Dradis report coverage. Check Dradis directly for this exact ${item.targetKind === 'source' ? 'repository and assessed commit, related deployment, source/finding IDs,' : 'target, its aliases,'} related projects, and reports. A missing Clippy search match is insufficient. This records your check for 24 hours; new evidence requires another check.</p><p><a href="${escapeHtml(dradisTabUrl)}" target="_blank" rel="noopener noreferrer">Open DradisTab for this scope ↗</a><br>This filtered page is a starting point. Check relevant aliases and the actual project/report records, then record the page you inspected below.</p>${coverage.partial ? '<p class="clippy-lead-withheld">The returned project feed is incomplete. A verified receipt cannot be recorded until the matching inventory can be rechecked completely.</p>' : ''}<form data-clippy-coverage-form>${matches ? `<p>Resolve each possible project-name match using its actual scope and reports. Nothing is marked unrelated automatically.</p>${matches}` : ''}<label class="editor-field"><span>Dradis URL you checked</span><input type="url" data-clippy-coverage-url value="${escapeHtml(dradisTabUrl)}" placeholder="https://dradis…/projects" required /></label><label class="editor-field"><span>What did you check?</span><textarea data-clippy-coverage-notes placeholder="Exact target, aliases or repository/commit, project and report inventory, and the result of your check…" minlength="20" maxlength="2000" rows="4" required></textarea></label><label class="clippy-coverage-confirm"><input type="checkbox" data-clippy-coverage-confirm required /><span>I checked Dradis for this exact scope and relevant aliases and found no tied report.</span></label><p class="package-editor-status" data-clippy-coverage-status role="status"></p><div class="smart-connect-form-actions"><button type="button" data-clippy-cancel-coverage>Cancel</button><button type="submit" class="safe" disabled>Record check</button></div></form></div></div>`;
+  document.getElementById('modal-root').appendChild(backdrop);
+  let busy = false;
+  const close = prepareCollectionDialog(backdrop, { onClose: () => { view.closeCoverage = null; } });
+  view.closeCoverage = close;
+  backdrop.querySelector('[data-clippy-close-coverage]').addEventListener('click', close);
+  backdrop.querySelector('[data-clippy-cancel-coverage]').addEventListener('click', close);
+  const form = backdrop.querySelector('[data-clippy-coverage-form]');
+  const submit = backdrop.querySelector('[type="submit"]');
+  const status = backdrop.querySelector('[data-clippy-coverage-status]');
+  const dispositions = () => projects.map((project, index) => ({ matchId: String(project.matchId ?? project.id ?? ''), disposition: backdrop.querySelector(`[data-clippy-project-disposition="${index}"]`).value, notes: backdrop.querySelector(`[data-clippy-project-notes="${index}"]`).value.trim() }));
+  const update = () => {
+    const rows = dispositions();
+    const relationship = rows.some(project => ['tied', 'unknown'].includes(project.disposition));
+    const unresolved = rows.some(project => !['unrelated', 'tied', 'unknown'].includes(project.disposition) || project.notes.length < 20 || project.notes.length > 2000 || !project.matchId);
+    const confirmation = backdrop.querySelector('[data-clippy-coverage-confirm]');
+    confirmation.disabled = relationship;
+    if (relationship) confirmation.checked = false;
+    submit.textContent = relationship ? 'Record relationship' : 'Record check';
+    submit.disabled = busy || !scope || unresolved || (!relationship && (coverage.partial === true || !confirmation.checked));
+    if (rows.some(project => project.disposition === 'tied')) status.textContent = 'A tied report excludes this candidate. Record this relationship to retain the exclusion; this does not attest that no report exists.';
+    else if (rows.some(project => project.disposition === 'unknown')) status.textContent = 'Report coverage remains unknown. Record this relationship to retain the unresolved check; the candidate stays outside recommendations.';
+    else if (!busy) status.textContent = '';
+    return { rows, relationship };
+  };
+  form.addEventListener('input', update);
+  form.addEventListener('change', update);
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const { rows, relationship } = update();
+    if (busy || submit.disabled || form.reportValidity?.() === false) return;
+    busy = true;
+    submit.disabled = true;
+    status.textContent = relationship ? 'Saving the report relationship…' : 'Saving your Dradis check…';
+    try {
+      await packageApi('POST', `/api/clippy/leads/${encodeURIComponent(item.id)}/coverage`, { noReport: !relationship, sourceUrl: backdrop.querySelector('[data-clippy-coverage-url]').value.trim(), scope, notes: backdrop.querySelector('[data-clippy-coverage-notes]').value.trim(), evidenceDigest: item.evidenceDigest, matchDigest: coverage.matchDigest, projectDispositions: rows });
+      busy = false;
+      close();
+      await loadClippyLeads(view);
+    } catch (error) {
+      busy = false;
+      await loadClippyLeads(view);
+      status.textContent = `${error.message} Close and reopen this check to review the latest evidence and matching projects.`;
+      submit.disabled = true;
+    }
+  });
+}
+
+async function openClippyLeadSource(view, source) {
+  return openClippySourcePreview(source, { view });
+}
+
+async function openClippySourcePreview(source, { view = null } = {}) {
+  const reference = clippySourceReference(clippySourceHref(source));
+  if (!reference) return;
+  activeClippySourcePreview?.();
+  view?.closeEvidence?.();
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<div class="app-modal clippy-source-modal" role="dialog" aria-modal="true" aria-labelledby="clippy-source-title"><header><div><small>${escapeHtml(reference.repo)}</small><h2 id="clippy-source-title">${escapeHtml(reference.path)}</h2></div><button type="button" data-clippy-close-source aria-label="Close evidence">×</button></header><div class="clippy-source-content" data-clippy-source-content role="status">${clippyEmpty('Loading source', 'Reading the cited evidence directly from Clippy…')}</div></div>`;
+  document.getElementById('modal-root').appendChild(backdrop);
+  let controller = null;
+  let closed = false;
+  const close = prepareCollectionDialog(backdrop, { onClose: () => {
+    closed = true;
+    controller?.abort();
+    if (activeClippySourcePreview === close) activeClippySourcePreview = null;
+    if (view?.closeEvidence === close) view.closeEvidence = null;
+  } });
+  activeClippySourcePreview = close;
+  if (view) view.closeEvidence = close;
+  backdrop.querySelector('[data-clippy-close-source]').addEventListener('click', close);
+  const target = backdrop.querySelector('[data-clippy-source-content]');
+  const alive = () => !closed && target.isConnected && (!view || clippyViewAlive(view));
+  const read = async (offset = Math.max(1, reference.line - 8)) => {
+    controller?.abort();
+    const request = new AbortController();
+    controller = request;
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; request.abort(); }, 45000);
+    target.innerHTML = clippyEmpty('Loading source', 'Reading this page directly from Clippy…');
+    try {
+      const response = await fetch(`/api/clippy/file?${new URLSearchParams({ repo: reference.repo, path: reference.path, offset: String(offset), limit: '200' })}`, { signal: request.signal });
+      const result = await response.json();
+      if (!alive() || controller !== request) return;
+      if (!response.ok || result.ok === false) throw new Error(result.error || `Clippy request failed (${response.status})`);
+      const file = result.file || result;
+      if (file.is_text === false) { target.innerHTML = clippyEmpty('Binary evidence', 'A text preview is not available for this file.'); return; }
+      const text = String(file.content || file.text || '');
+      const pageSize = Math.min(1000, Math.max(1, Number(file.limit) || 200));
+      const start = Math.max(1, Number(file.offset) || offset);
+      const total = Math.max(0, Number(file.total_lines) || 0);
+      const returnedLines = text ? text.replace(/\r?\n$/, '').split(/\r?\n/).length : 0;
+      const end = start + Math.max(0, returnedLines - 1);
+      const hasMore = total ? start + pageSize <= total : file.truncated === true;
+      target.innerHTML = `<p class="clippy-data-note">Live Clippy source · lines ${start}–${end}${total ? ` of ${total.toLocaleString()}` : ''}${reference.line > 1 ? ` · citation at line ${reference.line}` : ''}. Additional pages load when opened.</p><pre>${escapeHtml(text || 'No text returned for this source.')}</pre><div class="clippy-file-pagination"><button type="button" data-clippy-source-prev${start > 1 ? '' : ' disabled'}>← Previous lines</button><button type="button" data-clippy-source-next${hasMore ? '' : ' disabled'}>Next lines →</button></div>`;
+      target.querySelector('[data-clippy-source-prev]').addEventListener('click', () => read(Math.max(1, start - pageSize)));
+      target.querySelector('[data-clippy-source-next]').addEventListener('click', () => read(start + pageSize));
+    } catch (error) {
+      if (!alive() || controller !== request) return;
+      if (timedOut) clippyError(target, new Error('Clippy took too long to read this source. Try again.'), () => read(offset));
+      else if (error.name !== 'AbortError') clippyError(target, error, () => read(offset));
+    } finally { clearTimeout(timer); }
+  };
+  await read();
 }
 
 function renderClippyFindings(view) {
   const dashboard = state.clippyDashboard;
+  dashboard.findingsSource = dashboard.findingsSource === 'cache' ? 'cache' : 'live';
   const target = view.wrap.querySelector('[data-clippy-workspace]');
-  target.innerHTML = `<div class="clippy-findings-toolbar"><div class="clippy-severity-filters" role="group" aria-label="Filter by severity"><button type="button" class="clippy-severity-chip all" data-clippy-severity="" aria-pressed="${!dashboard.severity}">All <span data-clippy-count="all">—</span></button>${CLIPPY_SEVERITIES.map(severity => `<button type="button" class="clippy-severity-chip ${severity}" data-clippy-severity="${severity}" aria-pressed="${dashboard.severity === severity}">${severity === 'unknown' ? 'Unspecified' : severity}<span data-clippy-count="${severity}">—</span></button>`).join('')}</div><button type="button" class="text-action" data-clippy-clear>Clear filters</button></div><div class="clippy-search-row"><label class="clippy-search"><span class="sr-only">Search findings</span><input type="search" data-clippy-search placeholder="Search title, target, repo, ID…" value="${escapeHtml(dashboard.query)}" /></label><label><span class="sr-only">Filter findings by repository</span><select data-clippy-repo><option value="">All engagement repos</option>${dashboard.repo ? `<option value="${escapeHtml(dashboard.repo)}" selected>${escapeHtml(dashboard.repo)}</option>` : ''}</select></label><label><span class="sr-only">Filter findings by category</span><select data-clippy-category><option value="">All categories</option>${dashboard.category ? `<option value="${escapeHtml(dashboard.category)}" selected>${escapeHtml(dashboard.category)}</option>` : ''}</select></label></div><div class="clippy-data-note" data-clippy-note role="status" hidden></div><div class="clippy-findings-layout"><section class="clippy-results-panel" aria-label="Security findings"><div class="clippy-panel-heading"><strong data-clippy-count-scope>Findings</strong><span data-clippy-total>Loading…</span></div><div class="clippy-findings-list" data-clippy-findings role="list"></div><div class="clippy-pagination" data-clippy-pagination></div></section><section class="clippy-finding-detail" data-clippy-detail aria-label="Finding details">${clippyEmpty('Select a finding', 'Details, evidence, and remediation appear here.')}</section></div>`;
+  target.innerHTML = `<div class="clippy-findings-toolbar"><label>Source <select data-clippy-source aria-label="Finding source"><option value="live"${dashboard.findingsSource === 'live' ? ' selected' : ''}>Live Clippy</option><option value="cache"${dashboard.findingsSource === 'cache' ? ' selected' : ''}>Local cache</option></select></label><div class="clippy-severity-filters" role="group" aria-label="Filter by severity"><button type="button" class="clippy-severity-chip all" data-clippy-severity="" aria-pressed="${!dashboard.severity}">All <span data-clippy-count="all">—</span></button>${CLIPPY_SEVERITIES.map(severity => `<button type="button" class="clippy-severity-chip ${severity}" data-clippy-severity="${severity}" aria-pressed="${dashboard.severity === severity}">${severity === 'unknown' ? 'Unspecified' : severity}<span data-clippy-count="${severity}">—</span></button>`).join('')}</div><button type="button" class="text-action" data-clippy-clear>Clear filters</button></div><div class="clippy-search-row"><label class="clippy-search"><span class="sr-only">Search findings</span><input type="search" data-clippy-search placeholder="Search title, target, repo, ID…" value="${escapeHtml(dashboard.query)}" /></label><label><span class="sr-only">Filter findings by repository</span><select data-clippy-repo><option value="">All engagement repos</option>${dashboard.repo ? `<option value="${escapeHtml(dashboard.repo)}" selected>${escapeHtml(dashboard.repo)}</option>` : ''}</select></label><label><span class="sr-only">Filter findings by category</span><select data-clippy-category><option value="">All categories</option>${dashboard.category ? `<option value="${escapeHtml(dashboard.category)}" selected>${escapeHtml(dashboard.category)}</option>` : ''}</select></label></div><div class="clippy-data-note" data-clippy-note role="status" hidden></div><div class="clippy-findings-layout"><section class="clippy-results-panel" aria-label="Security findings"><div class="clippy-panel-heading"><strong data-clippy-count-scope>Findings</strong><span data-clippy-total>Loading…</span></div><div class="clippy-findings-list" data-clippy-findings role="list"></div><div class="clippy-pagination" data-clippy-pagination></div></section><section class="clippy-finding-detail" data-clippy-detail aria-label="Finding details">${clippyEmpty('Select a finding', 'Details, evidence, and remediation appear here.')}</section></div>`;
+  target.querySelector('[data-clippy-source]').addEventListener('change', event => {
+    dashboard.findingsSource = event.target.value;
+    dashboard.offset = 0;
+    dashboard.category = '';
+    view.controllers.get('findings')?.abort();
+    renderClippyWorkspace(view);
+  });
   const search = target.querySelector('[data-clippy-search]');
   search.addEventListener('input', () => {
     dashboard.query = search.value;
@@ -7758,7 +8090,7 @@ async function loadClippyFindings(view) {
   const target = view.wrap.querySelector('[data-clippy-findings]');
   if (!target) return;
   const dashboard = state.clippyDashboard;
-  const query = new URLSearchParams({ q: dashboard.query, severity: dashboard.severity, repo: dashboard.repo, category: dashboard.category, offset: String(dashboard.offset), limit: '25' });
+  const query = new URLSearchParams({ source: dashboard.findingsSource || 'live', q: dashboard.query, severity: dashboard.severity, repo: dashboard.repo, category: dashboard.category, offset: String(dashboard.offset), limit: '25' });
   target.setAttribute('aria-busy', 'true');
   target.innerHTML = '<p class="clippy-list-message">Loading findings…</p>';
   view.wrap.querySelector('[data-clippy-total]').textContent = 'Loading…';
@@ -7776,12 +8108,12 @@ async function loadClippyFindings(view) {
     view.wrap.querySelector('[data-clippy-count="all"]').textContent = Number(allCount).toLocaleString();
     for (const severity of CLIPPY_SEVERITIES) view.wrap.querySelector(`[data-clippy-count="${severity}"]`).textContent = counts[severity] == null ? '—' : Number(counts[severity]).toLocaleString();
     const note = view.wrap.querySelector('[data-clippy-note]');
-    const pendingMetadata = Number(result.metadataPending ?? result.index?.metadataPending ?? 0);
+    const pendingMetadata = result.browseSource === 'live' ? 0 : Number(result.metadataPending ?? result.index?.metadataPending ?? 0);
     note.hidden = !result.note && !result.partial && !pendingMetadata;
-    note.textContent = [result.note || (result.partial ? 'Showing indexed matches available through Clippy. Counts reflect this result set.' : ''), pendingMetadata ? 'Severity counts include parsed findings only. Findings still loading metadata remain available under All.' : ''].filter(Boolean).join(' ');
+    note.textContent = [result.note || (result.partial ? 'Showing indexed matches available through Clippy. Counts reflect this result set.' : ''), pendingMetadata ? 'Not parsed describes local cache coverage, not Clippy Agent access. Unparsed paths remain available under All.' : ''].filter(Boolean).join(' ');
     updateClippyFilterOptions(view.wrap.querySelector('[data-clippy-repo]'), dashboard.repoOptions || result.repos || findings.map(item => item.repo).filter(Boolean), dashboard.repo, 'All engagement repos');
     updateClippyFilterOptions(view.wrap.querySelector('[data-clippy-category]'), result.categories || findings.map(item => item.category).filter(Boolean), dashboard.category, 'All categories');
-    target.innerHTML = findings.length ? findings.map((finding, index) => `<button type="button" class="clippy-finding-row${view.selectedFinding === String(finding.id) ? ' selected' : ''}" data-clippy-finding="${index}" role="listitem"><div class="clippy-finding-row-top"><strong>${escapeHtml(finding.title || finding.name || finding.id || 'Untitled finding')}</strong>${clippyFindingSeverityMarkup(finding)}</div><p>${escapeHtml([finding.repo, finding.category].filter(Boolean).join(' · ') || finding.path || '')}</p>${finding.target ? `<small>${escapeHtml(finding.target)}</small>` : ''}</button>`).join('') : clippyEmpty('No matching findings', result.hasMore ? 'No matches on this indexed page. Try the next page or adjust your filters.' : 'Try another search or clear your filters.');
+    target.innerHTML = findings.length ? findings.map((finding, index) => `<button type="button" class="clippy-finding-row${view.selectedFinding === String(finding.id) ? ' selected' : ''}" data-clippy-finding="${index}" role="listitem"><div class="clippy-finding-row-top"><strong>${escapeHtml(finding.title || finding.name || finding.id || 'Untitled finding')}</strong>${clippyFindingSeverityMarkup(finding)}</div><p>${escapeHtml([finding.repo, finding.category].filter(Boolean).join(' · ') || finding.path || '')}</p>${finding.target ? `<small>${escapeHtml(finding.target)}</small>` : ''}</button>`).join('') : clippyEmpty('No matching findings', result.hasMore ? 'No matching parsed findings on this page. Try the next page or refine your search.' : dashboard.findingsSource === 'cache' ? 'Try Live Clippy to search the connected intelligence beyond the optional cache.' : 'Try another search, choose a repo, or clear your filters.');
     target.querySelectorAll('[data-clippy-finding]').forEach(button => button.addEventListener('click', () => selectClippyFinding(view, findings[Number(button.dataset.clippyFinding)])));
     const pagination = view.wrap.querySelector('[data-clippy-pagination]');
     const hasMore = result.hasMore === true || (result.hasMore !== false && dashboard.offset + findings.length < total);
@@ -7808,14 +8140,14 @@ async function selectClippyFinding(view, finding) {
     const item = { ...finding, ...(result.finding || result), metadataPending: false };
     const sections = ['description', 'summary', 'impact', 'evidence', 'remediation', 'recommendation'];
     detail.innerHTML = `<div class="clippy-detail-heading"><div><span class="clippy-severity-badge ${clippySeverity(item.severity)}">${clippySeverity(item.severity) === 'unknown' ? 'Unspecified' : clippySeverity(item.severity)}</span><h2>${escapeHtml(item.title || item.name || 'Finding')}</h2><p>${escapeHtml([item.repo, item.category, item.target].filter(Boolean).join(' · '))}</p></div><button type="button" data-clippy-ask>✦ Ask Clippy</button></div><dl class="clippy-detail-meta">${[['Finding ID', item.id], ['Repository', item.repo], ['File', item.path], ['Status', item.status]].filter(([, value]) => value).map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl><div class="clippy-finding-body">${item.content ? renderMarkdown(item.content) : sections.filter(key => item[key]).map(key => `<section><h3>${key[0].toUpperCase() + key.slice(1)}</h3>${renderMarkdown(typeof item[key] === 'string' ? item[key] : JSON.stringify(item[key], null, 2))}</section>`).join('') || '<p class="field-note">No additional detail was returned for this finding.</p>'}</div>`;
-    enhanceMarkdownContent(detail);
+    enhanceMarkdownContent(detail, { clippySources: true, source: { repo: item.repo, path: item.path } });
     wireClippyAgentButton(detail.querySelector('[data-clippy-ask]'), `Explain this Clippy finding, including its evidence, impact, and remediation.\n\nFinding: ${item.title || id}\nRepository: ${item.repo || ''}\nPath: ${item.path || ''}\nID: ${id}`);
   } catch (error) { if (clippyViewAlive(view) && detail.isConnected && error.name !== 'AbortError') clippyError(detail, error, () => selectClippyFinding(view, finding)); }
 }
 
 function renderClippyRepos(view) {
   const target = view.wrap.querySelector('[data-clippy-workspace]');
-  target.innerHTML = `<div class="clippy-repos-toolbar"><div><h2>Engagement repos</h2><span data-clippy-repos-total>Loading…</span></div><label class="clippy-search"><span class="sr-only">Filter repositories</span><input type="search" data-clippy-repo-search placeholder="Filter repos…" value="${escapeHtml(state.clippyDashboard.repoQuery)}" /></label></div><div class="clippy-repos-layout"><section class="clippy-repo-panel" aria-label="Engagement repositories"><div class="clippy-repo-list" data-clippy-repos></div></section><section class="clippy-files-panel" aria-label="Repository files"><div class="clippy-panel-heading"><strong>Files</strong><span data-clippy-files-total></span></div><div class="clippy-files-list" data-clippy-files>${clippyEmpty('Select a repo', 'Its indexed files will appear here.')}</div></section><section class="clippy-file-detail" data-clippy-file-detail aria-label="File preview">${clippyEmpty('Select a file', 'Preview engagement notes and assessment evidence.')}</section></div>`;
+  target.innerHTML = `<div class="clippy-repos-toolbar"><div><h2>Engagement repos</h2><small>Read from connected Clippy; independent of the local cache.</small><span data-clippy-repos-total>Loading…</span></div><label class="clippy-search"><span class="sr-only">Filter repositories</span><input type="search" data-clippy-repo-search placeholder="Filter repos…" value="${escapeHtml(state.clippyDashboard.repoQuery)}" /></label></div><div class="clippy-repos-layout"><section class="clippy-repo-panel" aria-label="Engagement repositories"><div class="clippy-repo-list" data-clippy-repos></div></section><section class="clippy-files-panel" aria-label="Repository files"><div class="clippy-panel-heading"><strong>Files</strong><span data-clippy-files-total></span></div><div class="clippy-files-list" data-clippy-files>${clippyEmpty('Select a repo', 'Read the files available through connected Clippy. Local cache progress does not limit this view.')}</div></section><section class="clippy-file-detail" data-clippy-file-detail aria-label="File preview">${clippyEmpty('Select a file', 'Preview engagement notes and assessment evidence.')}</section></div>`;
   const input = target.querySelector('[data-clippy-repo-search]');
   input.addEventListener('input', () => {
     state.clippyDashboard.repoQuery = input.value;
@@ -7864,7 +8196,7 @@ async function selectClippyRepo(view, repo) {
     const files = clippyCollection(result, 'files');
     view.files = files;
     view.wrap.querySelector('[data-clippy-files-total]').textContent = `${files.length.toLocaleString()}${result.partial ? '+' : ''}`;
-    target.innerHTML = files.length ? `${result.partial ? '<p class="clippy-index-note">Showing the indexed file selection returned by Clippy.</p>' : ''}<label class="clippy-file-search"><span class="sr-only">Filter indexed files</span><input type="search" data-clippy-file-search placeholder="Find a file…" /></label><div data-clippy-file-rows>${files.map((file, index) => `<button type="button" class="clippy-file-row" data-clippy-file="${index}"><span aria-hidden="true">${file.is_text === false ? '▧' : '≡'}</span><span>${escapeHtml(file.path || file.name || String(file))}</span></button>`).join('')}</div>` : clippyEmpty('No indexed files', 'This repo has no files available through Clippy.');
+    target.innerHTML = files.length ? `${result.partial ? '<p class="clippy-index-note">Clippy returned its limit of 500 files for this repo. This list may be incomplete; ask Clippy Agent for a focused search or known file path.</p>' : ''}<label class="clippy-file-search"><span class="sr-only">Filter returned files</span><input type="search" data-clippy-file-search placeholder="Find a file…" /></label><div data-clippy-file-rows>${files.map((file, index) => `<button type="button" class="clippy-file-row" data-clippy-file="${index}"><span aria-hidden="true">${file.is_text === false ? '▧' : '≡'}</span><span>${escapeHtml(file.path || file.name || String(file))}</span></button>`).join('')}</div>` : clippyEmpty('No files returned', 'Clippy returned no files for this repository.');
     target.querySelector('[data-clippy-file-search]')?.addEventListener('input', event => {
       const query = event.target.value.toLowerCase();
       target.querySelectorAll('[data-clippy-file]').forEach(button => { button.hidden = !String(files[Number(button.dataset.clippyFile)].path || files[Number(button.dataset.clippyFile)].name || '').toLowerCase().includes(query); });
@@ -7892,14 +8224,14 @@ async function selectClippyFile(view, file, offset = 1) {
     const start = Number(content.offset) || offset;
     const totalLines = Number(content.total_lines) || 0;
     const hasMore = totalLines ? start + pageSize <= totalLines : content.truncated === true;
-    target.innerHTML = `<div class="clippy-file-heading"><div><span class="collection-eyebrow">${escapeHtml(repo)}</span><h2>${escapeHtml(path)}</h2></div><button type="button" data-clippy-ask-file>✦ Ask Clippy</button></div>${content.truncated || start > 1 ? `<p class="clippy-data-note">Showing indexed lines ${start}–${totalLines ? Math.min(start + pageSize - 1, totalLines) : start + pageSize - 1}${totalLines ? ` of ${totalLines.toLocaleString()}` : ''}.</p>` : ''}${binary ? clippyEmpty('Binary file', 'A text preview is not available for this file.') : `<div class="clippy-file-body">${markdown ? renderMarkdown(preview) : `<pre>${escapeHtml(preview)}</pre>`}</div>`}`;
+    target.innerHTML = `<div class="clippy-file-heading"><div><span class="collection-eyebrow">${escapeHtml(repo)}</span><h2>${escapeHtml(path)}</h2></div><button type="button" data-clippy-ask-file>✦ Ask Clippy</button></div>${content.truncated || start > 1 ? `<p class="clippy-data-note">Showing Clippy source lines ${start}–${totalLines ? Math.min(start + pageSize - 1, totalLines) : start + pageSize - 1}${totalLines ? ` of ${totalLines.toLocaleString()}` : ''}.</p>` : ''}${binary ? clippyEmpty('Binary file', 'A text preview is not available for this file.') : `<div class="clippy-file-body">${markdown ? renderMarkdown(preview) : `<pre>${escapeHtml(preview)}</pre>`}</div>`}`;
     if (!binary && (hasMore || start > 1)) {
       target.insertAdjacentHTML('beforeend', `<div class="clippy-file-pagination"><button type="button" data-clippy-file-prev${start > 1 ? '' : ' disabled'}>← Previous lines</button><button type="button" data-clippy-file-next${hasMore ? '' : ' disabled'}>Next lines →</button></div>`);
       target.querySelector('[data-clippy-file-prev]').addEventListener('click', () => selectClippyFile(view, file, Math.max(1, start - pageSize)));
       target.querySelector('[data-clippy-file-next]').addEventListener('click', () => selectClippyFile(view, file, start + pageSize));
     }
-    enhanceMarkdownContent(target);
-    wireClippyAgentButton(target.querySelector('[data-clippy-ask-file]'), `Read and explain this indexed Clippy engagement file.\n\nRepository: ${repo}\nPath: ${path}`);
+    enhanceMarkdownContent(target, { clippySources: true, source: { repo, path } });
+    wireClippyAgentButton(target.querySelector('[data-clippy-ask-file]'), `Read and explain this Clippy engagement file directly from the connected MCP.\n\nRepository: ${repo}\nPath: ${path}`);
   } catch (error) { if (clippyViewAlive(view) && target.isConnected && error.name !== 'AbortError') clippyError(target, error, () => selectClippyFile(view, file, offset)); }
 }
 
@@ -8915,12 +9247,14 @@ function applyPersistentLayout() {
   const eventsHeight = Math.max(34, Math.min(260, Number(localStorage.getItem('glados-dash.events-height')) || 96));
   const savedSidebarState = localStorage.getItem('glados-dash.sidebar-collapsed');
   const sidebarCollapsed = savedSidebarState === '1' || (savedSidebarState === null && window.innerWidth <= 760);
-  const eventsCollapsed = localStorage.getItem('glados-dash.events-collapsed') === '1';
+  const eventsCollapsed = localStorage.getItem('glados-dash.events-collapsed') !== '0';
   root.style.setProperty('--sidebar-width', `${sidebarWidth}px`);
   root.style.setProperty('--events-height', `${eventsHeight}px`);
   document.body.classList.toggle('sidebar-collapsed', sidebarCollapsed);
   document.body.classList.toggle('events-collapsed', eventsCollapsed);
   document.getElementById('events-collapse').textContent = eventsCollapsed ? 'Expand' : 'Collapse';
+  document.getElementById('events-collapse').title = eventsCollapsed ? 'Expand live events' : 'Collapse live events';
+  document.getElementById('events-collapse').setAttribute('aria-expanded', String(!eventsCollapsed));
 }
 
 function wirePersistentLayout() {
@@ -8934,6 +9268,8 @@ function wirePersistentLayout() {
     const collapsed = !document.body.classList.contains('events-collapsed');
     document.body.classList.toggle('events-collapsed', collapsed);
     document.getElementById('events-collapse').textContent = collapsed ? 'Expand' : 'Collapse';
+    document.getElementById('events-collapse').title = collapsed ? 'Expand live events' : 'Collapse live events';
+    document.getElementById('events-collapse').setAttribute('aria-expanded', String(!collapsed));
     localStorage.setItem('glados-dash.events-collapsed', collapsed ? '1' : '0');
   });
 
@@ -8995,13 +9331,16 @@ function wirePersistentLayout() {
   }
 })();
 
-Promise.all([loadInvestigationSessions(), loadOperatorProfile().catch(() => state.operatorProfile), loadAgentTeams().catch(() => state.teamCatalog)])
-  .then(() => Promise.all([loadAgents(), loadSecurityReviews()])).then(() => {
-  const allowedStatic = new Set(['glados-chat', 'plans', 'reports', 'sessions', 'settings', 'terminal', 'proxy', 'agent-library', 'clippy', 'connectors', 'update']);
+Promise.all([loadInvestigationSessions(), loadOperatorProfile().catch(() => state.operatorProfile), loadAgentTeams().catch(() => state.teamCatalog), loadDefaultTeamPreference().catch(() => state.defaultTeamPreference)])
+  .then(() => {
+    if (!state.currentSessionId) state.currentTeamId = state.defaultTeamPreference.effectiveTeamId || 'glados';
+    return Promise.all([loadAgents(), loadSecurityReviews()]);
+  }).then(() => {
+  const allowedStatic = new Set(['glados-chat', 'plans', 'reports', 'sessions', 'settings', 'terminal', 'agent-library', 'clippy', 'connectors', 'update']);
   const agentIds = new Set(state.agents.map(agent => agent.id).filter(id => id !== 'glados'));
   const savedTabs = storageGetJson('glados-dash.open-tabs', []);
   state.openTabs = Array.isArray(savedTabs)
-    ? savedTabs.filter(tab => tab && (allowedStatic.has(tab.id) || agentIds.has(tab.id)))
+    ? savedTabs.filter(tab => tab && (allowedStatic.has(tab.id) || agentIds.has(tab.id) || (tab.kind === 'proxy' && tab.sessionId && tab.id === `proxy:${tab.sessionId}` && state.investigationSessions.some(session => session.id === tab.sessionId))))
     : [];
   state.openTabs = [{ id: 'glados-chat', kind: 'chat', label: 'Chat' }, ...state.openTabs.filter(tab => tab.id !== 'glados-chat')];
   state.currentTab = 'glados-chat';

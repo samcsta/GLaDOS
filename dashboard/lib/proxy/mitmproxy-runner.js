@@ -51,6 +51,8 @@ function proxyBackendConfig(env = process.env, platform = process.platform) {
     listenPort: Number(env.GLADOS_MITM_LISTEN_PORT || 18080),
     trafficDir: ca.trafficDir,
     trafficJsonl: env.GLADOS_PROXY_TRAFFIC_JSONL || path.join(ca.trafficDir, 'proxy-events.jsonl'),
+    websocketJsonl: env.GLADOS_PROXY_WEBSOCKET_JSONL || path.join(ca.trafficDir, 'websocket-events.jsonl'),
+    sessionId: String(env.GLADOS_PROXY_SESSION_ID || ''),
     bodyLimit: Math.max(0, Number(env.GLADOS_PROXY_BODY_LIMIT || 262144)),
     maxJsonlBytes: Math.max(1024 * 1024, Number(env.GLADOS_PROXY_MAX_JSONL_BYTES || 64 * 1024 * 1024)),
     retentionDays: Math.max(1, Number(env.GLADOS_PROXY_RETENTION_DAYS || 14)),
@@ -143,7 +145,7 @@ function retainedTrafficFiles(config = proxyBackendConfig()) {
     return fs.readdirSync(config.trafficDir, { withFileTypes: true })
       .filter(entry => entry.isFile())
       .map(entry => path.join(config.trafficDir, entry.name))
-      .filter(file => file !== config.trafficJsonl && /(?:\.flows|proxy-events-.+\.jsonl)$/i.test(file));
+      .filter(file => file !== config.trafficJsonl && /(?:\.flows|(?:proxy|websocket)-events-.+\.jsonl)$/i.test(file));
   } catch {
     return [];
   }
@@ -203,6 +205,9 @@ function startMitmproxy(config = proxyBackendConfig()) {
     env: {
       ...process.env,
       GLADOS_PROXY_TRAFFIC_JSONL: config.trafficJsonl,
+      GLADOS_PROXY_WEBSOCKET_JSONL: config.websocketJsonl || path.join(config.trafficDir, 'websocket-events.jsonl'),
+      GLADOS_PROXY_SESSION_ID: String(config.sessionId || ''),
+      GLADOS_PROXY_INTERCEPT_DIR: path.join(config.trafficDir, 'intercept'),
       GLADOS_PROXY_BODY_LIMIT: String(config.bodyLimit),
       GLADOS_PROXY_MAX_JSONL_BYTES: String(config.maxJsonlBytes),
       GLADOS_PROXY_RETENTION_DAYS: String(config.retentionDays),
@@ -211,6 +216,92 @@ function startMitmproxy(config = proxyBackendConfig()) {
     },
   });
   return { child, args, flowFile: outFile, config };
+}
+
+function interceptPaths(config) {
+  const dir = path.join(config.trafficDir, 'intercept');
+  return { dir, control: path.join(dir, 'control.json'), pending: path.join(dir, 'pending'), commands: path.join(dir, 'commands') };
+}
+
+function ensureInterceptStore(config) {
+  const paths = interceptPaths(config);
+  for (const dir of [paths.dir, paths.pending, paths.commands]) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(dir, 0o700);
+  }
+  return paths;
+}
+
+function readInterceptJson(file) {
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.size > 2 * 1024 * 1024) return null;
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch { return null; }
+}
+
+function writeInterceptJson(file, value) {
+  const tmp = `${file}.${process.pid}.${require('node:crypto').randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(value), { mode: 0o600, flag: 'wx' });
+    fs.renameSync(tmp, file);
+  } finally { try { fs.rmSync(tmp, { force: true }); } catch {} }
+}
+
+function proxyInterceptStatus(config = proxyBackendConfig()) {
+  const paths = interceptPaths(config);
+  const control = readInterceptJson(paths.control) || {};
+  let names = [];
+  try { names = fs.readdirSync(paths.pending).filter(name => /^[a-z0-9_-]+\.json$/i.test(name)).slice(0, 100); } catch {}
+  const pending = names.map(name => readInterceptJson(path.join(paths.pending, name)))
+    .filter(item => item && item.sessionId === String(config.sessionId || '') && Number(item.expiresAt) > Date.now())
+    .sort((a, b) => a.createdAt - b.createdAt);
+  return {
+    interceptRequests: control.interceptRequests === true,
+    interceptResponses: control.interceptResponses === true,
+    interceptWebsocketClient: control.interceptWebsocketClient === true,
+    interceptWebsocketServer: control.interceptWebsocketServer === true,
+    pending,
+  };
+}
+
+function setProxyIntercept(config = proxyBackendConfig(), settings = {}) {
+  const fields = ['interceptRequests', 'interceptResponses', 'interceptWebsocketClient', 'interceptWebsocketServer'];
+  for (const name of fields) {
+    if (settings[name] !== undefined && typeof settings[name] !== 'boolean') {
+      const error = new Error(`${name} must be a boolean`); error.status = 400; throw error;
+    }
+  }
+  const paths = ensureInterceptStore(config);
+  const previous = proxyInterceptStatus(config);
+  const control = readInterceptJson(paths.control) || {};
+  writeInterceptJson(paths.control, { ...control, ...Object.fromEntries(fields.map(name => [name, settings[name] ?? previous[name]])) });
+  return proxyInterceptStatus(config);
+}
+
+function decideProxyIntercept(config = proxyBackendConfig(), id, decision = {}) {
+  if (!/^[a-z0-9_-]{1,160}$/i.test(String(id || ''))) {
+    const error = new Error('Invalid intercepted message ID'); error.status = 400; throw error;
+  }
+  if (!['forward', 'drop'].includes(decision.action)) {
+    const error = new Error('action must be forward or drop'); error.status = 400; throw error;
+  }
+  const paths = ensureInterceptStore(config);
+  const item = readInterceptJson(path.join(paths.pending, `${id}.json`));
+  if (!item || item.sessionId !== String(config.sessionId || '') || Number(item.expiresAt) <= Date.now()) {
+    const error = new Error('Intercepted message is no longer pending in this session'); error.status = 404; throw error;
+  }
+  const command = { id, action: decision.action };
+  if (decision.raw !== undefined) {
+    if (decision.action !== 'forward' || item.editable !== true || typeof decision.raw !== 'string'
+      || Buffer.byteLength(decision.raw, 'utf8') > 1024 * 1024
+      || (item.phase !== 'websocket' && (decision.raw.includes('\0') || !/\r?\n\r?\n/.test(decision.raw)))) {
+      const error = new Error('This message cannot be forwarded with the supplied raw edits'); error.status = 400; throw error;
+    }
+    command.raw = decision.raw;
+  }
+  writeInterceptJson(path.join(paths.commands, `${id}.json`), command);
+  return { ok: true, id, action: decision.action };
 }
 
 function shadowDiffSummary(primaryRows, shadowRows) {
@@ -242,5 +333,8 @@ module.exports = {
   retainedTrafficFiles,
   pruneTrafficFiles,
   startMitmproxy,
+  proxyInterceptStatus,
+  setProxyIntercept,
+  decideProxyIntercept,
   shadowDiffSummary,
 };

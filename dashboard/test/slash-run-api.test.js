@@ -7,6 +7,8 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const Database = require('better-sqlite3');
+const { sessionProxyConfig } = require('../lib/proxy/session-manager');
+const { proxyBackendConfig } = require('../lib/proxy/mitmproxy-runner');
 const EXPECTED_VERSION = fs.readFileSync(path.join(__dirname, '..', '..', 'VERSION'), 'utf8').trim();
 
 async function freePort() {
@@ -195,6 +197,9 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     const trafficFile = path.join(trafficDir, 'proxy-events.jsonl');
     fs.mkdirSync(trafficDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(trafficFile, `${JSON.stringify({ id: 1, ts: Date.now(), method: 'GET', url: 'https://example.com', status: 200 })}\n`, { mode: 0o600 });
+    const scopedProxy = sessionProxyConfig(overview.json.session.id, proxyBackendConfig({ GLADOS_RUNTIME_DIR: srv.runtime }));
+    fs.mkdirSync(scopedProxy.trafficDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(scopedProxy.trafficJsonl, `${JSON.stringify({ id: 2, sessionId: overview.json.session.id, ts: Date.now(), method: 'GET', url: 'https://example.com/scoped', status: 200 })}\n`, { mode: 0o600 });
     const runtimeRefresh = await request(srv.port, 'POST', '/api/gateway/restart');
     assert.equal(runtimeRefresh.status, 200, runtimeRefresh.raw);
     assert.equal(runtimeRefresh.json.ok, true);
@@ -205,8 +210,9 @@ test('POST /api/slash/run executes workflow and safety commands through server w
     assert.match(fs.readFileSync(trafficFile, 'utf8'), /example\.com/);
     const refreshedPlans = await request(srv.port, 'GET', '/api/plans');
     assert.equal(refreshedPlans.json.plans.length, 1);
-    const refreshedProxy = await request(srv.port, 'GET', '/api/proxy/history');
+    const refreshedProxy = await request(srv.port, 'GET', `/api/proxy/history?session_id=${overview.json.session.id}`);
     assert.equal(refreshedProxy.json.length, 1);
+    assert.equal(refreshedProxy.json[0].id, 2);
 
     const preservedDb = new Database(path.join(srv.runtime, 'blackboard', 'blackboard.db'), { readonly: true });
     try {

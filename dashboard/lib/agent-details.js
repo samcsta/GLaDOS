@@ -115,6 +115,7 @@ function agentDetails(agentId) {
   if (!entry && !local.upstream.id) return null;
   const ws = entry?.workspace || local.workspace;
   if (!fs.existsSync(ws)) return null;
+  const mountedTools = mountedToolsForAgent(agentId);
   return {
     id: entry?.id || agentId,
     name: local.meta.name || local.upstream.name || entry?.name || agentId,
@@ -132,9 +133,7 @@ function agentDetails(agentId) {
     skills: local.upstream.packageCapabilities
       ? (local.upstream.skills || []).map(skill => ({ name: skill.name || skill.id, skillFile: skill.path, description: skill.description || null }))
       : listSkills(ws),
-    mcp: local.upstream.packageCapabilities
-      ? listMcpServers().filter(name => mountedToolsForAgent(agentId).some(tool => tool.startsWith(`mcp__${name}__`)))
-      : listMcpServers(),
+    mcp: listMcpServers().filter(name => mountedTools.some(tool => tool === `mcp__${name}` || tool.startsWith(`mcp__${name}__`))),
     source: local.upstream.source || 'builtin',
     packageId: local.upstream.packageId || null,
     packageVersion: local.upstream.packageVersion || null,
@@ -142,7 +141,7 @@ function agentDetails(agentId) {
     description: local.upstream.description || null,
     effort: local.upstream.effort || null,
     connectors: local.upstream.connectors || [],
-    tools: local.upstream.tools || [],
+    tools: mountedTools,
     deliverables: local.upstream.deliverables || [],
     team: local.upstream.team || null,
   };

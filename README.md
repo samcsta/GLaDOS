@@ -139,6 +139,22 @@ The app is named `GLaDOS.app`; the in-window title is `GLaDOS Ops`. Electron all
 
 ## Runtime
 
+- **Tools → Agents → Ford RT Agentic Teams** offers optional team installs.
+  Herbie includes a native coordinator, Savannah's 13 roles, and three adapted
+  evidence/handoff skills. Installation sets up `tshark` for offline analysis;
+  installed teams get their own Agents tab with editable members and assignments
+  from GLaDOS or custom agents. Jarvis and Chappie are reserved for future teams.
+  See [Herbie integration](docs/integrations/HERBIE.md) for configuration.
+- Chat shows live command/file/browser/MCP activity previews with **Debug** off.
+  Expand a preview for sanitized inputs and status; enable Debug for raw tool
+  traces and provider-emitted thinking. When a turn ends, its progress and work
+  fold into an expandable history, leaving the final answer visible. Agents give brief progress updates about
+  findings, decisions, and next steps during sustained work. These updates do
+  not expose private internal reasoning or add extra work to fill a schedule.
+- Each agent's saved reasoning effort applies to its direct and delegated
+  turns when the selected model supports that control. Debug changes visibility,
+  independently of the model's reasoning setting; unsupported provider controls
+  are omitted rather than sent as invalid parameters.
 - `@anthropic-ai/claude-agent-sdk@0.3.207` streams partial messages directly to the dashboard.
 - `ANTHROPIC_BASE_URL` defaults to `https://llmapi.redteamstuff.com`; models use bare aliases such as `claude-sonnet-5`.
 - Every enabled agent mounts Bash plus its role tools. Only GLaDOS mounts Task/Agent dispatch.

@@ -126,6 +126,7 @@ test('empty severity pages retain backend continuation and mark sampled counts a
   const view = { wrap: { querySelector: get } };
   await context.loadClippyFindings(view);
   assert.match(queries[0], /limit=25/);
+  assert.match(queries[0], /source=live/);
   assert.equal(get('[data-clippy-count-scope]').textContent, 'Loaded matches');
   assert.match(get('[data-clippy-pagination]').innerHTML, /data-clippy-next>Next/);
   listeners['[data-clippy-next]click']();
@@ -133,15 +134,43 @@ test('empty severity pages retain backend continuation and mark sampled counts a
   assert.match(queries[1], /offset=25/);
 });
 
+test('findings source defaults to live and switching to cache resets source-specific filters', () => {
+  const elements = new Map();
+  const element = selector => {
+    if (!elements.has(selector)) elements.set(selector, { listeners: {}, addEventListener(type, listener) { this.listeners[type] = listener; } });
+    return elements.get(selector);
+  };
+  const target = { innerHTML: '', querySelector: element, querySelectorAll: () => [] };
+  const dashboard = { query: 'access', severity: 'high', repo: '', category: 'old-category', offset: 50 };
+  const context = clippyContext({ state: { clippyDashboard: dashboard } });
+  vm.runInContext(section('function renderClippyFindings(', 'async function loadClippyRepoOptions('), context);
+  context.loadClippyFindings = () => {};
+  context.loadClippyRepoOptions = () => {};
+  let renders = 0;
+  context.renderClippyWorkspace = () => renders++;
+  context.renderClippyFindings({ wrap: { querySelector: () => target }, controllers: new Map() });
+  assert.equal(dashboard.findingsSource, 'live');
+  assert.match(target.innerHTML, /value="live" selected>Live Clippy/);
+  element('[data-clippy-source]').listeners.change({ target: { value: 'cache' } });
+  assert.equal(dashboard.findingsSource, 'cache');
+  assert.equal(dashboard.offset, 0);
+  assert.equal(dashboard.category, '');
+  assert.equal(dashboard.query, 'access');
+  assert.equal(renders, 1);
+  assert.equal(context.clippyFindingCountScope({ browseSource: 'live', index: { metadataPending: 5876 } }), 'Live search · parsed matches');
+});
 
-test('domain prompts distinguish cached report absence and request planning without launching an assessment', () => {
+
+test('lead prompts cite the next verification and use connected intelligence beyond the cache', () => {
   const context = clippyContext();
   vm.runInContext(section('function clippyIndexSummary(', 'function renderClippyFindings('), context);
-  const prompt = context.clippyOpportunityPrompt({ domain: 'portal.example.test', counts: { critical: 3, high: 2 }, repos: ['engagement-a'], reportCoverage: { label: 'No matching cached Dradis project' } });
+  const prompt = context.clippyLeadPrompt({ domain: 'portal.example.test', title: 'Historical authorization bypass', why: 'Cross-account evidence exists', nextStep: 'Verify account separation in scope', evidence: [{ repo: 'engagement-a', path: 'findings/auth.md', line: 24 }], reportCoverage: { label: 'Analyst checked Dradis; no tied report found' } });
   assert.match(prompt, /portal\.example\.test/);
-  assert.match(prompt, /3 critical, 2 high/);
+  assert.match(prompt, /findings\/auth\.md \/ line 24/);
+  assert.match(prompt, /Verify account separation in scope/);
+  assert.match(prompt, /Query Clippy directly.*beyond the local cache/);
   assert.match(prompt, /Do not launch an assessment/);
-  assert.match(prompt, /Cached feed absence does not establish/);
+  assert.match(prompt, /Missing cached matches do not establish/);
   const coverage = context.clippyCoverageMarkup({ status: 'no_match', label: 'No cached match', checkedAt: '2026-10-14T10:00:00Z', cacheAgeSeconds: 300 });
   assert.match(coverage, /No cached match/);
   assert.match(coverage, /Feed age 5 min/);
@@ -219,19 +248,19 @@ test('editable integration capability choices stay within the supported connecto
 
 test('unparsed metadata stays distinct from findings whose severity is genuinely unspecified', () => {
   const context = clippyContext();
-  assert.match(context.clippyFindingSeverityMarkup({ metadataPending: true, severity: 'unknown' }), /Loading metadata/);
+  assert.match(context.clippyFindingSeverityMarkup({ metadataPending: true, severity: 'unknown' }), /Not parsed/);
   assert.doesNotMatch(context.clippyFindingSeverityMarkup({ metadataPending: true }), /Unspecified/);
   assert.match(context.clippyFindingSeverityMarkup({ severity: 'unknown' }), /Unspecified/);
   assert.match(context.clippyFindingSeverityMarkup({ severity: 'critical' }), /critical/);
-  assert.equal(context.clippyFindingCountScope({ countsScope: 'parsed_indexed_findings', totalUnfiltered: 406, metadataLoaded: 12, metadataPending: 394 }), 'Indexed findings · 12/406 parsed · 394 pending');
-  assert.equal(context.clippyFindingCountScope({ countsScope: 'indexed_findings', index: { findings: 406, metadataLoaded: 406, metadataPending: 0 } }), 'Indexed findings');
+  assert.equal(context.clippyFindingCountScope({ countsScope: 'parsed_indexed_findings', totalUnfiltered: 406, metadataLoaded: 12, metadataPending: 394 }), 'Local cache · 12/406 parsed · 394 not parsed');
+  assert.equal(context.clippyFindingCountScope({ countsScope: 'indexed_findings', index: { findings: 406, metadataLoaded: 406, metadataPending: 0 } }), 'Local cache');
 });
 
 test('paused indexing progress exposes both parsed and pending records', () => {
   const context = clippyContext();
   vm.runInContext(section('function clippyIndexSummary(', 'async function refreshClippyIndex('), context);
   assert.match(context.clippyIndexSummary({ state: 'paused', findings: 406, metadataLoaded: 12, metadataPending: 394 }), /406 indexed findings · 12 parsed · 394 pending/);
-  const refresh = section('async function refreshClippyIndex(', 'function clippyOpportunityPrompt(');
+  const refresh = section('async function refreshClippyIndex(', 'function clippyLeadPrompt(');
   assert.match(refresh, /Continue indexing/);
   assert.match(refresh, /100 lookups or two minutes/);
 });
@@ -290,4 +319,94 @@ test('successful smart connect offers optional agent creation after saving the k
   assert.doesNotMatch(flow, /agent\/start|createAgent: true/);
   const load = section('async function renderClippyPane(', 'function renderClippyWorkspace(');
   assert.match(load, /askForAgent: false/);
+});
+
+test('the shortlist rejects cached absence, unknown coverage, expired checks, and positive reports', () => {
+  const context = clippyContext();
+  vm.runInContext(section('function clippyLeadPrompt(', 'function renderClippyFindings('), context);
+  const statuses = ['no_report_verified', 'no_match', 'unknown', 'stale', 'needs_verification', 'reported'];
+  const rows = statuses.map((status, index) => ({ id: `lead-${index}`, domain: 'target.example.test', reportCoverage: { status } }));
+  const result = context.clippyLeadCollections({ leads: rows, review: [rows[1], rows[5]] });
+  assert.deepEqual(Array.from(result.ready, item => item.id), ['lead-0']);
+  assert.deepEqual(Array.from(result.review, item => item.id), ['lead-1', 'lead-2', 'lead-3', 'lead-4', 'lead-5']);
+  assert.equal(context.clippyLeadCollections({ leads: Array.from({ length: 8 }, (_, index) => ({ id: index, reportCoverage: { status: 'no_report_verified' } })) }).ready.length, 5);
+});
+
+test('possible report matches remain withheld while a confirmed tie cannot record a negative Dradis check', () => {
+  const context = clippyContext();
+  vm.runInContext(section('function clippyLeadPrompt(', 'function renderClippyFindings('), context);
+  const item = { id: '<unsafe>', domain: 'target.example.test', title: '<script>bad</script>', why: 'Stored evidence', nextStep: 'Check scope', reportCoverage: { status: 'reported', label: 'Dradis report found' } };
+  const markup = context.clippyLeadCard(item, 0, { review: true });
+  assert.match(markup, /Withheld: possible Dradis matches need a direct analyst check/);
+  assert.match(markup, /data-clippy-record-coverage/);
+  assert.doesNotMatch(markup, /data-clippy-save-lead|Plan with Clippy/);
+  assert.match(markup, /&lt;script>bad&lt;\/script>/);
+  assert.doesNotMatch(markup, /<script>/);
+  item.reportCoverage.confirmedTie = true;
+  assert.doesNotMatch(context.clippyLeadCard(item, 0, { review: true }), /data-clippy-record-coverage/);
+  context.openClippyCoverageCheck({}, item); // Must return before creating a dialog.
+});
+
+test('a bounded direct search prompt withholds unchecked coverage and never sends itself', () => {
+  const context = clippyContext();
+  const prompt = context.clippyLeadSearchPrompt('example.test');
+  assert.match(prompt, /example\.test/);
+  assert.match(prompt, /Do not restrict yourself to the local index/);
+  assert.match(prompt, /Exclude candidates with a matching report/);
+  assert.match(prompt, /withhold the candidate from recommendations/);
+  assert.match(prompt, /Stop after a bounded evidence pass/);
+  const chat = section('async function openClippyAgentChat(', 'async function editClippyAgent(');
+  assert.doesNotMatch(chat, /requestSubmit|\.submit\(|sendChat|sendMessage/);
+});
+
+function leadPollingFixture(result, timers = []) {
+  const content = { isConnected: true, innerHTML: '', querySelector: () => null, querySelectorAll: () => [] };
+  const status = { innerHTML: '', querySelector: () => null };
+  const button = {};
+  const elements = { '[data-clippy-leads-content]': content, '[data-clippy-lead-status]': status, '[data-clippy-find-leads]': button };
+  const context = clippyContext({ state: { clippyDashboard: { view: 'leads' } }, setTimeout: fn => { timers.push(fn); return timers.length; } });
+  vm.runInContext(section('function clippyLeadPrompt(', 'function renderClippyFindings('), context);
+  const requests = [];
+  context.clippyViewAlive = () => true;
+  context.clippyRead = async (_view, endpoint) => { requests.push(endpoint); return result; };
+  const view = { wrap: { querySelector: selector => elements[selector] } };
+  return { context, view, requests, content, status, button, timers };
+}
+
+test('lead search polling stops on bounded completion and never polls or starts the local index', async () => {
+  const result = { leads: [], review: [], search: { state: 'running', reason: 'Inspecting evidence', calls: 3 } };
+  const fixture = leadPollingFixture(result);
+  await fixture.context.loadClippyLeads(fixture.view);
+  assert.equal(fixture.button.disabled, true);
+  assert.equal(fixture.timers.length, 1);
+  assert.match(fixture.status.innerHTML, /Stop search/);
+  assert.match(fixture.content.innerHTML, /No verified leads yet/);
+  result.search = { state: 'paused', reason: 'Lookup limit reached' };
+  await fixture.context.loadClippyLeads(fixture.view);
+  assert.equal(fixture.timers.length, 1);
+  assert.equal(fixture.button.disabled, false);
+  assert.match(fixture.status.innerHTML, /Lookup limit reached/);
+  assert.doesNotMatch(fixture.status.innerHTML, /Stop search/);
+  assert.deepEqual(fixture.requests, ['/leads?query=', '/leads?query=']);
+  const pane = section('async function renderClippyPane(', 'function renderClippyWorkspace(');
+  assert.doesNotMatch(pane, /refreshClippyIndex|index\/sync|data-clippy-index-status/);
+});
+
+test('the unchanged shortlist does not replace open evidence on each progress poll', async () => {
+  const result = { leads: [{ id: 'good', domain: 'target.example.test', reportCoverage: { status: 'no_report_verified', label: 'Checked' } }], review: [], search: { state: 'running' } };
+  const fixture = leadPollingFixture(result);
+  await fixture.context.loadClippyLeads(fixture.view);
+  fixture.content.innerHTML = 'operator is reading expanded evidence';
+  result.search.calls = 8;
+  await fixture.context.loadClippyLeads(fixture.view);
+  assert.equal(fixture.content.innerHTML, 'operator is reading expanded evidence');
+});
+
+test('planning hands the agent the attributable analyst receipt and current evidence digest', () => {
+  const context = clippyContext();
+  vm.runInContext(section('function clippyLeadPrompt(', 'function renderClippyFindings('), context);
+  const item = { domain: 'example.test', evidenceDigest: 'digest-42', reportCoverage: { kind: 'analyst_attestation', sourceUrl: 'https://dradis.example.test/projects/42', scope: 'example.test', notes: 'Checked target aliases and the project report inventory', expiresAt: '2026-10-16T12:00:00Z' } };
+  const prompt = context.clippyLeadPrompt(item);
+  for (const value of ['analyst_attestation', 'https://dradis.example.test/projects/42', 'example.test', 'Checked target aliases and the project report inventory', '2026-10-16T12:00:00Z', 'digest-42']) assert.ok(prompt.includes(value));
+  assert.match(prompt, /Attribute an analyst Dradis check to its recorded receipt/);
 });

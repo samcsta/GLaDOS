@@ -26,15 +26,37 @@ test('explicit bounded inventory discovers beyond the capped FTS page and pagina
   assert.equal(complete.findings, 130); assert.equal(complete.metadataLoaded, 130); assert.equal(complete.complete, true);
   assert.ok(client.calls.filter(call => call.name === 'search').every(call => call.arguments.limit === 100));
   assert.equal(client.calls.filter(call => call.name === 'list_files').length, 2);
-  const page = await service.findings({ offset: 100, severity: 'critical' });
+  const page = await service.findings({ source: 'cache', offset: 100, severity: 'critical' });
   assert.equal(page.total, 130); assert.equal(page.findings.length, 25); assert.equal(page.counts.critical, 130);
   assert.equal(page.hasMore, true); assert.equal(page.partial, false);
-  assert.equal((await service.findings({ offset: 125 })).findings.length, 5);
+  assert.equal((await service.findings({ source: 'cache', offset: 125 })).findings.length, 5);
   const opportunities = await service.opportunities();
   assert.equal(opportunities.total, 1); assert.equal(opportunities.opportunities[0].domain, 'app.example.test');
   assert.equal(opportunities.opportunities[0].counts.critical, 130);
   assert.equal(opportunities.opportunities[0].reportCoverage.status, 'unknown');
   assert.equal(opportunities.opportunities[0].findings.length, 10);
+});
+
+test('default live findings search reaches MCP beyond a populated local cache', async () => {
+  const client = fixtureClient({ size: 130 });
+  const service = createClippyService({ client });
+  await service.syncIndex({ maxCalls: 200 });
+  await service.waitForIndex();
+  const cached = await service.findings({ source: 'cache', q: 'freshly-added' });
+  assert.equal(cached.browseSource, 'cache');
+  assert.equal(cached.total, 0);
+  const original = client.callTool;
+  client.callTool = async (request, ...rest) => request.name === 'search'
+    ? result([{ path: 'new-repo/findings/freshly-added.md', repo: 'new-repo' }])
+    : original(request, ...rest);
+  const live = await service.findings({ q: 'freshly-added' });
+  assert.equal(live.browseSource, 'live');
+  assert.equal(live.findings.length, 1);
+  assert.equal(live.findings[0].path, 'new-repo/findings/freshly-added.md');
+  assert.equal(live.metadataPending, 0);
+  assert.match(live.note, /at most 100 matches per search/);
+  assert.match(live.note, /not the full Clippy inventory/);
+  await assert.rejects(service.findings({ source: 'everything' }), { code: 'invalid_input', status: 400 });
 });
 
 test('bounded jobs resume persisted metadata and isolate credentials without storing document bodies', async t => {
@@ -61,7 +83,7 @@ test('file enumeration includes findings without searchable severity and marks s
   };
   const service = createClippyService({ client }); await service.syncIndex({ maxCalls: 10 }); const index = await service.waitForIndex();
   assert.equal(index.findings, 500); assert.equal(index.saturatedRepos, 1); assert.equal(index.complete, false);
-  assert.ok((await service.findings({ severity: 'unknown' })).findings.length > 0);
+  assert.ok((await service.findings({ source: 'cache', severity: 'unknown' })).findings.length > 0);
 });
 
 test('cancelling prevents late upstream reads from populating metadata', async () => {
@@ -104,12 +126,12 @@ test('discovered paths beyond 100 remain browsable while pending metadata is exc
   const client = fixtureClient({ size: 400 }); const service = createClippyService({ client });
   await service.syncIndex({ maxCalls: 11 }); const progress = await service.waitForIndex();
   assert.equal(progress.findings, 400); assert.ok(progress.metadataLoaded < 100);
-  const page = await service.findings({ offset: 300 });
+  const page = await service.findings({ source: 'cache', offset: 300 });
   assert.equal(page.total, 400); assert.equal(page.totalUnfiltered, 400); assert.equal(page.findings.length, 25);
   assert.ok(page.findings.every(row => row.metadataPending && row.severity === 'unknown' && row.title));
   assert.equal(page.metadataLoaded + page.metadataPending, 400);
   assert.equal(page.counts.unknown, 0); assert.equal(page.counts.critical, page.metadataLoaded);
-  assert.equal((await service.findings({ severity: 'unknown' })).total, 0);
+  assert.equal((await service.findings({ source: 'cache', severity: 'unknown' })).total, 0);
 });
 
 test('metadata concurrency is capped at six and every lookup consumes the remaining batch budget', async () => {

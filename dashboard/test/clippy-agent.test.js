@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createAgentPackageStore } = require('../lib/agent-packages');
-const { saveClippyToken, removeClippyToken, READ_TOOLS } = require('../lib/secrets/clippy-mcp');
+const { saveClippyToken, removeClippyToken, READ_TOOLS, DENIED_TOOLS } = require('../lib/secrets/clippy-mcp');
 const { enableClippyAgent, clippyAgentInfo, CLIPPY_AGENT_ID, CLIPPY_TEAM_ID, CLIPPY_AGENT_SOURCE_PATH } = require('../lib/clippy-agent');
 const { buildAgentSdkOptions, loadRegistry, decideToolUse } = require('../lib/harness/agent-sdk');
 const { resolveAgentTeam } = require('../lib/agent-teams');
@@ -52,12 +52,13 @@ test('Clippy Agent can query allowed knowledge tools without shell, target actio
   const turnEnv = { ...env, GLADOS_TEAM_ID: CLIPPY_TEAM_ID };
   const options = buildAgentSdkOptions(CLIPPY_AGENT_ID, { env: turnEnv });
   assert.deepEqual(Object.keys(options.mcpServers), ['clippy']);
-  assert.ok(options.gladosMountedTools.length >= 4);
+  assert.deepEqual(new Set(options.gladosMountedTools), new Set([...READ_TOOLS].map(name => `mcp__clippy__${name}`)), 'the dedicated agent has every approved live Clippy knowledge tool, independently of the local index');
   for (const tool of options.gladosMountedTools) {
     assert.ok(tool.startsWith('mcp__clippy__'));
     assert.ok(READ_TOOLS.has(tool.slice('mcp__clippy__'.length)));
+    assert.equal(decideToolUse({ agentId: CLIPPY_AGENT_ID, toolName: tool, input: {}, env: turnEnv }).allowed, true, tool);
   }
-  for (const toolName of ['Bash', 'Task', 'Write', 'mcp__clippy__context_put', 'mcp__clippy__start_session']) {
+  for (const toolName of ['Bash', 'Task', 'Write', ...DENIED_TOOLS.map(name => `mcp__clippy__${name}`)]) {
     assert.equal(decideToolUse({ agentId: CLIPPY_AGENT_ID, toolName, input: {}, env: turnEnv }).allowed, false);
   }
   assert.equal(decideToolUse({ agentId: CLIPPY_AGENT_ID, toolName: 'mcp__clippy__search', input: { query: 'severity' }, env: turnEnv }).allowed, true);
@@ -95,6 +96,14 @@ test('Clippy operator edits persist across startup seeding and govern the dedica
   assert.deepEqual(runtime.tools, draft.agents[0].tools);
   assert.deepEqual(runtime.deliverables, draft.agents[0].deliverables);
   assert.equal(runtime.editableIntegration, true);
+  const options = buildAgentSdkOptions(CLIPPY_AGENT_ID, { env: { ...env, GLADOS_TEAM_ID: CLIPPY_TEAM_ID } });
+  assert.match(options.systemPrompt, /Compare critical domain leads and explicitly state report coverage uncertainty/);
+  assert.match(options.systemPrompt, /Dradis exclusion is fail-closed/);
+  assert.match(options.systemPrompt, /cached no_match/);
+  assert.match(options.systemPrompt, /no verified ready leads yet/);
+  assert.match(options.systemPrompt, /20 lookup calls/);
+  assert.match(options.systemPrompt, /state that the analyst checked Dradis/);
+  assert.match(options.systemPrompt, /do not claim that you queried Dradis yourself/);
 });
 
 test('editing Clippy cannot widen its trusted read-only capability boundary or change its identity', t => {
@@ -116,9 +125,55 @@ test('editing Clippy cannot widen its trusted read-only capability boundary or c
 test('default Clippy triage distinguishes checked report evidence from unknown Dradis coverage', t => {
   const { store } = fixture(t);
   const instructions = store.get('clippy-intel').manifest.agents[0].instructions;
-  assert.match(instructions, /ranked list with the domain, severity, source evidence, report coverage/);
+  assert.match(instructions, /authoritative, current, complete Dradis report-coverage check/);
   assert.match(instructions, /missing report in Clippy does not establish that no Dradis report exists/);
-  assert.match(instructions, /state which sources were checked/);
+  assert.match(instructions, /report source, check time, coverage scope, and completeness/);
+  assert.match(instructions, /Only include a lead in the ready shortlist after/);
+  assert.match(instructions, /Exclude leads with a tied Dradis report/);
+  assert.match(instructions, /optional local index is only a cache and is not a prerequisite/);
+  assert.match(instructions, /stop after 20 lookup calls/);
+});
+
+test('legacy six-tool Clippy integration upgrades once without replacing operator edits or disabled state', t => {
+  const { store, root } = fixture(t, { install: false });
+  const source = JSON.parse(fs.readFileSync(CLIPPY_AGENT_SOURCE_PATH, 'utf8'));
+  const legacy = structuredClone(source);
+  legacy.version = '1.1.0';
+  legacy.agents[0].tools = ['search', 'read', 'list_repos', 'list_files', 'projects_search', 'cross_search'].map(name => `mcp__clippy__${name}`);
+  const installed = store.installIntegration(legacy, { sourcePath: CLIPPY_AGENT_SOURCE_PATH });
+  const draft = structuredClone(installed.manifest);
+  Object.assign(draft.agents[0], { name: 'Custom analyst', instructions: 'Keep my exact workflow.', model: 'operator-model', effort: 'low', enabled: false, deliverables: ['My own handoff'] });
+  const edited = store.save(installed.id, draft, { expectedRevision: installed.revision });
+  const restarted = createAgentPackageStore({ runtimeDir: root });
+  const migrated = restarted.installIntegration(source, { sourcePath: CLIPPY_AGENT_SOURCE_PATH });
+  const expected = structuredClone(draft);
+  expected.agents[0].tools = source.agents[0].tools;
+  assert.deepEqual(migrated.manifest, expected);
+  assert.notEqual(migrated.revision, edited.revision);
+  assert.equal(migrated.enabled, false);
+  assert.equal(migrated.manifest.agents[0].enabled, false);
+  assert.equal(migrated.staged.length, 0);
+  assert.equal(migrated.versions.length, edited.versions.length + 1);
+  assert.equal(migrated.source, 'custom');
+  assert.deepEqual(new Set(migrated.integrationCapabilities.tools), new Set(source.agents[0].tools));
+  const bytes = fs.readFileSync(store.indexFile, 'utf8');
+  assert.equal(restarted.installIntegration(source, { sourcePath: CLIPPY_AGENT_SOURCE_PATH }).revision, migrated.revision);
+  assert.equal(fs.readFileSync(store.indexFile, 'utf8'), bytes);
+});
+
+test('legacy Clippy capability migration preserves archived status and does not create absent agents', t => {
+  const { store } = fixture(t, { install: false });
+  const source = JSON.parse(fs.readFileSync(CLIPPY_AGENT_SOURCE_PATH, 'utf8'));
+  assert.equal(store.list({ includeArchived: true }).length, 0);
+  const legacy = structuredClone(source);
+  legacy.agents[0].tools = ['search', 'read', 'list_repos', 'list_files', 'projects_search', 'cross_search'].map(name => `mcp__clippy__${name}`);
+  const installed = store.installIntegration(legacy, { sourcePath: CLIPPY_AGENT_SOURCE_PATH });
+  store.remove(installed.id, { expectedRevision: installed.revision });
+  const migrated = store.installIntegration(source, { sourcePath: CLIPPY_AGENT_SOURCE_PATH });
+  assert.equal(migrated.archived, true);
+  assert.equal(migrated.enabled, false);
+  assert.equal(store.runtimeEntries({ includeDisabled: true }).length, 0);
+  assert.deepEqual(migrated.manifest.agents[0].tools, source.agents[0].tools);
 });
 
 test('a Clippy connection alone cannot install an agent and explicit consent creates the trusted default once', t => {

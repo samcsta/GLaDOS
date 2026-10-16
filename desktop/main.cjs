@@ -10,6 +10,7 @@ const { SetupAssistant } = require('./lib/setup-assistant.cjs');
 const { systemNetworkEnvironment } = require('./lib/network-environment.cjs');
 const { loadCompletedSecurityReview, resolveCompletedSecurityReview, safeEngagementId } = require('./lib/security-review-report.cjs');
 const { writeDeliverablesManifest } = require('../dashboard/lib/security-review/deliverables');
+const { AssessmentBrowserBridge, assertProxyBrowserDashboardEvent } = require('./lib/proxy-browser.cjs');
 
 const runtimeDir = path.resolve(process.env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), '.glados'));
 
@@ -498,6 +499,13 @@ async function dashboardJson(pathname, options = {}) {
   if (!response.ok || body.ok === false) throw new Error(body.error || `dashboard returned HTTP ${response.status}`);
   return body;
 }
+
+const proxyBrowsers = new AssessmentBrowserBridge({ dashboardJson });
+ipcMain.handle('desktop:proxy:open-browser', async (event, input = {}) => {
+  assertTrustedDashboardEvent(event);
+  assertProxyBrowserDashboardEvent(event, mainWindow, dashboardOrigin);
+  return proxyBrowsers.open(input);
+});
 
 ipcMain.handle('desktop:dashboard:health', async event => {
   assertTrustedDashboardEvent(event);

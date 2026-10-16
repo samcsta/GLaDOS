@@ -5,6 +5,7 @@ const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
 const { StreamableHTTPClientTransport } = require('@modelcontextprotocol/sdk/client/streamableHttp.js');
 const { CLIPPY_URL, loadClippyToken } = require('./secrets/clippy-mcp');
 const { createClippyIndex, defaultIndexPath, emptyCounts } = require('./clippy-index');
+const { createClippyLeads, isReportStatus } = require('./clippy-leads');
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info', 'unknown'];
 const DASHBOARD_TOOLS = new Set(['search', 'read', 'list_repos', 'list_files', 'projects_search']);
@@ -18,7 +19,7 @@ class ClippyError extends Error {
 }
 function normalizeError(error) {
   if (error instanceof ClippyError) return error;
-  if (error?.code === 'invalid_input') return new ClippyError('invalid_input', error.message, 400);
+  if (error?.code === 'invalid_input') return new ClippyError('invalid_input', error.message, [400, 404, 409].includes(error.status) ? error.status : 400);
   if (error?.name === 'AbortError' || error?.name === 'TimeoutError' || error?.code === -32001) return new ClippyError('timeout', 'Clippy did not respond in time. Try again.', 504);
   if (error?.code === 401 || error?.code === 403) return new ClippyError('authentication_failed', 'Clippy rejected the saved API key. Reconnect Clippy in Connectors.', 502);
   return new ClippyError('upstream_error', 'Clippy could not complete this request. Try again or check the connection in Connectors.');
@@ -59,6 +60,25 @@ function severity(value) {
   const level = plain(value).toLowerCase().match(/^(critical|high|medium|moderate|low|info(?:rmational)?|none)\b/)?.[1];
   return level === 'moderate' ? 'medium' : level === 'informational' || level === 'none' ? 'info' : level || 'unknown';
 }
+function metadataText(content) {
+  let fence = null;
+  return content.split(/\r?\n/).map(line => {
+    const marker = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    if (marker) {
+      if (!fence) fence = marker[1];
+      else if (marker[1][0] === fence[0] && marker[1].length >= fence.length) fence = null;
+      return '';
+    }
+    return fence ? '' : line;
+  }).join('\n');
+}
+function severityHeading(content) {
+  for (const line of content.split(/\r?\n/).slice(0, 150)) {
+    const match = line.replace(/[*_`]/g, '').match(/^#{1,6}\s+(?:severity|criticality|risk(?: level)?)\s*:\s*(.+)$/i);
+    if (match) return match[1];
+  }
+  return null;
+}
 function metadataValue(content, names) {
   const namesPattern = names.join('|');
   for (const line of content.split(/\r?\n/).slice(0, 150)) {
@@ -79,6 +99,7 @@ function targetMetadata(content) {
   const targetSources = [];
   const lines = content.split(/\r?\n/).slice(0, 150);
   let targetSection = null;
+  let targetList = null;
   function addTargets(value, field, line) {
     const values = value.match(/(?<![a-z0-9_.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?![a-z0-9_.-])/gi) || [];
     for (const value of values) {
@@ -93,6 +114,12 @@ function targetMetadata(content) {
     const heading = line.match(/^#{1,6}\s+(.+)$/);
     if (heading) targetSection = /^(?:affected\s+)?(?:targets?|assets?|hosts?|domains?|endpoints?)(?:\s*[:—-].*)?$/i.test(heading[1]) ? heading[1] : null;
     if (targetSection) addTargets(line, targetSection, index + 1);
+    // Some assessments use a labelled list instead of a target table. Only
+    // consecutive list items belong to that declaration, never nearby prose.
+    if (targetList && /^[-+]\s+/.test(line)) addTargets(line, targetList, index + 1);
+    else targetList = null;
+    const list = line.match(/^((?:affected\s+)(?:instances?|applications?|targets?|assets?|hosts?|domains?|endpoints?))(?:\s*\([^)]{1,100}\))?\s*:\s*$/i);
+    if (list) targetList = list[1];
     const field = line.match(/^\|?\s*(?:[-+]\s*)?(target(?: url| domain| host|s)?|affected (?:asset|host|domain|url|endpoint)s?|asset(?: url)?|domain|hostname|host|url|endpoint)\s*(?:\||:)\s*(.*)$/i);
     if (field) addTargets(field[2], field[1], index + 1);
   }
@@ -100,15 +127,16 @@ function targetMetadata(content) {
 }
 function parseFinding(filename, result = {}, document = {}) {
   const content = unnumber(document.content || '');
-  const heading = content.match(/^#\s+(.+)$/m)?.[1];
+  const metadata = metadataText(content);
+  const heading = metadata.match(/^#\s+(.+)$/m)?.[1];
   return {
     id: findingId(filename), path: filename, repo: result.repo || filename.split('/')[0],
-    title: plain(metadataValue(content, ['title']) || heading || path.posix.basename(filename, '.md').replace(/[-_]/g, ' ')),
-    severity: severity(metadataValue(content, ['severity', 'risk(?: level)?']) || ''),
-    category: metadataValue(content, ['category', 'finding type', 'type']) || null,
+    title: plain(metadataValue(metadata, ['title']) || heading || path.posix.basename(filename, '.md').replace(/[-_]/g, ' ')),
+    severity: severity(metadataValue(metadata, ['severity', 'risk(?: level)?']) || metadataValue(metadata, ['criticality']) || severityHeading(metadata) || ''),
+    category: metadataValue(metadata, ['category', 'finding type', 'type']) || null,
     snippet: plain(result.snippet || ''), line: result.line || 1,
     total_lines: document.total_lines ?? result.total_lines ?? null,
-    ...targetMetadata(content),
+    ...targetMetadata(metadata),
     ...(document.content !== undefined ? { content, truncated: Boolean(document.truncated), is_text: document.is_text !== false } : {}),
   };
 }
@@ -165,13 +193,14 @@ async function mapConcurrent(rows, concurrency, action) {
   return output;
 }
 
-function createClippyService({ env = process.env, client: injectedClient, clientFactory = connectClient, tokenProvider = () => loadClippyToken(env), timeoutMs = DEFAULT_TIMEOUT_MS, cacheMs = 120000, fetchImpl = httpFetch, indexPath = injectedClient ? null : defaultIndexPath(env) } = {}) {
+function createClippyService({ env = process.env, client: injectedClient, clientFactory = connectClient, tokenProvider = () => loadClippyToken(env), timeoutMs = DEFAULT_TIMEOUT_MS, cacheMs = 120000, fetchImpl = httpFetch, indexPath = injectedClient ? null : defaultIndexPath(env), leadsPath = indexPath ? path.join(path.dirname(indexPath), 'leads.json') : null, leadOptions = {} } = {}) {
   let connection, connectionToken, connecting;
   let connectionGeneration = 0;
   const cache = new Map();
   const index = createClippyIndex({ call, ensureConnection: currentClient, parseFinding, safePath: filePath, storePath: indexPath });
+  const leads = createClippyLeads({ ...leadOptions, call, ensureConnection: currentClient, parseFinding, safePath: filePath, storePath: leadsPath });
   async function currentClient() {
-    if (injectedClient) { index.activate('injected-test-client'); return injectedClient; }
+    if (injectedClient) { index.activate('injected-test-client'); leads.activate('injected-test-client'); return injectedClient; }
     let token;
     try { token = tokenProvider(); }
     catch { throw new ClippyError('credential_error', 'Clippy’s saved API key could not be read. Reconnect Clippy in Connectors.', 503); }
@@ -180,6 +209,7 @@ function createClippyService({ env = process.env, client: injectedClient, client
       throw new ClippyError('not_connected', 'Connect Clippy in Connectors to browse its findings and engagement repos.', 503);
     }
     index.activate(createHash('sha256').update(token).digest('hex'));
+    leads.activate(createHash('sha256').update(token).digest('hex'));
     if (connectionToken === token) {
       if (connection) return connection;
       if (connecting) return connecting;
@@ -211,6 +241,7 @@ function createClippyService({ env = process.env, client: injectedClient, client
     const old = connection;
     connection = undefined; connectionToken = undefined; connecting = undefined; cache.clear();
     index.deactivate();
+    leads.deactivate();
     // Pending factories close their own discarded client after they resolve.
     if (old?.close) await old.close().catch(() => {});
   }
@@ -283,7 +314,8 @@ function createClippyService({ env = process.env, client: injectedClient, client
     const result = await file({ repo: filename.split('/')[0], path: filename, limit: 1000, signal });
     return { finding: parseFinding(filename, {}, result), source: 'clippy-mcp' };
   }
-  async function findings({ q = '', repo = '', severity: selectedSeverity = '', category = '', offset, limit, signal } = {}) {
+  async function findings({ source = 'live', q = '', repo = '', severity: selectedSeverity = '', category = '', offset, limit, signal } = {}) {
+    if (!['live', 'cache'].includes(source)) throw new ClippyError('invalid_input', 'Choose Live Clippy or Local cache.', 400);
     if (typeof q !== 'string' || q.length > 300 || /[\0\r\n]/.test(q)) throw new ClippyError('invalid_input', 'Use a shorter finding search.', 400);
     if (q.trim() && q.trim().length < 3) throw new ClippyError('invalid_input', 'Use at least three characters to search Clippy findings.', 400);
     if (selectedSeverity && !SEVERITIES.includes(selectedSeverity)) throw new ClippyError('invalid_input', 'Choose a valid severity.', 400);
@@ -292,9 +324,9 @@ function createClippyService({ env = process.env, client: injectedClient, client
     const start = integer(offset, 0, 0, 1000000);
     const count = integer(limit, 25, 1, 25);
     await currentClient();
-    // Once an explicit inventory job has made progress, browse the accumulated
-    // catalog instead of repeatedly asking the same capped FTS query.
-    if (index.progress().calls > 0) {
+    // A partial local inventory never limits direct MCP searches. Reading the
+    // cache is an explicit browsing choice, even when an index job has run.
+    if (source === 'cache') {
       const needle = q.trim().toLowerCase();
       const loaded = index.rows({ includePending: true }).filter(row => (!selectedRepo || row.repo === selectedRepo) && (!needle || [row.title, row.path, row.snippet, ...(row.targets || [])].join(' ').toLowerCase().includes(needle)));
       const base = loaded.filter(row => !category || row.category === category);
@@ -303,7 +335,7 @@ function createClippyService({ env = process.env, client: injectedClient, client
       const filtered = base.filter(row => !selectedSeverity || (!row.metadataPending && row.severity === selectedSeverity)).sort((a, b) => Number(Boolean(a.metadataPending)) - Number(Boolean(b.metadataPending)) || SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity) || a.path.localeCompare(b.path));
       const progress = index.progress();
       const metadataPending = base.filter(row => row.metadataPending).length;
-      return { findings: filtered.slice(start, start + count), total: filtered.length, counts, severityCounts: counts, countsScope: 'parsed_indexed_findings', totalUnfiltered: base.length, baseTotal: base.length, metadataPending, metadataLoaded: base.length - metadataPending, categories: [...new Set(loaded.map(row => row.category).filter(Boolean))].sort(), repos: [...new Set(loaded.map(row => row.repo))].sort(), offset: start, limit: count, hasMore: start + count < filtered.length, nextOffset: start + count, indexedMatches: progress.findings, partial: progress.partial, sampled: progress.metadataLoaded, unavailable: loaded.filter(row => row.metadataUnavailable).length, upstreamLimit: SEARCH_LIMIT, index: progress, source: 'clippy-mcp', note: `Showing all discovered finding paths across engagement repos, including ${metadataPending} awaiting metadata. Severity counts and severity/category filters include parsed metadata only; pending rows are not classified as unspecified. ${progress.note} Text filters search the indexed title, path, target, and snippet.` };
+      return { findings: filtered.slice(start, start + count), total: filtered.length, counts, severityCounts: counts, countsScope: 'parsed_indexed_findings', totalUnfiltered: base.length, baseTotal: base.length, metadataPending, metadataLoaded: base.length - metadataPending, categories: [...new Set(loaded.map(row => row.category).filter(Boolean))].sort(), repos: [...new Set(loaded.map(row => row.repo))].sort(), offset: start, limit: count, hasMore: start + count < filtered.length, nextOffset: start + count, indexedMatches: progress.findings, partial: progress.partial, sampled: progress.metadataLoaded, unavailable: loaded.filter(row => row.metadataUnavailable).length, upstreamLimit: SEARCH_LIMIT, index: progress, source: 'clippy-mcp', browseSource: 'cache', note: `This optional local cache has ${base.length} matching finding paths; ${metadataPending} have not been parsed. Severity counts and severity/category filters include parsed metadata only. Text filters search cached title, path, target, and snippet. Switch to Live Clippy to search beyond this cache. Clippy Agent queries the connected MCP tools independently of cache progress.` };
     }
     const terms = q.trim() ? [`"${q.trim().replace(/"/g, '""')}"`] : ['severity'];
     if (selectedSeverity && selectedSeverity !== 'unknown') terms.push(selectedSeverity === 'info' ? '(info OR informational)' : selectedSeverity);
@@ -338,12 +370,12 @@ function createClippyService({ env = process.env, client: injectedClient, client
     const page = filtered.filter(row => visiblePaths.has(row.path)).sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity) || a.title.localeCompare(b.title));
     const total = filtered.length;
     return {
-      findings: page, total, counts, severityCounts: counts, countsScope: 'loaded_matches',
+      findings: page, total, counts, severityCounts: counts, countsScope: 'loaded_matches', browseSource: 'live', metadataPending: 0,
       categories: [...new Set(loaded.map(row => row.category).filter(Boolean))].sort(),
       repos: [...new Set(sample.hits.map(row => row.repo || row.path.split('/')[0]))].sort(), offset: start, limit: count,
       hasMore: start + count < sample.hits.length, nextOffset: start + count, indexedMatches: sample.hits.length, partial: true, sampled: loaded.length,
       unavailable: loaded.filter(row => row.metadataUnavailable).length, upstreamLimit: SEARCH_LIMIT, index: index.progress(), source: 'clippy-mcp',
-      note: `Clippy caps each search at ${SEARCH_LIMIT} matches and provides no page cursor. Index intelligence to browse across engagement repositories beyond that ceiling. Counts currently describe the ${loaded.length} loaded matches.`,
+      note: `Searching connected Clippy directly, independently of the local cache. Clippy returns at most ${SEARCH_LIMIT} matches per search without a page cursor; refine the search or choose a repo to explore other results. Counts and category filters describe only the ${loaded.length} parsed matches in this search, not the full Clippy inventory. Clippy Agent can also query the other connected intelligence tools; its access is not limited by cache progress.`,
     };
   }
   async function opportunities({ q = '', severity: selectedSeverity = '', reportCoverage = 'all', offset, limit } = {}) {
@@ -378,11 +410,12 @@ function createClippyService({ env = process.env, client: injectedClient, client
       try { const parsed = new URL(project.project_url); if (['https:', 'http:'].includes(parsed.protocol) && !parsed.username && !parsed.password) url = parsed.href; } catch {}
       return { id: project.project_id, name: String(project.name || '').slice(0, 500), status: String(project.status || 'Unknown').slice(0, 100), url, dates: project.dates || null };
     });
-    const delivered = projects.some(project => /^report (?:delivered|closed)$/i.test(project.status));
-    const coverage = { status: delivered ? 'reported' : result.total_matched > 0 ? 'in_progress' : 'no_match', label: delivered ? 'Delivered report recorded in cached feed' : result.total_matched > 0 ? 'Project found; delivered report unverified' : 'No matching project in cached feed', projects, totalMatched: result.total_matched, partial: result.total_matched > projects.length, cacheAgeSeconds: Number.isFinite(result.cache_age_seconds) ? result.cache_age_seconds : null, checkedAt: new Date().toISOString(), note: 'This is a text match against Clippy’s cached Dradis project feed. Verify the linked project’s target scope and report before acting; an absent match is not proof that no report exists.' };
+    const delivered = projects.some(project => isReportStatus(project.status));
+    const coverage = { status: delivered ? 'reported' : result.total_matched > 0 ? 'in_progress' : 'no_match', label: delivered ? 'Possible report recorded in cached feed' : result.total_matched > 0 ? 'Project found; report coverage unverified' : 'No matching project in cached feed', projects, totalMatched: result.total_matched, partial: result.total_matched >= 100 || projects.length >= 100 || result.total_matched > projects.length, cacheAgeSeconds: Number.isFinite(result.cache_age_seconds) ? result.cache_age_seconds : null, checkedAt: new Date().toISOString(), note: 'This is a text match against Clippy’s cached Dradis project feed. Verify the linked project’s target scope and report before acting; an absent match is not proof that no report exists.' };
     index.saveCoverage(domain, coverage);
     return { domain, reportCoverage: coverage, source: 'clippy-mcp' };
   }
-  return { status, findings, finding, repos, files, file, close, opportunities, reportCoverage, indexStatus: index.status, syncIndex: index.start, cancelIndex: index.cancel, waitForIndex: index.waitForIdle };
+  return { status, findings, finding, repos, files, file, close, opportunities, reportCoverage, indexStatus: index.status, syncIndex: index.start, cancelIndex: index.cancel, waitForIndex: index.waitForIdle,
+    leads: leads.status, searchLeads: leads.start, leadsFromSources: leads.fromSources, cancelLeadSearch: leads.cancel, saveLead: leads.save, verifyLead: leads.verify, waitForLeads: leads.waitForIdle };
 }
 module.exports = { createClippyService, ClippyError, normalizeError, unwrapToolResult, parseFinding, findingId, findingPath, boundedFetch, SEVERITIES, domainName };

@@ -148,14 +148,14 @@ test('all-team model dropdown stages only GLaDOS built-ins and assigned custom a
 });
 
 test('GLaDOS Agentic Team precedes Custom Agents and deletion controls identify individual saved entries', () => {
-  const page = section('async function renderAgentsLibraryPane(', 'function teamAssignableAgents(');
+  const page = section('function drawAgentLibraryTabs(', 'function wirePackageCollection(');
   assert.ok(page.indexOf('GLaDOS Agentic Team') < page.indexOf('Custom Agents'));
   assert.match(app, /agentLibrary: \{ view: 'built-in'/);
   assert.match(app, /data-delete-package-entry="agent"/);
   assert.match(app, /data-delete-package-entry="team"/);
   assert.match(app, /data-delete-package[^>]*>Delete package/);
   assert.match(app, /\$\{kind\}s\/\$\{encodeURIComponent\(localId\)\}/);
-  assert.doesNotMatch(app, /Herbie/);
+  assert.match(app, /Ford RT Agentic Teams/);
 });
 
 

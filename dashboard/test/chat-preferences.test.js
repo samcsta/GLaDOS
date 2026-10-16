@@ -5,12 +5,59 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
+  defaultTeamPreference,
   effortForAgent,
   operatorInitials,
   preferencesFile,
   readChatPreferences,
   writeChatPreferences,
 } = require('../lib/chat-preferences');
+
+test('default team preference persists alongside identity, reasoning and compaction settings', t => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-default-team-prefs-'));
+  t.after(() => fs.rmSync(runtimeDir, { recursive: true, force: true }));
+  const env = { GLADOS_RUNTIME_DIR: runtimeDir };
+  assert.equal(readChatPreferences(env).defaultTeamId, 'glados');
+  writeChatPreferences({ operatorName: 'Operator', agentId: 'glados', effort: 'xhigh', autoCompact: false }, env);
+  const teamId = 'pkg-herbie--herbie-team';
+  writeChatPreferences({ defaultTeamId: teamId }, env);
+  const saved = readChatPreferences(env);
+  assert.equal(saved.defaultTeamId, teamId);
+  assert.equal(saved.operatorName, 'Operator');
+  assert.equal(saved.efforts.glados, 'xhigh');
+  assert.equal(saved.autoCompact, false);
+  writeChatPreferences({ operatorName: 'Changed operator' }, env);
+  assert.equal(readChatPreferences(env).defaultTeamId, teamId);
+  for (const value of ['', null, 1, [], {}, '../glados', 'agent:pkg-herbie--coordinator', ' glados']) {
+    assert.throws(() => writeChatPreferences({ defaultTeamId: value }, env), /valid agentic team/);
+  }
+  assert.equal(readChatPreferences(env).defaultTeamId, teamId);
+});
+
+test('unavailable defaults fall back without replacing the saved installed team selection', t => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-default-team-fallback-'));
+  t.after(() => fs.rmSync(runtimeDir, { recursive: true, force: true }));
+  const env = { GLADOS_RUNTIME_DIR: runtimeDir };
+  const id = 'pkg-herbie--herbie-team';
+  const main = { id: 'glados', name: 'GLaDOS', available: true, kind: 'team' };
+  const herbie = { id, name: 'Herbie', available: true, kind: 'team' };
+  writeChatPreferences({ defaultTeamId: id }, env);
+  assert.deepEqual(defaultTeamPreference([main, herbie], env), {
+    defaultTeamId: id, effectiveTeamId: id, fallback: false,
+    teams: [{ id: 'glados', name: 'GLaDOS', available: true }, { id, name: 'Herbie', available: true }],
+  });
+  for (const teams of [[main], [main, { ...herbie, available: false }]]) {
+    const result = defaultTeamPreference(teams, env);
+    assert.equal(result.defaultTeamId, id);
+    assert.equal(result.effectiveTeamId, 'glados');
+    assert.equal(result.fallback, true);
+    assert.equal(result.teams.length, 1);
+  }
+  const result = defaultTeamPreference([main, herbie, { id: 'agent:pkg-herbie--coordinator', kind: 'agent', available: true }], env);
+  assert.equal(result.teams.length, 2);
+  assert.equal(result.effectiveTeamId, id);
+  assert.equal(readChatPreferences(env).defaultTeamId, id);
+});
 
 test('chat reasoning preferences are owner-only, validated, and default to auto compaction', () => {
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-chat-prefs-'));

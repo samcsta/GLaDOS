@@ -6,16 +6,20 @@ const Database = require('better-sqlite3');
 const { PORT, BLACKBOARD_DB, WATCHDOG_DB, GLADOS_AGENT_WORKSPACES, GLADOS_INVESTIGATIONS_DIR, GLADOS_RUNTIME_DIR } = require('./lib/config');
 const reports = require('./lib/reports');
 const agentDetails = require('./lib/agent-details');
+const { createAgentWorkspaceEditor } = require('./lib/agent-workspace-editor');
 const { createAgentPackageStore } = require('./lib/agent-packages');
+const { createFordAgenticTeams, refreshInstalledIntegrations } = require('./lib/ford-agentic-teams');
+const { createTsharkInstaller } = require('./lib/team-tool-installer');
 const { createAgentTeamStore, resolveAgentTeam } = require('./lib/agent-teams');
 const { createConnectorStore, connectorCatalog } = require('./lib/connectors');
 const { clippyAgentInfo, enableClippyAgent } = require('./lib/clippy-agent');
 const { isClippyWorkspaceSession, ensureClippyChatSession } = require('./lib/clippy-chat-session');
 const { createClippyRouter } = require('./routes/clippy');
-const { createAgentLibraryRouter, createConnectorsRouter, createAgentTeamsRouter } = require('./routes/agent-library');
+const { createAgentLibraryRouter, createConnectorsRouter, createAgentTeamsRouter, createFordAgenticTeamsRouter } = require('./routes/agent-library');
 const { getVersionInfo } = require('./lib/version');
 const {
   DashboardTranscriptStore,
+  delegatedActivityForParent,
   compactTranscriptEventForTransport,
   mergeTranscriptEvents,
   afterLastEventId,
@@ -42,6 +46,7 @@ const { readFullAccessState, writeFullAccessState } = require('./lib/full-access
 const {
   EFFORT_LEVELS,
   PACKAGE_EFFORT_LEVELS,
+  defaultTeamPreference,
   effortForAgent,
   operatorInitials,
   readChatPreferences,
@@ -70,12 +75,16 @@ const {
   resolveSdkWorkingDirectory,
   testAgentDraft,
   MCP_SERVER_TOOLS,
+  mountedToolsForAgent,
+  modelSupportsReasoningEffort,
   taskAllowlist,
 } = require('./lib/harness/agent-sdk');
 const { SdkSessionRegistry } = require('./lib/harness/session-registry');
 const { InvestigationSessionStore } = require('./lib/investigation-session-store');
-const { proxyBackendConfig, startMitmproxy } = require('./lib/proxy/mitmproxy-runner');
-const { ensureMitmCa } = require('./lib/proxy/mitm-ca');
+const { proxyBackendConfig, startMitmproxy, proxyInterceptStatus, setProxyIntercept, decideProxyIntercept } = require('./lib/proxy/mitmproxy-runner');
+const { ensureMitmCa, mitmCaPaths } = require('./lib/proxy/mitm-ca');
+const { SessionProxyManager } = require('./lib/proxy/session-manager');
+const { AssessmentBrowserManager } = require('./lib/proxy/assessment-browser');
 const { ResumeCoordinator } = require('./lib/harness/resume-coordinator');
 const {
   proxyHistory,
@@ -85,6 +94,8 @@ const {
   watchProxyEvents,
   proxyHealth,
   combineProxyRuntimeHealth,
+  proxyWebsocketHistory,
+  proxyWebsocketDetail,
 } = require('./lib/proxy/native-store');
 const watchdogHealth = require('glados-watchdog/lib/health');
 const watchdogHalt = require('glados-watchdog/lib/halt');
@@ -114,6 +125,9 @@ if (!process.env.GLADOS_LITELLM_UPSTREAM_BASE_URL) {
   process.env.GLADOS_LITELLM_UPSTREAM_BASE_URL = liteLlmResponseRelay.upstream;
 }
 const investigationActivationGenerations = new Map();
+const sessionProxies = new SessionProxyManager({ env: process.env });
+const assessmentBrowsers = new AssessmentBrowserManager({ env: process.env, sessionProxies });
+const browserManagerToken = crypto.randomBytes(32).toString('hex');
 let proxyRuntime = {
   status: 'stopped',
   child: null,
@@ -181,7 +195,9 @@ function startDesktopProxy() {
   }
 }
 
-function stopDesktopProxy({ timeoutMs = 2500 } = {}) {
+async function stopDesktopProxy({ timeoutMs = 2500 } = {}) {
+  await assessmentBrowsers.stopAll();
+  await sessionProxies.stopAll({ timeoutMs });
   const child = proxyRuntime.child;
   proxyRuntime.status = 'stopping';
   if (!child || child.exitCode != null) {
@@ -213,6 +229,28 @@ startDesktopProxy();
 
 app.get('/api/version', (req, res) => {
   res.json(getVersionInfo());
+});
+
+function defaultTeamSettings() {
+  return defaultTeamPreference(agentTeamStore.list(loadHarnessRegistry()), process.env);
+}
+
+app.get('/api/settings/default-team', (_req, res) => {
+  try { res.json({ ok: true, ...defaultTeamSettings() }); }
+  catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message }); }
+});
+
+app.patch('/api/settings/default-team', (req, res) => {
+  try {
+    const defaultTeamId = req.body?.defaultTeamId;
+    if (typeof defaultTeamId !== 'string' || !defaultTeamSettings().teams.some(team => team.id === defaultTeamId)) {
+      return res.status(400).json({ ok: false, error: 'Choose an available installed agentic team.' });
+    }
+    writeChatPreferences({ defaultTeamId }, process.env);
+    const state = defaultTeamSettings();
+    broadcastLobby('default-team-changed', state);
+    res.json({ ok: true, ...state });
+  } catch (error) { res.status(error.status || 400).json({ ok: false, error: error.message }); }
 });
 
 app.get('/api/settings/full-access', (req, res) => {
@@ -339,7 +377,10 @@ app.delete('/api/investigation-projects/:id', (req, res) => {
 app.post('/api/investigation-sessions', (req, res) => {
   try {
   if (req.body?.agentId !== undefined && (typeof req.body.agentId !== 'string' || !req.body.agentId)) return res.status(400).json({ ok: false, error: 'A custom agent identity is required.' });
-  const teamId = req.body?.agentId ? `agent:${req.body.agentId}` : req.body?.teamId || req.body?.metadata?.teamId || 'glados';
+  const teamId = req.body?.agentId ? `agent:${req.body.agentId}`
+    : req.body?.teamId !== undefined ? req.body.teamId
+    : req.body?.metadata?.teamId !== undefined ? req.body.metadata.teamId
+    : defaultTeamSettings().effectiveTeamId;
   const team = resolveAgentTeam(loadHarnessRegistry(), { env: process.env, teamId });
   if (!team.available) return res.status(409).json({ ok: false, error: 'This team is unavailable. Choose an enabled team for the new session.' });
   const hasBackgroundWork = activeChatTurns.size > 0 || activeSubagentTurns.size > 0;
@@ -384,6 +425,8 @@ app.delete('/api/investigation-sessions/:id', (req, res) => {
   }
   try {
     const result = investigationSessions.delete(sessionId);
+    assessmentBrowsers.stopSession(sessionId).then(() => sessionProxies.stop(sessionId))
+      .catch(error => console.warn('[proxy] could not stop deleted session browser/listener:', error.message));
     sdkSessionRegistry.clearSession(sessionId);
     resumeCoordinator.clearSession(sessionId);
     for (let index = resumeContinuationQueue.length - 1; index >= 0; index--) {
@@ -1075,7 +1118,12 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
   };
   try {
     const sdkCwd = resolveSdkWorkingDirectory({ env: process.env });
-    const turnEnv = { ...process.env, GLADOS_SESSION_ID: sessionId, GLADOS_TEAM_ID: team.id };
+    const proxySession = await sessionProxies.ensure(sessionId);
+    const turnEnv = { ...process.env, GLADOS_SESSION_ID: sessionId, GLADOS_TEAM_ID: team.id,
+      GLADOS_PROXY_URL: proxySession.proxyUrl, GLADOS_REPLAY_PROXY: proxySession.proxyUrl,
+      GLADOS_MITM_LISTEN_HOST: proxySession.listenHost, GLADOS_MITM_LISTEN_PORT: String(proxySession.listenPort),
+      GLADOS_BROWSER_MANAGER_URL: `http://127.0.0.1:${server.address().port}`,
+      GLADOS_BROWSER_MANAGER_TOKEN: browserManagerToken };
     // Route every Agent SDK request through the loopback relay. Besides preserving
     // LiteLLM deployment receipts, the relay applies narrowly scoped provider
     // compatibility fixes (for example, DeepSeek does not accept Claude effort).
@@ -1167,6 +1215,14 @@ async function sendMessageToAgentRuntime(sessionId, agentId, message, {
         pushBuffer(sessionId, targetAgent, ev);
         broadcastTranscript(sessionId, targetAgent, ev);
         if (ev.kind === 'liveness') {
+          if (queryScope.agents.has(transcriptParent)) {
+            const parentActivity = delegatedActivityForParent(ev, transcriptParent);
+            if (parentActivity) {
+              const recorded = transcriptStore.record(sessionId, transcriptParent, { ...parentActivity, engagementId: engagementId || null });
+              pushBuffer(sessionId, transcriptParent, recorded);
+              broadcastTranscript(sessionId, transcriptParent, recorded);
+            }
+          }
           if (!ev.live && securityReviewArtifactRoot && engagementId && ev.toolCallId) {
             try {
               reconcileCompletedDiscoveryWorker({
@@ -1883,6 +1939,8 @@ function chatComposerState(sessionId, agentId) {
     agentId,
     model: agent.model || null,
     effort: configuredAgentEffort(agentId),
+    effortSupported: modelSupportsReasoningEffort(agent.model),
+    effortNote: modelSupportsReasoningEffort(agent.model) ? null : 'This deployment does not support adjustable reasoning effort. Your saved preference is retained for supported models.',
     effortLevels: [...(agent.packageId ? PACKAGE_EFFORT_LEVELS : EFFORT_LEVELS)],
     autoCompact: preferences.autoCompact,
     fullAccess: agentId === 'glados' ? {
@@ -2665,112 +2723,219 @@ app.get('/api/targets', (req, res) => {
   res.json({ targets: watchdogHealth.listHealth() });
 });
 
-// --- Proxy metrics ---
-app.get('/api/proxy/rps', async (req, res) => {
-  res.json(await proxyRps());
+// Proxy capture always belongs to an explicitly selected investigation. Never
+// infer the active session: a different window may switch it while this tab is open.
+function requireProxySession(req, res, { writable = false } = {}) {
+  const requested = req.body?.session_id ?? req.query?.session_id;
+  if (typeof requested !== 'string' || !requested || requested.length > 200 || /[\x00-\x1f]/.test(requested)) {
+    res.status(400).json({ ok: false, error: 'explicit session_id required' });
+    return null;
+  }
+  return requireSession(req, res, { writable });
+}
+
+function proxySessionPayload(session) {
+  const config = sessionProxies.config(session.id);
+  return { ...sessionProxies.describe(session.id), readOnly: session.state !== 'active',
+    capabilities: { httpHistory: true, replay: true, intercept: true, websockets: true,
+      websocketHistory: true, sessionIsolation: true },
+    intercept: proxyInterceptStatus(config) };
+}
+
+app.get('/api/proxy/session', (req, res) => {
+  const session = requireProxySession(req, res);
+  if (!session) return;
+  res.json(proxySessionPayload(session));
+});
+app.post('/api/proxy/session', async (req, res) => {
+  const session = requireProxySession(req, res, { writable: true });
+  if (!session) return;
+  await sessionProxies.ensure(session.id);
+  const payload = proxySessionPayload(session);
+  res.status(payload.health.healthy ? 200 : 503).json(payload);
 });
 
-// --- Proxy API abstraction ---
-app.get('/api/proxy/detail', async (req, res) => {
+function managedBrowserMode() {
+  if (process.env.GLADOS_BROWSER_MCP_COMMAND || process.env.GLADOS_BROWSER_MCP_ARGS || process.env.GLADOS_BROWSER_MCP_ARGS_JSON) {
+    return { available: false, reason: 'A custom Browser MCP command is configured. Its browser cannot be opened by the managed assessment browser.' };
+  }
+  if (process.env.GLADOS_BROWSER_MCP !== '1') return { available: false, reason: 'Enable the Browser connector to use assessment browsers.' };
+  return { available: true };
+}
+
+function assessmentBrowserAgents(session) {
+  const team = sessionTeam(session);
+  if (!team.available) return [];
+  const env = { ...process.env, GLADOS_SESSION_ID: session.id, GLADOS_TEAM_ID: team.id };
+  return loadAgentRegistry().filter(row => team.rosterIds.includes(row.id)
+    && mountedToolsForAgent(row.id, loadPolicy(), { env }).some(tool => tool.startsWith('mcp__browser-')))
+    .map(row => ({ id: row.id, name: row.name || row.id }));
+}
+
+app.get('/api/proxy/browsers', (req, res) => {
+  const session = requireProxySession(req, res);
+  if (!session) return;
+  const mode = managedBrowserMode();
+  const running = assessmentBrowsers.describe(session.id);
+  const agents = mode.available ? assessmentBrowserAgents(session).map(row => ({ ...row,
+    running: running.some(browser => browser.agentId === row.id) })) : [];
+  res.json({ sessionId: session.id, ...mode, agents, browsers: running,
+    defaultAgentId: running.find(browser => agents.some(row => row.id === browser.agentId))?.agentId
+      || agents.find(row => row.id === 'webapp-recon')?.id || agents[0]?.id || null,
+    reason: mode.reason || (agents.length ? null : 'This team has no browser-enabled agents. Use a GLaDOS assessment session or enable Browser for a team agent.') });
+});
+
+async function openAssessmentBrowser(req, res, { internal = false } = {}) {
+  if (internal) {
+    const supplied = req.get('authorization') || '';
+    const expected = `Bearer ${browserManagerToken}`;
+    if (Buffer.byteLength(supplied) !== Buffer.byteLength(expected) || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) {
+      return res.status(403).json({ ok: false, error: 'Managed browser authorization required' });
+    }
+  } else if (req.get('origin') && req.get('origin') !== `http://127.0.0.1:${server.address().port}`) {
+    return res.status(403).json({ ok: false, error: 'Open assessment browsers from this dashboard' });
+  }
+  const session = requireProxySession(req, res, { writable: true });
+  if (!session) return;
+  const mode = managedBrowserMode();
+  if (!mode.available) return res.status(409).json({ ok: false, error: mode.reason });
+  const agentId = req.body?.agent_id;
+  if (typeof agentId !== 'string' || !agentId) return res.status(400).json({ ok: false, error: 'Choose a browser-enabled agent' });
+  if (!requireRosterAgent(req, res, session, agentId)) return;
+  if (!assessmentBrowserAgents(session).some(row => row.id === agentId)) {
+    return res.status(403).json({ ok: false, error: 'Browser tools are not enabled for this agent' });
+  }
+  try { res.json(await assessmentBrowsers.ensure(session.id, agentId, { focus: !internal })); }
+  catch (error) { res.status(503).json({ ok: false, error: error.message }); }
+}
+app.post('/api/proxy/browser/open', (req, res) => openAssessmentBrowser(req, res));
+app.post('/api/proxy/browser/ensure', (req, res) => openAssessmentBrowser(req, res, { internal: true }));
+app.get('/api/proxy/ca', (req, res) => {
+  const session = requireProxySession(req, res);
+  if (!session) return;
+  const cert = mitmCaPaths(process.env).cert;
+  if (!fs.existsSync(cert)) return res.status(404).json({ ok: false, error: 'Start the session proxy to generate its CA certificate.' });
+  res.type('application/x-pem-file').attachment('GLaDOS-proxy-ca.pem').sendFile(cert);
+});
+app.get('/api/proxy/rps', (req, res) => {
+  const session = requireProxySession(req, res);
+  if (!session) return;
+  const metrics = proxyMetrics({ config: sessionProxies.config(session.id), windowSec: 10 });
+  res.json({ sessionId: session.id, backend: metrics.backend, rps: metrics.rps });
+});
+app.get('/api/proxy/detail', (req, res) => {
+  const session = requireProxySession(req, res);
+  if (!session) return;
   const id = String(req.query.id || '');
   if (!id) return res.status(400).json({ error: 'id required' });
-  const detail = proxyDetail(id, currentProxyConfig());
-  if (!detail) return res.status(404).json({ error: 'not found' });
+  const detail = proxyDetail(id, sessionProxies.config(session.id));
+  if (!detail) return res.status(404).json({ error: 'not found in this session' });
   res.json(detail);
 });
-app.get('/api/proxy/metrics', async (req, res) => {
-  res.json(proxyMetrics({
-    windowSec: Number(req.query.window || 10),
-    config: currentProxyConfig(),
-  }));
+app.get('/api/proxy/metrics', (req, res) => {
+  const session = requireProxySession(req, res);
+  if (!session) return;
+  res.json(proxyMetrics({ windowSec: Number(req.query.window || 10), config: sessionProxies.config(session.id) }));
 });
-app.get('/api/proxy/history', async (req, res) => {
-  res.json(proxyHistory({
-    since: req.query.since,
-    limit: req.query.limit,
-    config: currentProxyConfig(),
-  }));
+app.get('/api/proxy/history', (req, res) => {
+  const session = requireProxySession(req, res);
+  if (!session) return;
+  res.json(proxyHistory({ since: req.query.since, before: req.query.before, limit: req.query.limit,
+    config: sessionProxies.config(session.id) }));
 });
-// Request replay. Fires an HTTP request through the configured proxy so it
-// lands in history with the provided agent tag; returns the response inline.
-// Body: { method, url, headers: {..}, body?: string, agentTag?: string, timeoutMs? }
+app.get('/api/proxy/websockets', (req, res) => {
+  const session = requireProxySession(req, res);
+  if (!session) return;
+  res.json(proxyWebsocketHistory({ since: req.query.since, before: req.query.before, limit: req.query.limit,
+    summary: req.query.summary === '1', config: sessionProxies.config(session.id) }));
+});
+app.get('/api/proxy/websocket-detail', (req, res) => {
+  const session = requireProxySession(req, res);
+  if (!session) return;
+  const id = String(req.query.id || '');
+  if (!id) return res.status(400).json({ error: 'id required' });
+  const detail = proxyWebsocketDetail(id, sessionProxies.config(session.id));
+  if (!detail) return res.status(404).json({ error: 'not found in this session' });
+  res.json(detail);
+});
+app.get('/api/proxy/intercept', (req, res) => {
+  const session = requireProxySession(req, res);
+  if (!session) return;
+  res.json({ sessionId: session.id, ...proxyInterceptStatus(sessionProxies.config(session.id)) });
+});
+app.post('/api/proxy/intercept', async (req, res) => {
+  const session = requireProxySession(req, res, { writable: true });
+  if (!session) return;
+  if (typeof req.body.interceptRequests !== 'boolean' || typeof req.body.interceptResponses !== 'boolean') {
+    return res.status(400).json({ ok: false, error: 'interceptRequests and interceptResponses booleans required' });
+  }
+  const started = await sessionProxies.ensure(session.id);
+  if (!started.health.healthy) return res.status(503).json(started);
+  try { res.json({ sessionId: session.id, ...setProxyIntercept(sessionProxies.config(session.id), req.body) }); }
+  catch (error) { res.status(400).json({ ok: false, error: error.message }); }
+});
+app.post('/api/proxy/intercept/:id', (req, res) => {
+  const session = requireProxySession(req, res, { writable: true });
+  if (!session) return;
+  try { res.json(decideProxyIntercept(sessionProxies.config(session.id), req.params.id, req.body)); }
+  catch (error) { res.status(error.status || 400).json({ ok: false, error: error.message }); }
+});
+
+// Replay uses only this session's dedicated listener. There is no direct-fetch
+// fallback if the proxy is unavailable, so requests cannot escape attribution.
 app.post('/api/proxy/replay', async (req, res) => {
-  const { method = 'GET', url, headers = {}, body = null, agentTag = 'replay', timeoutMs = 15000 } =
-    req.body || {};
+  const session = requireProxySession(req, res, { writable: true });
+  if (!session) return;
+  const { method = 'GET', url, headers = {}, body = null, agentTag = 'replay', timeoutMs = 15000 } = req.body || {};
   if (!url || !/^https?:\/\//i.test(url)) return res.status(400).json({ error: 'valid http(s) url required' });
-  // Forbid replay to loopback / localhost; prevents accidentally re-sending
-  // dashboard/gateway/ollama traffic through the capture proxy and muddying
-  // attribution.
   try {
     const u = new URL(url);
-    const host = u.hostname.toLowerCase();
+    const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
     if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.local')) {
       return res.status(400).json({ error: 'refusing replay to loopback' });
     }
   } catch { return res.status(400).json({ error: 'invalid url' }); }
-
-  const undici = (() => { try { return require('undici'); } catch { return null; } })();
-  const ProxyAgent = undici?.ProxyAgent;
-  const proxyUrl = configuredReplayProxyUrl();
-  const dispatcher = ProxyAgent && proxyUrl
-    ? new ProxyAgent({
-      uri: proxyUrl,
-      // Replay intentionally talks through a local MITM proxy, which resigns
-      // upstream TLS. Some operator shells do not export the local CA into
-      // Node, so tolerate the interception cert for this endpoint.
-      requestTls: { rejectUnauthorized: false },
-    })
-    : undefined;
-  const replayFetch = dispatcher && undici?.fetch ? undici.fetch : fetch;
-
-  const outHeaders = { ...headers, 'X-GLaDOS-Agent': agentTag, 'X-GLaDOS-Replay': '1' };
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), Math.max(1000, Math.min(60000, Number(timeoutMs) || 15000)));
+  if (typeof headers !== 'object' || Array.isArray(headers) || headers == null) return res.status(400).json({ error: 'headers object required' });
+  const startedProxy = await sessionProxies.ensure(session.id);
+  if (!startedProxy.health.healthy) return res.status(503).json({ ok: false, error: 'session proxy is unavailable', health: startedProxy.health });
+  const undici = require('undici');
+  const dispatcher = new undici.ProxyAgent({ uri: startedProxy.proxyUrl, requestTls: { rejectUnauthorized: false } });
+  const outHeaders = Object.fromEntries(Object.entries(headers).filter(([key]) => !/^x-glados-/i.test(key)));
+  Object.assign(outHeaders, { 'X-GLaDOS-Agent': String(agentTag), 'X-GLaDOS-Session': session.id, 'X-GLaDOS-Replay': '1' });
+  const abort = new AbortController();
+  const t = setTimeout(() => abort.abort(), Math.max(1000, Math.min(60000, Number(timeoutMs) || 15000)));
   const started = Date.now();
   try {
-    const init = { method: method.toUpperCase(), headers: outHeaders, signal: controller.signal };
-    if (body != null && !['GET','HEAD'].includes(init.method)) init.body = body;
-    if (dispatcher) init.dispatcher = dispatcher;
-    const upstream = await replayFetch(url, init);
+    const init = { method: String(method).toUpperCase(), headers: outHeaders, signal: abort.signal, dispatcher };
+    if (body != null && !['GET', 'HEAD'].includes(init.method)) init.body = body;
+    const upstream = await undici.fetch(url, init);
     const respHeaders = {};
-    upstream.headers.forEach((v, k) => { respHeaders[k] = v; });
+    upstream.headers.forEach((value, key) => { respHeaders[key] = value; });
     const text = await upstream.text();
-    const elapsedMs = Date.now() - started;
-    res.json({
-      ok: true, status: upstream.status, statusText: upstream.statusText,
-      headers: respHeaders, body: text, elapsedMs, proxied: !!dispatcher, agentTag,
-    });
-  } catch (err) {
-    res.status(502).json({ ok: false, error: err.message, aborted: controller.signal.aborted });
+    res.json({ ok: true, status: upstream.status, statusText: upstream.statusText,
+      headers: respHeaders, body: text, elapsedMs: Date.now() - started, proxied: true, agentTag, sessionId: session.id });
+  } catch (error) {
+    res.status(502).json({ ok: false, error: error.message, aborted: abort.signal.aborted });
   } finally {
     clearTimeout(t);
+    dispatcher.close().catch(() => {});
   }
 });
 
-app.get('/api/proxy/stream', async (req, res) => {
-  res.set({
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
+app.get('/api/proxy/stream', (req, res) => {
+  const session = requireProxySession(req, res);
+  if (!session) return;
+  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
   res.flushHeaders?.();
-  res.write(`: dashboard proxy stream open\n\n`);
+  res.write(': session proxy stream open\n\n');
   let closed = false;
   const heartbeat = setInterval(() => {
     if (!closed && !res.destroyed) res.write(`: dashboard heartbeat ${Date.now()}\n\n`);
   }, 15000);
-  const closeWatch = watchProxyEvents({
-    config: currentProxyConfig(),
-    onEvent: row => {
-      if (!closed && !res.destroyed) res.write(`data: ${JSON.stringify(row)}\n\n`);
-    },
-  });
-  req.on('close', () => {
-    closed = true;
-    clearInterval(heartbeat);
-    closeWatch();
-  });
+  const closeWatch = watchProxyEvents({ config: sessionProxies.config(session.id), onEvent: row => {
+    if (!closed && !res.destroyed) res.write(`data: ${JSON.stringify(row)}\n\n`);
+  } });
+  req.on('close', () => { closed = true; clearInterval(heartbeat); closeWatch(); });
 });
 
 // --- Reports ---
@@ -2900,23 +3065,14 @@ const agentPackageStore = createAgentPackageStore({
   builtInIds: JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'templates', 'agent-registry.json'), 'utf8')).map(row => row.id),
 });
 const integratedTeamsDir = path.resolve(__dirname, '..', 'templates', 'integrated-teams');
-if (fs.existsSync(integratedTeamsDir)) {
-  for (const entry of fs.readdirSync(integratedTeamsDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!entry.name.endsWith('.glados-agent.json')) continue;
-    try {
-      if (!entry.isFile() || entry.isSymbolicLink()) throw new Error('Integration packages must be regular source files');
-      const sourcePath = path.join(integratedTeamsDir, entry.name);
-      // Clippy is offered when connecting, then installed only after the
-      // operator approves creating its agent. Refresh existing definitions
-      // under their normal edit-preservation rules.
-      if (entry.name === 'clippy-intel.glados-agent.json'
-        && !agentPackageStore.list({ includeArchived: true }).some(pkg => pkg.id === 'clippy-intel')) continue;
-      agentPackageStore.installIntegration(fs.readFileSync(sourcePath, 'utf8'), { sourcePath });
-    } catch (error) { console.warn(`[agent-integrations] could not install ${entry.name}: ${error.message}`); }
-  }
-}
+refreshInstalledIntegrations({ store: agentPackageStore, sourceDir: integratedTeamsDir,
+  warn: (name, error) => console.warn(`[agent-integrations] could not refresh ${name}: ${error.message}`) });
 const connectorStore = createConnectorStore({ env: process.env });
 const agentTeamStore = createAgentTeamStore({ env: process.env });
+const fordAgenticTeams = createFordAgenticTeams({ store: agentPackageStore,
+  installer: createTsharkInstaller({ runtimeDir: GLADOS_RUNTIME_DIR, env: process.env }), sourceDir: integratedTeamsDir,
+  activeAgentIds: () => activeAgentStatus().map(row => row.agentId),
+  changed: (action, row) => broadcastLobby('agent-library-changed', { action, packageId: row.packageId }), env: process.env });
 
 function installedConnectorsCatalog() {
   const catalog = connectorCatalog(process.env);
@@ -2951,6 +3107,7 @@ app.use('/api/agent-packages', createAgentLibraryRouter({
   testDraft: options => testAgentDraft({ ...options, options: { ...options.options, env: process.env } }),
   changed: (action, row) => broadcastLobby('agent-library-changed', { action, packageId: row.id }),
 }));
+app.use('/api/ford-rt-teams', createFordAgenticTeamsRouter({ service: fordAgenticTeams }));
 app.use('/api/agent-teams', createAgentTeamsRouter({
   store: agentTeamStore,
   registry: () => loadHarnessRegistry(),
@@ -2991,7 +3148,34 @@ app.get('/api/settings/agents', (req, res) => {
 app.get('/api/agents/:id/details', (req, res) => {
   const d = agentDetails.agentDetails(req.params.id);
   if (!d) return res.status(404).json({ error: 'agent not found' });
-  res.json(d);
+  res.json({ ...d, ...chatComposerState('draft', req.params.id) });
+});
+app.patch('/api/settings/agents/:id/effort', (req, res) => {
+  if (req.get('Sec-Fetch-Site') === 'cross-site' || (req.get('Origin') && req.get('Origin') !== `${req.protocol}://${req.get('Host')}`)) return res.status(403).json({ ok: false, error: 'Edit agent preferences from GLaDOS.' });
+  const entry = loadHarnessRegistry().find(row => row.id === req.params.id);
+  if (!entry) return res.status(404).json({ ok: false, error: 'Agent not found' });
+  try {
+    writeChatPreferences({ agentId: entry.id, effort: req.body?.effort, ...(entry.packageRevision ? { packageRevision: entry.packageRevision } : {}) }, process.env);
+    const result = chatComposerState('draft', entry.id);
+    broadcastLobby('agent-reasoning-changed', { agentId: entry.id, effort: result.effort });
+    res.json({ ok: true, ...result });
+  } catch (error) { res.status(400).json({ ok: false, error: error.message }); }
+});
+const agentWorkspaceEditor = createAgentWorkspaceEditor({ workspaceRoot: GLADOS_AGENT_WORKSPACES,
+  registryPath: path.resolve(__dirname, '..', 'templates', 'agent-registry.json'),
+  activeAgentIds: () => activeAgentStatus().map(row => row.agentId),
+  availableToolsForAgent: id => mountedToolsForAgent(id, undefined, { env: { ...process.env, GLADOS_TEAM_ID: 'glados' }, ignoreAgentToolRestrictions: true }) });
+app.get('/api/agents/:id/instructions', (req, res) => {
+  try { res.set('Cache-Control', 'no-store').json({ ok: true, ...agentWorkspaceEditor.read(req.params.id) }); }
+  catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message }); }
+});
+app.patch('/api/agents/:id/instructions', (req, res) => {
+  if (req.get('Sec-Fetch-Site') === 'cross-site' || (req.get('Origin') && req.get('Origin') !== `${req.protocol}://${req.get('Host')}`)) return res.status(403).json({ ok: false, error: 'Edit instructions from GLaDOS.' });
+  try {
+    const result = agentWorkspaceEditor.save(req.params.id, req.body);
+    if (result.changed) broadcastLobby('agent-instructions-changed', { agentId: req.params.id });
+    res.json({ ok: true, ...result });
+  } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message }); }
 });
 app.get('/api/models', async (req, res) => {
   try {

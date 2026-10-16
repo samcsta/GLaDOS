@@ -190,4 +190,29 @@ function createConnectorsRouter({ store, catalog, changed = () => {} }) {
   return router;
 }
 
-module.exports = { createAgentLibraryRouter, createConnectorsRouter, createAgentTeamsRouter };
+function createFordAgenticTeamsRouter({ service }) {
+  const router = express.Router();
+  router.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  router.get('/', handle(async (_req, res) => res.json({ ok: true, ...await service.catalog() })));
+  router.get('/:id', handle(async (req, res) => res.json({ ok: true, ...await service.get(req.params.id) })));
+  function requireLocalAction(req, res, next) {
+    const origin = req.get('Origin');
+    if (req.get('Sec-Fetch-Site') === 'cross-site' || (origin && origin !== `${req.protocol}://${req.get('Host')}`)) {
+      return res.status(403).json({ ok: false, code: 'ford_team_origin_rejected', error: 'Install or uninstall teams from the GLaDOS app.' });
+    }
+    if ((Number(req.get('Content-Length')) > 0 || req.get('Transfer-Encoding')) && !req.is('application/json')) {
+      return res.status(415).json({ ok: false, code: 'ford_team_json_required', error: 'Team actions require a JSON request.' });
+    }
+    next();
+  }
+  router.post('/:id/install', requireLocalAction, handle(async (req, res) => {
+    const result = await service.install(req.params.id, { expectedRevision: revisionFrom(req) });
+    res.status(202).json({ ok: true, ...result });
+  }));
+  router.delete('/:id', requireLocalAction, handle(async (req, res) => {
+    res.json({ ok: true, ...await service.remove(req.params.id, { expectedRevision: revisionFrom(req) }) });
+  }));
+  return router;
+}
+
+module.exports = { createAgentLibraryRouter, createConnectorsRouter, createAgentTeamsRouter, createFordAgenticTeamsRouter };

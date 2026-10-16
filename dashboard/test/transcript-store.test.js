@@ -10,10 +10,24 @@ const {
   compactTranscriptEventForTransport,
   eventSseId,
   dashboardTranscriptEvent,
+  delegatedActivityForParent,
   mergeTranscriptEvents,
   afterLastEventId,
   sseFrame,
 } = require('../lib/transcript-store');
+
+test('streaming work feed retains lifecycle and mirrors only safe worker state to the parent', () => {
+  const event = { kind: 'liveness', agentId: 'webapp-recon', parentAgentId: 'glados', toolCallId: 'task-1', live: true, state: 'running', ts: '2026-10-15T16:00:00Z', id: 'live-1', text: 'PRIVATE_WORKER_PROMPT', toolInput: { prompt: 'PRIVATE_TASK' }, thinking: 'PRIVATE_REASONING' };
+  assert.match(sseFrame(event, { includeStream: true }), /"kind":"liveness"/);
+  assert.equal(sseFrame(event, { includeStream: false }), '');
+  const parent = delegatedActivityForParent(event, 'glados');
+  assert.equal(parent.agentId, 'glados'); assert.equal(parent.childAgentId, 'webapp-recon'); assert.equal(parent.toolCallId, 'task-1');
+  assert.equal(parent.live, true); assert.ok(!JSON.stringify(parent).includes('PRIVATE_'));
+  const finished = delegatedActivityForParent({ ...event, live: false, state: 'completed', id: 'live-2' }, 'glados');
+  assert.equal(finished.live, false); assert.notEqual(finished.id, parent.id);
+  assert.equal(delegatedActivityForParent(event, 'webapp-recon'), null);
+  assert.equal(delegatedActivityForParent({ ...event, toolCallId: null }, 'glados'), null);
+});
 
 function tempDb() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-transcript-test-'));

@@ -78,6 +78,10 @@ function normalizeEvent(event) {
     respLen: Number(event.respLen || response.bodyLen || byteLen(response.body || '')),
     mime: event.mime || responseHeaders['content-type'] || '',
     agentTag: event.agentTag || headers['x-glados-agent'] || '',
+    sessionId: String(event.sessionId || headers['x-glados-session'] || ''),
+    requestEdited: event.requestEdited === true,
+    responseEdited: event.responseEdited === true,
+    edited: event.edited === true || event.requestEdited === true || event.responseEdited === true,
     requestLine: request.line || '',
     requestHeaders: request.headers || {},
     requestBody: request.body || '',
@@ -113,6 +117,10 @@ function rowForHistory(event) {
     respLen: event.respLen,
     mime: event.mime,
     agentTag: event.agentTag,
+    sessionId: event.sessionId,
+    requestEdited: event.requestEdited,
+    responseEdited: event.responseEdited,
+    edited: event.edited,
   };
 }
 
@@ -121,7 +129,7 @@ function trafficFilesNewestFirst(config = proxyBackendConfig()) {
   let archives = [];
   try {
     archives = fs.readdirSync(config.trafficDir)
-      .filter(name => /^proxy-events-.+\.jsonl$/i.test(name))
+      .filter(name => name.startsWith(`${path.basename(config.trafficJsonl, '.jsonl')}-`) && name.endsWith('.jsonl'))
       .map(name => path.join(config.trafficDir, name))
       .sort()
       .reverse();
@@ -172,12 +180,19 @@ function scanEventsReverse(config, onEvent) {
   }
 }
 
-function proxyHistory({ since = 0, limit = DEFAULT_LIMIT, config = proxyBackendConfig() } = {}) {
+function matchesSession(event, sessionId) {
+  return sessionId == null || event.sessionId === sessionId;
+}
+
+function proxyHistory({ since = 0, before = 0, limit = DEFAULT_LIMIT, config = proxyBackendConfig(), sessionId = config.sessionId } = {}) {
   const lim = Math.max(1, Math.min(MAX_LIMIT, Number(limit) || DEFAULT_LIMIT));
   const sinceNum = Number(since) || 0;
+  const beforeNum = Number(before) || 0;
   const rows = [];
   scanEventsReverse(config, event => {
+    if (!matchesSession(event, sessionId)) return true;
     const eventId = Number(event.id);
+    if (beforeNum && (!Number.isFinite(eventId) || eventId >= beforeNum)) return true;
     if (sinceNum && Number.isFinite(eventId) && eventId <= sinceNum) return false;
     if (!sinceNum || eventId > sinceNum) rows.push(rowForHistory(event));
     return rows.length < lim;
@@ -185,11 +200,12 @@ function proxyHistory({ since = 0, limit = DEFAULT_LIMIT, config = proxyBackendC
   return rows.reverse();
 }
 
-function proxyDetail(id, config = proxyBackendConfig()) {
+function proxyDetail(id, config = proxyBackendConfig(), sessionId = config.sessionId) {
   const wanted = String(id || '');
   if (!wanted) return null;
   let match = null;
   scanEventsReverse(config, event => {
+    if (!matchesSession(event, sessionId)) return true;
     if (String(event.id) !== wanted) return true;
     match = event;
     return false;
@@ -197,11 +213,12 @@ function proxyDetail(id, config = proxyBackendConfig()) {
   return match;
 }
 
-function proxyMetrics({ windowSec = 10, config = proxyBackendConfig() } = {}) {
+function proxyMetrics({ windowSec = 10, config = proxyBackendConfig(), sessionId = config.sessionId } = {}) {
   const windowMs = Math.max(1, Number(windowSec) || 10) * 1000;
   const cutoff = Date.now() - windowMs;
   const rows = [];
   scanEventsReverse(config, event => {
+    if (!matchesSession(event, sessionId)) return true;
     if (Number(event.ts) < cutoff) return false;
     rows.push(event);
     return true;
@@ -228,7 +245,7 @@ function proxyMetrics({ windowSec = 10, config = proxyBackendConfig() } = {}) {
   };
 }
 
-function watchProxyEvents({ config = proxyBackendConfig(), fromEnd = true, onEvent }) {
+function watchProxyEvents({ config = proxyBackendConfig(), sessionId = config.sessionId, fromEnd = true, onEvent }) {
   ensureTrafficStore(config);
   let position = fromEnd ? fs.statSync(config.trafficJsonl).size : 0;
   let carry = '';
@@ -254,7 +271,7 @@ function watchProxyEvents({ config = proxyBackendConfig(), fromEnd = true, onEve
       carry = lines.pop() || '';
       for (const line of lines) {
         const event = parseLine(line);
-        if (event) onEvent(rowForHistory(event));
+        if (event && matchesSession(event, sessionId)) onEvent(rowForHistory(event));
       }
     } finally {
       fs.closeSync(fd);
@@ -268,6 +285,58 @@ function watchProxyEvents({ config = proxyBackendConfig(), fromEnd = true, onEve
     clearInterval(timer);
     fs.unwatchFile(config.trafficJsonl, readNew);
   };
+}
+
+function scanWebsocketEventsReverse(config, onRow) {
+  const websocketConfig = { ...config, trafficJsonl: config.websocketJsonl || path.join(config.trafficDir, 'websocket-events.jsonl') };
+  for (const file of trafficFilesNewestFirst(websocketConfig)) {
+    const completed = forEachLineReverse(file, line => {
+      let row;
+      try { row = JSON.parse(line); } catch { return true; }
+      return row?.type !== 'websocket' || onRow(row) !== false;
+    });
+    if (!completed) break;
+  }
+}
+
+function proxyWebsocketSummary(row) {
+  const body = String(row.body || '');
+  const limit = 2048;
+  const truncated = Buffer.byteLength(body, 'utf8') > limit;
+  // Base64 previews stop on a complete quartet; UTF-8 previews stop on a
+  // complete code point. Neither projection changes retained capture flags.
+  const preview = !truncated ? body : row.binary
+    ? body.slice(0, limit - (limit % 4))
+    : new TextDecoder('utf-8').decode(Buffer.from(body, 'utf8').subarray(0, limit), { stream: true });
+  return { ...row, body: preview, previewTruncated: truncated };
+}
+
+function proxyWebsocketHistory({ since = 0, before = 0, limit = DEFAULT_LIMIT, summary = false, config = proxyBackendConfig(), sessionId = config.sessionId } = {}) {
+  const lim = Math.max(1, Math.min(MAX_LIMIT, Number(limit) || DEFAULT_LIMIT));
+  const rows = [];
+  const sinceNum = Number(since) || 0;
+  const beforeNum = Number(before) || 0;
+  scanWebsocketEventsReverse(config, row => {
+    if (!matchesSession(row, sessionId)) return true;
+    const id = Number(row.id);
+    if (beforeNum && (!Number.isFinite(id) || id >= beforeNum)) return true;
+    if (sinceNum && Number.isFinite(id) && id <= sinceNum) return false;
+    if (!sinceNum || id > sinceNum) rows.push(summary === true ? proxyWebsocketSummary(row) : row);
+    return rows.length < lim;
+  });
+  return rows.reverse();
+}
+
+function proxyWebsocketDetail(id, config = proxyBackendConfig(), sessionId = config.sessionId) {
+  const wanted = String(id || '');
+  if (!wanted) return null;
+  let match = null;
+  scanWebsocketEventsReverse(config, row => {
+    if (!matchesSession(row, sessionId) || String(row.id) !== wanted) return true;
+    match = row;
+    return false;
+  });
+  return match;
 }
 
 function proxyHealth(config = proxyBackendConfig()) {
@@ -313,6 +382,9 @@ module.exports = {
   proxyDetail,
   proxyMetrics,
   watchProxyEvents,
+  proxyWebsocketHistory,
+  proxyWebsocketSummary,
+  proxyWebsocketDetail,
   proxyHealth,
   combineProxyRuntimeHealth,
 };

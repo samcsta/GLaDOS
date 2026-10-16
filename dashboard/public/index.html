@@ -10,10 +10,10 @@
       document.documentElement.dataset.theme = theme === 'classic' ? 'classic' : 'quantum';
     } catch { document.documentElement.dataset.theme = 'quantum'; }
   </script>
-  <link rel="stylesheet" href="/styles.css?v=20261015-clippy-intelligence" />
+  <link rel="stylesheet" href="/styles.css?v=20261015-herbie-clippy" />
   <link rel="stylesheet" href="/chat-alternate.css?v=20261015-direct-agents" />
 </head>
-<body>
+<body class="events-collapsed">
   <header class="topbar">
     <div class="brand">
       GLaDOS Ops
@@ -114,7 +114,7 @@
     <div class="events-label">
       <span>LIVE EVENTS</span>
       <span class="events-label-actions">
-        <button id="events-collapse" class="events-clear-btn" title="Collapse live events">Collapse</button>
+        <button id="events-collapse" class="events-clear-btn" title="Expand live events" aria-controls="events" aria-expanded="false">Expand</button>
         <button id="events-clear" class="events-clear-btn" title="Clear the live events feed (client-side only)">Clear</button>
       </span>
     </div>
@@ -146,6 +146,7 @@
   <script src="/vendor/dompurify/purify.min.js"></script>
   <script src="/vendor/xterm/lib/xterm.js"></script>
   <script src="/vendor/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
-  <script src="/app.js?v=20261015-clippy-intelligence"></script>
+  <script src="/proxy-workspace.js?v=20261016-session-proxy"></script>
+  <script src="/app.js?v=20261015-herbie-clippy"></script>
 </body>
 </html>

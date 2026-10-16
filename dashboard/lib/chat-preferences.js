@@ -5,6 +5,10 @@ const path = require('node:path');
 const EFFORT_LEVELS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
 const PACKAGE_EFFORT_LEVELS = Object.freeze(['none', 'minimal', ...EFFORT_LEVELS]);
 const DEFAULT_EFFORT = 'high';
+const DEFAULT_TEAM_ID = 'glados';
+const TEAM_ID = /^(?:glados|pkg-[a-z][a-z0-9]*(?:-[a-z0-9]+)*--[a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/;
+
+function validDefaultTeamId(value) { return typeof value === 'string' && TEAM_ID.test(value); }
 
 function preferencesFile(env = process.env) {
   const runtimeDir = path.resolve(env.GLADOS_RUNTIME_DIR || path.join(os.homedir(), '.glados'));
@@ -59,6 +63,7 @@ function readChatPreferences(env = process.env) {
     effortRevisions,
     autoCompact: stored?.autoCompact !== false,
     operatorName: normalizeOperatorName(stored?.operatorName),
+    defaultTeamId: validDefaultTeamId(stored?.defaultTeamId) ? stored.defaultTeamId : DEFAULT_TEAM_ID,
     updatedAt: typeof stored?.updatedAt === 'string' ? stored.updatedAt : null,
     file,
   };
@@ -72,12 +77,14 @@ function effortForAgent(agentId, env = process.env, fallback = DEFAULT_EFFORT, p
 
 function writeChatPreferences(input = {}, env = process.env) {
   const prior = readChatPreferences(env);
+  if (input.defaultTeamId !== undefined && !validDefaultTeamId(input.defaultTeamId)) throw new Error('A valid agentic team identity is required');
   const next = {
     version: 2,
     efforts: { ...prior.efforts },
     effortRevisions: { ...prior.effortRevisions },
     autoCompact: input.autoCompact === undefined ? prior.autoCompact : input.autoCompact !== false,
     operatorName: input.operatorName === undefined ? prior.operatorName : normalizeOperatorName(input.operatorName),
+    defaultTeamId: input.defaultTeamId === undefined ? prior.defaultTeamId : input.defaultTeamId,
     updatedAt: new Date().toISOString(),
   };
   if (input.agentId !== undefined || input.effort !== undefined) {
@@ -101,15 +108,26 @@ function writeChatPreferences(input = {}, env = process.env) {
   return readChatPreferences(env);
 }
 
+function defaultTeamPreference(teams = [], env = process.env) {
+  const { defaultTeamId } = readChatPreferences(env);
+  const availableTeams = teams.filter(team => validDefaultTeamId(team?.id) && team.kind !== 'agent' && team.available !== false)
+    .map(team => ({ id: team.id, name: team.name || team.id, available: true }));
+  const fallback = !availableTeams.some(team => team.id === defaultTeamId);
+  return { defaultTeamId, effectiveTeamId: fallback ? DEFAULT_TEAM_ID : defaultTeamId, fallback, teams: availableTeams };
+}
+
 module.exports = {
   DEFAULT_EFFORT,
+  DEFAULT_TEAM_ID,
   EFFORT_LEVELS,
   PACKAGE_EFFORT_LEVELS,
+  defaultTeamPreference,
   effortForAgent,
   normalizeEffort,
   normalizeOperatorName,
   operatorInitials,
   preferencesFile,
   readChatPreferences,
+  validDefaultTeamId,
   writeChatPreferences,
 };

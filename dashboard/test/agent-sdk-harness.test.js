@@ -14,6 +14,7 @@ const {
   agentEnabled,
   buildSdkEnv,
   buildAgentSdkOptions,
+  browserCdpPort,
   createWindowsSdkProcessSpawner,
   buildAgentDefinitions,
   MCP_SERVER_TOOLS,
@@ -543,6 +544,47 @@ test('chat turns send screenshots as native SDK image blocks', async () => {
   assert.equal('session_id' in messages[0], false);
 });
 
+test('managed browser MCP keeps browser identity lazy and its capability out of shell and unrelated MCP environments', t => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-managed-browser-harness-'));
+  t.after(() => fs.rmSync(runtimeDir, { recursive: true, force: true }));
+  const env = baseTestEnv({
+    GLADOS_RUNTIME_DIR: runtimeDir, GLADOS_BROWSER_MCP: '1', GLADOS_SESSION_ID: 'managed-session',
+    GLADOS_BROWSER_MANAGER_URL: 'http://127.0.0.1:30100', GLADOS_BROWSER_MANAGER_TOKEN: 'test-manager-capability',
+    GLADOS_PROXY_URL: 'http://127.0.0.1:30101',
+  });
+  const options = buildAgentSdkOptions('webapp-recon', { env });
+  const browser = options.mcpServers[browserServerName('webapp-recon')];
+  assert.ok(browser.args[0].endsWith('/proxy/assessment-browser-mcp.js'));
+  assert.equal(browser.env.GLADOS_BROWSER_AGENT_ID, 'webapp-recon');
+  assert.equal(browser.env.GLADOS_SESSION_ID, 'managed-session');
+  assert.equal(browser.env.GLADOS_BROWSER_MANAGER_TOKEN, 'test-manager-capability');
+  assert.equal(options.mcpServers.blackboard.env.GLADOS_BROWSER_MANAGER_TOKEN, undefined);
+  assert.equal(options.mcpServers.watchdog.env.GLADOS_BROWSER_MANAGER_TOKEN, undefined);
+  assert.equal(options.env.GLADOS_BROWSER_MANAGER_TOKEN, undefined);
+  assert.equal(options.env.GLADOS_BROWSER_MANAGER_URL, undefined);
+  assert.equal(typeof options.spawnClaudeCodeProcess, 'function', 'secret MCP config goes through an owner-only file');
+  const config = JSON.parse(fs.readFileSync(browser.args[browser.args.indexOf('--config') + 1], 'utf8'));
+  assert.deepEqual(config.browser, { browserName: 'chromium', isolated: false });
+  assert.equal(JSON.stringify(config).includes('test-manager-capability'), false);
+  const { assessmentBrowserPaths } = require('../lib/proxy/assessment-browser');
+  const manifest = assessmentBrowserPaths('managed-session', 'webapp-recon', env).manifest;
+  assert.ok(options.systemPrompt.includes(manifest));
+  assert.match(options.systemPrompt, /first call browser_snapshot/);
+  assert.equal(browserCdpPort('webapp-recon', env), null, 'an unstarted managed browser must not invent a port');
+  fs.mkdirSync(path.dirname(manifest), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(manifest, JSON.stringify({ version: 1, sessionId: 'managed-session', agentId: 'webapp-recon',
+    status: 'running', managerPid: process.pid, cdpPort: 43521, cdpEndpoint: 'http://127.0.0.1:43521' }), { mode: 0o600 });
+  assert.equal(browserCdpPort('webapp-recon', env), 43521);
+  assert.equal(browserCdpPort('webapp-vuln', env), null);
+  assert.equal(browserCdpPort('webapp-recon', { ...env, GLADOS_SESSION_ID: 'other-session' }), null);
+
+  const custom = buildAgentSdkOptions('webapp-recon', { env: { ...env, GLADOS_BROWSER_MCP_COMMAND: 'custom-playwright' } });
+  const customBrowser = custom.mcpServers[browserServerName('webapp-recon')];
+  assert.equal(customBrowser.command, 'custom-playwright');
+  assert.equal(customBrowser.env.GLADOS_BROWSER_MANAGER_TOKEN, undefined);
+  assert.match(custom.systemPrompt, /custom browser MCP configuration uses its own browser/);
+});
+
 test('optional browser MCP mounts only when enabled and uses the active GLaDOS proxy', () => {
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glados-browser-mcp-'));
   const serverName = browserServerName('webapp-recon');
@@ -575,7 +617,7 @@ test('optional browser MCP mounts only when enabled and uses the active GLaDOS p
   assert.equal(browserConfig.browser.launchOptions.proxy.server, 'http://127.0.0.1:19090');
   assert.ok(browserConfig.browser.launchOptions.args.includes('--remote-debugging-address=127.0.0.1'));
   assert.equal(browserConfig.browser.launchOptions.args.some(arg => /^--remote-debugging-port=19\d{3}$/.test(arg)), true);
-  assert.equal(browserConfig.browser.contextOptions.ignoreHTTPSErrors, true);
+  assert.equal(browserConfig.browser.contextOptions.ignoreHTTPSErrors, false);
   assert.equal(browserConfig.browser.contextOptions.extraHTTPHeaders['X-GLaDOS-Agent'], 'webapp-recon');
   assert.equal(browserConfig.browser.contextOptions.extraHTTPHeaders['X-GLaDOS-Transport'], 'browser-mcp');
   assert.equal(browserConfig.outputDir, path.join(runtimeDir, 'investigations'));

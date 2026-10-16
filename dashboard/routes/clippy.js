@@ -17,6 +17,12 @@ function createClippyRouter({ service = createClippyService(), agentInfo = () =>
     } finally { clearTimeout(deadline); res.off('close', close); }
   };
   router.get('/status', handle(async (_req, signal) => ({ ...await service.status({ signal }), ...await agentInfo() })));
+  router.get('/leads', handle(req => service.leads(req.query)));
+  router.post('/leads/search', express.json({ limit: '8kb' }), handle(req => service.searchLeads(req.body || {})));
+  router.post('/leads/from-sources', express.json({ limit: '16kb' }), handle(req => service.leadsFromSources(req.body || {})));
+  router.post('/leads/cancel', handle(() => service.cancelLeadSearch()));
+  router.post('/leads/:id/save', express.json({ limit: '8kb' }), handle(req => service.saveLead(req.params.id, req.body || {})));
+  router.post('/leads/:id/coverage', express.json({ limit: '8kb' }), handle(req => service.verifyLead(req.params.id, req.body || {})));
   router.get('/findings', handle((req, signal) => service.findings({ ...req.query, signal })));
   router.get('/findings/:id', handle((req, signal) => service.finding({ id: req.params.id, signal })));
   router.get('/index', handle(() => service.indexStatus()));

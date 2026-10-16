@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { READ_TOOLS: CLIPPY_READ_TOOLS } = require('./secrets/clippy-mcp');
 
 const SCHEMA_VERSION = 1;
 const MAX_PACKAGE_BYTES = 5 * 1024 * 1024;
@@ -12,12 +13,27 @@ const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z
 const EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const RESERVED_FILES = new Set(['agents.md', 'tools.md', 'agent.json', 'package.json']);
+const LEGACY_CLIPPY_TOOLS = ['search', 'read', 'list_repos', 'list_files', 'projects_search', 'cross_search'].map(name => `mcp__clippy__${name}`);
 // These are trusted integration policy, never fields accepted from an uploaded
 // manifest. Editing Clippy's behavior does not grant new runtime capabilities.
 const EDITABLE_INTEGRATIONS = {
   'clippy-intel': {
     source: 'clippy-intel.glados-agent.json', agentId: 'clippy', connectors: ['clippy'],
-    tools: ['search', 'read', 'list_repos', 'list_files', 'projects_search', 'cross_search'].map(name => `mcp__clippy__${name}`),
+    tools: [...CLIPPY_READ_TOOLS].map(name => `mcp__clippy__${name}`),
+  },
+  herbie: {
+    source: 'herbie.glados-agent.json',
+    agentIds: ['coordinator', 'packet-analysis', 'mechanic', 'pain', 'panic', 'security', 'red-teamer', 'dns-specialist', 'password-auditor', 'planner', 'researcher', 'coder', 'devops', 'reviewer'],
+    teamIds: ['herbie-team'], connectors: [],
+    tools: ['Read', 'Glob', 'Grep', 'Bash', 'Write', 'Edit', 'WebSearch'],
+    agentTools: {
+      coordinator: ['Read', 'Glob', 'Grep'],
+      'packet-analysis': ['Read', 'Glob', 'Grep', 'Bash'],
+      'dns-specialist': ['Read', 'Glob', 'Grep', 'Bash'],
+      researcher: ['Read', 'Glob', 'Grep', 'WebSearch'],
+      coder: ['Read', 'Glob', 'Grep', 'Bash', 'Write', 'Edit'],
+      devops: ['Read', 'Glob', 'Grep', 'Bash', 'Write', 'Edit'],
+    },
   },
 };
 
@@ -401,8 +417,10 @@ function createAgentPackageStore({ runtimeDir = process.env.GLADOS_RUNTIME_DIR |
       editableIntegration: Boolean(editablePolicy),
       ...(editablePolicy ? { integrationCapabilities: {
         tools: [...editablePolicy.tools], connectors: [...editablePolicy.connectors],
+        ...(editablePolicy.agentTools ? { agentTools: editablePolicy.agentTools, defaultAgentTools: ['Read', 'Glob', 'Grep'] } : {}),
       } } : {}),
       managedSource: record.managedSource || null,
+      optIn: record.optIn === true,
       createdAt: record.createdAt, updatedAt: record.updatedAt,
       manifest, agentCount: manifest?.agents.length || 0, teamCount: manifest?.teams.length || 0,
       versions, revisions: versions,
@@ -432,7 +450,7 @@ function createAgentPackageStore({ runtimeDir = process.env.GLADOS_RUNTIME_DIR |
       willStage: !!record,
     };
   }
-  function persist(manifest, { source, record, activate = false, expectedRevision, managedSource, disabledByDefault = false, packageEnabled } = {}) {
+  function persist(manifest, { source, record, activate = false, expectedRevision, managedSource, disabledByDefault = false, packageEnabled, optIn } = {}) {
     const index = readIndex();
     const existing = index.packages.find(item => item.id === manifest.id);
     if (record && !existing) missing('agent package no longer exists');
@@ -442,6 +460,7 @@ function createAgentPackageStore({ runtimeDir = process.env.GLADOS_RUNTIME_DIR |
     const current = existing || { id: manifest.id, source, enabled: !disabledByDefault, archived: false, active: null, revisions: [], createdAt: now, updatedAt: now };
     if (managedSource) { current.managedIntegration = true; current.managedSource = managedSource; }
     if (typeof packageEnabled === 'boolean') current.enabled = packageEnabled;
+    if (typeof optIn === 'boolean') current.optIn = optIn;
     writeFile(root, revisionFile(manifest.id, manifest.version, revision), `${JSON.stringify(manifest, null, 2)}\n`, { immutable: true });
     if (!current.revisions.some(item => item.revision === revision)) current.revisions.push({ version: manifest.version, revision, source, createdAt: now });
     if (!existing || activate) {
@@ -461,15 +480,34 @@ function createAgentPackageStore({ runtimeDir = process.env.GLADOS_RUNTIME_DIR |
     const manifest = prepare(input, options);
     const existing = readIndex().packages.find(record => record.id === manifest.id);
     if (existing && !existing.managedIntegration) conflict('A user package already uses this integration identity. Choose a distinct identity in the source package.');
+    const managedSource = path.basename(text(options.sourcePath || `${manifest.id}.glados-agent.json`, 'integration source', { required: true, max: 4096 }));
+    const policy = existing && editableIntegrationPolicy(existing);
+    const previous = existing ? readManifest(existing) : null;
+    const previousAgent = previous?.agents.find(agent => agent.id === policy?.agentId);
+    // The original integration accidentally exposed only six knowledge tools.
+    // Upgrade that exact default set, even after a prompt/model edit, while
+    // respecting an operator's deliberately narrower tool selection. Preserve
+    // all other fields, activation state, history, and archived status.
+    if (policy && managedSource === policy.source && previousAgent
+      && previousAgent.tools.length === LEGACY_CLIPPY_TOOLS.length
+      && LEGACY_CLIPPY_TOOLS.every(tool => previousAgent.tools.includes(tool))) {
+      previousAgent.tools = [...policy.tools];
+      const source = existing.revisions.find(item => item.revision === existing.active?.revision)?.source || 'integrated';
+      persist(previous, { source, record: existing, activate: true, expectedRevision: existing.active.revision, managedSource });
+      const index = readIndex(); const record = find(index, manifest.id);
+      record.archived = existing.archived;
+      const sourceHash = sha(JSON.stringify(manifest));
+      record.integrationSources = [...(record.integrationSources || []), { sourceHash, version: manifest.version, revision: record.active.revision, managedSource, installedAt: new Date().toISOString() }];
+      writeIndex(index);
+      return view(record);
+    }
     // Once the operator edits this integration, it is their active definition.
     // App startup/build source seeding must neither overwrite it nor keep
     // offering old defaults as newly staged revisions.
-    if (existing && editableIntegrationPolicy(existing)
+    if (existing && policy
       && existing.revisions.find(item => item.revision === existing.active?.revision)?.source === 'custom') return view(existing);
     const sourceHash = sha(JSON.stringify(manifest));
     if (existing?.integrationSources?.some(item => item.sourceHash === sourceHash)) return view(existing);
-    const managedSource = path.basename(text(options.sourcePath || `${manifest.id}.glados-agent.json`, 'integration source', { required: true, max: 4096 }));
-    const previous = existing ? readManifest(existing) : null;
     manifest.agents = manifest.agents.map(agent => ({ ...agent, enabled: previous?.agents.find(item => item.id === agent.id)?.enabled ?? agent.enabled }));
     manifest.teams = manifest.teams.map(team => ({ ...team, enabled: previous?.teams.find(item => item.id === team.id)?.enabled ?? false }));
     const result = persist(manifest, { source: 'integrated', managedSource, disabledByDefault: true });
@@ -484,6 +522,27 @@ function createAgentPackageStore({ runtimeDir = process.env.GLADOS_RUNTIME_DIR |
     if (readIndex().packages.some(item => item.id === manifest.id)) conflict(`package ${manifest.id} already exists; choose another identity or edit its current revision`);
     return persist(manifest, { source: 'custom' });
   }
+  // An explicit catalog installation activates a complete team in one index
+  // write. Dependencies are checked by the caller before entering this method.
+  // Recovering an archived integration uses its last active operator revision.
+  function installOptInIntegration(input, options = {}) {
+    const sourceManifest = prepare(input, options);
+    const existing = readIndex().packages.find(record => record.id === sourceManifest.id);
+    const managedSource = path.basename(text(options.sourcePath || `${sourceManifest.id}.glados-agent.json`, 'integration source', { required: true, max: 4096 }));
+    if (existing) {
+      if (!existing.managedIntegration || existing.managedSource !== managedSource) conflict('A different package already uses this integration identity');
+      assertRevision(existing, options.expectedRevision);
+    }
+    const manifest = existing ? readManifest(existing) : sourceManifest;
+    const team = manifest.teams.find(item => item.id === options.teamId);
+    if (!team) missing('This integration does not contain its expected team');
+    team.enabled = true;
+    const coordinator = manifest.agents.find(agent => agent.id === team.coordinator);
+    if (coordinator) coordinator.enabled = true;
+    const source = existing?.revisions.find(item => item.revision === existing.active?.revision)?.source || 'integrated';
+    return persist(manifest, { source, ...(existing ? { record: existing, expectedRevision: options.expectedRevision } : {}),
+      activate: true, managedSource, packageEnabled: true, optIn: true });
+  }
   function save(packageId, input, options = {}) {
     const record = find(readIndex(), packageId);
     assertRevision(record, options.expectedRevision);
@@ -491,9 +550,18 @@ function createAgentPackageStore({ runtimeDir = process.env.GLADOS_RUNTIME_DIR |
     if (manifest.id !== packageId) invalid('editing a package cannot change its stable identity');
     const policy = editableIntegrationPolicy(record);
     if (policy) {
-      if (manifest.agents.length !== 1 || manifest.agents[0].id !== policy.agentId || manifest.teams.length) invalid('Editing this integration must preserve its Clippy Agent identity and single-agent structure');
-      const agent = manifest.agents[0];
-      if (agent.tools.some(tool => !policy.tools.includes(tool)) || agent.connectors.some(connector => !policy.connectors.includes(connector))) invalid('Clippy Agent capabilities are limited to its read-only Clippy tools and connector');
+      if (policy.agentIds) {
+        if (manifest.agents.length !== policy.agentIds.length || manifest.agents.some(agent => !policy.agentIds.includes(agent.id))
+          || manifest.teams.length !== policy.teamIds.length || manifest.teams.some(team => !policy.teamIds.includes(team.id))) invalid('Editing this integration must preserve its agent and team identities');
+        for (const agent of manifest.agents) {
+          const allowed = policy.agentTools[agent.id] || ['Read', 'Glob', 'Grep'];
+          if (agent.tools.some(tool => !allowed.includes(tool)) || agent.connectors.some(connector => !policy.connectors.includes(connector))) invalid('Herbie capabilities must stay within the supported tools for this role');
+        }
+      } else {
+        if (manifest.agents.length !== 1 || manifest.agents[0].id !== policy.agentId || manifest.teams.length) invalid('Editing this integration must preserve its Clippy Agent identity and single-agent structure');
+        const agent = manifest.agents[0];
+        if (agent.tools.some(tool => !policy.tools.includes(tool)) || agent.connectors.some(connector => !policy.connectors.includes(connector))) invalid('Clippy Agent capabilities are limited to its read-only Clippy tools and connector');
+      }
     }
     return persist(manifest, { source: 'custom', record, activate: true, expectedRevision: options.expectedRevision });
   }
@@ -541,7 +609,8 @@ function createAgentPackageStore({ runtimeDir = process.env.GLADOS_RUNTIME_DIR |
     const team = manifest.teams.find(item => item.id === localId);
     if (!team) missing('package team not found');
     team.enabled = enabled;
-    return persist(manifest, { source: record.managedIntegration ? 'integrated' : 'custom', record, activate: true,
+    const activeSource = record.revisions.find(item => item.revision === record.active?.revision)?.source;
+    return persist(manifest, { source: record.managedIntegration && activeSource !== 'custom' ? 'integrated' : 'custom', record, activate: true,
       expectedRevision: options.expectedRevision, ...(enabled ? { packageEnabled: true } : {}) });
   }
   function remove(packageId, options = {}) {
@@ -635,7 +704,7 @@ function createAgentPackageStore({ runtimeDir = process.env.GLADOS_RUNTIME_DIR |
     root, indexFile,
     list: ({ includeArchived = false } = {}) => readIndex().packages.filter(record => includeArchived || !record.archived).map(view),
     get: (packageId, options = {}) => view(find(readIndex(), packageId), options),
-    preview, create, import: importPackage, importPackage, installIntegration, importIntegration: installIntegration, save, activate, setEnabled, setEntryEnabled, setTeamEnabled, remove, removeEntry, export: exportPackage, exportPackage, runtimeEntries,
+    preview, create, import: importPackage, importPackage, installIntegration, installOptInIntegration, importIntegration: installIntegration, save, activate, setEnabled, setEntryEnabled, setTeamEnabled, remove, removeEntry, export: exportPackage, exportPackage, runtimeEntries,
   };
 }
 

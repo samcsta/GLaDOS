@@ -1,12 +1,14 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { GLADOS_RUNTIME_DIR, GLADOS_AGENT_WORKSPACES, BLACKBOARD_DB, WATCHDOG_DB, MODEL_OVERRIDES_JSON } = require('../config');
 const { DashboardTranscriptStore } = require('../transcript-store');
 const { loadLlmAuthToken } = require('../secrets/llm-secrets');
 const { CLIPPY_URL, READ_TOOLS: CLIPPY_READ_TOOLS, DENIED_TOOLS: CLIPPY_DENIED_TOOLS, loadClippyToken } = require('../secrets/clippy-mcp');
+const { CLIPPY_AGENT_ID, CLIPPY_AGENT_SOURCE_PATH, CLIPPY_LEAD_POLICY } = require('../clippy-agent');
+const { applyTsharkEnvironment, discoverTsharkSync } = require('../team-tool-installer');
 const { fetchLiteLlmModels } = require('../litellm-models');
 const { isFullAccessEnabled } = require('../full-access');
 const { normalizeEffort, effortForAgent } = require('../chat-preferences');
@@ -27,6 +29,11 @@ const REGISTRY_PATH = path.join(REPO_ROOT, 'templates', 'agent-registry.json');
 const TEMPLATE_AGENT_ROOT = path.join(REPO_ROOT, 'templates', 'agents', 'default');
 const PROMPT_FILE_ORDER = ['IDENTITY.md', 'SOUL.md', 'RUNBOOK.md', 'TOOLS.md', 'USER.md', 'AGENTS.md'];
 const TASK_TOOL_NAMES = new Set(['Task', 'Agent']);
+const AGENT_COMMUNICATION_CONTRACT = [
+  '- Progress communication (authoritative for every agent and team): before meaningful sustained work, send a brief user-visible update stating the intended action and purpose. A question that can be answered immediately needs no preamble. During work, send concise progress when evidence, a decision, or a constraint materially changes, and roughly every 45–60 seconds during longer tasks when able to emit text. Explain the relevant observation, its implication, and the next step; do not expose private chain-of-thought, scratch work, or hidden reasoning.',
+  '- Keep progress useful: use one to three plain-language sentences. Do not substitute repeated tool names, raw tool output, canned filler, or silent tool calls for a meaningful update. Do not do extra work, make extra calls, delay completion, or keep a finished task open just to produce progress. A blocking call may prevent an update; resume communication when it returns.',
+  '- Delegated work uses the same communication standard in its visible transcript. Coordinators keep the operator informed about meaningful overall progress and summarize important worker findings or changes without repeating every worker message. When worker prose is intentionally kept in an internal audit stream, the coordinator supplies the user-facing summary. Progress is intermediate communication; deliver the complete requested result in the final response.',
+].join('\n');
 const SECURITY_REVIEW_SPECIALIST_ROLES = new Set([
   'authorization-access-control',
   'data-flow-injection',
@@ -155,6 +162,7 @@ function applyLocalAgentConfig(row, { workspaceRoot = agentWorkspaceRoot(), mode
     id: row.id,
     name: meta.name || row.name,
     model: bareModelAlias(overrideModel || meta.model || row.model, { fallback: row.model || DEFAULT_BARE_MODEL }),
+    effort: effortForAgent(row.id, env, meta.effort ?? row.effort),
     enabled: meta.enabled !== undefined ? meta.enabled !== false : row.enabled,
   };
 }
@@ -267,7 +275,11 @@ function mountedToolsForAgent(agentId, policy = loadPolicy(), options = {}) {
       tools.push(`mcp__clippy__${name}`);
     }
   }
-  const expanded = expandMcpTools(expandTaskToolAliases(tools));
+  const expandedTools = expandMcpTools(expandTaskToolAliases(tools));
+  // An operator may narrow a built-in role’s tools. Missing preferences preserve
+  // the role policy exactly; these preferences never grant additional tools.
+  const disabledTools = new Set(!options.ignoreAgentToolRestrictions && Array.isArray(row?.disabledTools) ? row.disabledTools : []);
+  const expanded = expandedTools.filter(tool => !disabledTools.has(tool));
   if (env.GLADOS_SECURITY_REVIEW !== '1') return expanded;
   return expanded.filter(tool => tool !== 'Bash' && tool !== 'NotebookEdit'
     && !tool.startsWith('mcp__glados-ops__') && !tool.startsWith('mcp__browser-'));
@@ -1126,28 +1138,45 @@ function parseMcpArgs(value) {
   return raw.split(/\s+/).filter(Boolean);
 }
 
+function managedBrowserMcp(env = process.env) {
+  const custom = env.GLADOS_BROWSER_MCP_COMMAND || parseMcpArgs(env.GLADOS_BROWSER_MCP_ARGS_JSON || env.GLADOS_BROWSER_MCP_ARGS);
+  return !custom && !!(env.GLADOS_BROWSER_MANAGER_URL || env.GLADOS_BROWSER_MANAGER_TOKEN);
+}
+
+function browserCaPinArguments(env = process.env) {
+  try {
+    const { operatorCaSpki } = require('../proxy/assessment-browser');
+    return [`--ignore-certificate-errors-spki-list=${operatorCaSpki(env)}`];
+  } catch { return []; }
+}
+
 function writeBrowserMcpConfig(agentId, env = process.env) {
   const runtimeDir = path.resolve(env.GLADOS_RUNTIME_DIR || GLADOS_RUNTIME_DIR);
-  const dir = path.join(runtimeDir, 'browser-mcp');
+  const sessionKey = env.GLADOS_SESSION_ID && env.GLADOS_SESSION_ID !== 'legacy'
+    ? createHash('sha256').update(String(env.GLADOS_SESSION_ID)).digest('hex') : null;
+  const dir = sessionKey ? path.join(runtimeDir, 'browser-mcp', 'sessions', sessionKey) : path.join(runtimeDir, 'browser-mcp');
   const outputDir = path.resolve(env.GLADOS_INVESTIGATIONS_DIR || path.join(runtimeDir, 'investigations'));
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   fs.chmodSync(dir, 0o700);
   fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(outputDir, 0o700);
-  const cdpPort = browserCdpPort(agentId);
+  const managed = managedBrowserMcp(env);
+  const cdpPort = managed ? null : browserCdpPort(agentId, env);
   const file = path.join(dir, `${String(agentId).replace(/[^a-z0-9._-]/gi, '-')}.json`);
   const config = {
     browser: {
+      browserName: 'chromium',
       isolated: true,
       launchOptions: {
         proxy: { server: proxyUrlFromEnv(env) },
         args: [
           '--remote-debugging-address=127.0.0.1',
           `--remote-debugging-port=${cdpPort}`,
+          ...browserCaPinArguments(env),
         ],
       },
       contextOptions: {
-        ignoreHTTPSErrors: true,
+        ignoreHTTPSErrors: false,
         extraHTTPHeaders: {
           'X-GLaDOS-Agent': agentId,
           'X-GLaDOS-Session': env.GLADOS_SESSION_ID || 'legacy',
@@ -1160,6 +1189,11 @@ function writeBrowserMcpConfig(agentId, env = process.env) {
     saveSession: false,
     sharedBrowserContext: false,
   };
+  if (managed) {
+    // The wrapper lazily obtains the dashboard-owned context on the first
+    // browser tool call. Listing tools must not launch every team browser.
+    config.browser = { browserName: 'chromium', isolated: false };
+  }
   const tmp = `${file}.tmp-${process.pid}`;
   fs.writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   fs.chmodSync(tmp, 0o600);
@@ -1168,10 +1202,27 @@ function writeBrowserMcpConfig(agentId, env = process.env) {
   return file;
 }
 
-function browserCdpPort(agentId) {
+const browserCdpAssignments = new Map();
+function browserCdpPort(agentId, env = process.env) {
+  if (managedBrowserMcp(env)) {
+    const { readAssessmentBrowserManifest } = require('../proxy/assessment-browser');
+    return readAssessmentBrowserManifest(env.GLADOS_SESSION_ID, agentId, env)?.cdpPort || null;
+  }
+  const sessionId = env.GLADOS_SESSION_ID && env.GLADOS_SESSION_ID !== 'legacy' ? String(env.GLADOS_SESSION_ID) : '';
+  const key = sessionId ? `${sessionId}\0${agentId}` : String(agentId || 'browser');
+  if (browserCdpAssignments.has(key)) return browserCdpAssignments.get(key);
   let hash = 0;
-  for (const char of String(agentId || 'browser')) hash = ((hash * 33) + char.charCodeAt(0)) >>> 0;
-  return 19000 + (hash % 1000);
+  for (const char of key) hash = ((hash * 33) + char.charCodeAt(0)) >>> 0;
+  const base = sessionId ? 21000 : 19000;
+  const span = sessionId ? 18000 : 1000;
+  let port = base + (hash % span);
+  const assigned = new Set(browserCdpAssignments.values());
+  for (let attempts = 0; assigned.has(port); attempts++) {
+    if (attempts >= span) throw new Error('No browser debug ports available for this session');
+    port = base + ((port - base + 1) % span);
+  }
+  browserCdpAssignments.set(key, port);
+  return port;
 }
 
 function resolveNodeRuntime(env = process.env) {
@@ -1230,6 +1281,19 @@ function buildMcpServers(env = process.env) {
       if (row.packageCapabilities ? !(row.connectors || []).includes('browser') : !profileCanUseBrowserMcp(policy, profile, row.id)) continue;
       const configFile = writeBrowserMcpConfig(row.id, env);
       const configuredArgs = parseMcpArgs(env.GLADOS_BROWSER_MCP_ARGS_JSON || env.GLADOS_BROWSER_MCP_ARGS);
+      if (managedBrowserMcp(env)) {
+        servers[browserServerName(row.id)] = {
+          type: 'stdio', command: runtime.command,
+          args: [path.join(REPO_ROOT, 'dashboard', 'lib', 'proxy', 'assessment-browser-mcp.js'), '--config', configFile],
+          env: {
+            ...mcpEnv,
+            GLADOS_BROWSER_AGENT_ID: row.id,
+            GLADOS_BROWSER_MANAGER_URL: env.GLADOS_BROWSER_MANAGER_URL,
+            GLADOS_BROWSER_MANAGER_TOKEN: env.GLADOS_BROWSER_MANAGER_TOKEN,
+          },
+        };
+        continue;
+      }
       const args = configuredArgs
         ? [...configuredArgs, '--config', configFile]
         : (useLocalCli
@@ -1388,6 +1452,7 @@ function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, work
     '- If the operator asks what model you are running, answer from the active model above.',
     '- Do not infer current model names from static roster tables, examples, MEMORY.md, or historical workspace files.',
     `- GLaDOS proxy URL for target HTTP(S): ${proxyUrl || proxyUrlFromEnv()}. For shell HTTP, use curl -x this URL -k and add X-GLaDOS-Agent: ${agentId}. Do not use legacy :8080 proxy examples unless the operator explicitly overrides it.`,
+    AGENT_COMMUNICATION_CONTRACT,
   ];
   if (!securityReview && !currentEntry?.packageCapabilities) {
     lines.push('- Task boundaries (authoritative): internally identify the requested deliverable, permitted actions, any operator-specified action/retry/time budget, and a concrete stopping condition before acting. Carry these boundaries into every specialist assignment. Use relevant existing evidence and only the checks needed for this assignment; prompt files are already loaded, so reread them only to resolve a specific missing detail.');
@@ -1407,6 +1472,18 @@ function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, work
       const members = selectedTeam?.coordinatorId === agentId ? selectedTeam.memberIds : currentEntry.teamMembers || [];
       lines.push(`- You coordinate this session team. Dispatch exactly these enabled members using their configured tools/models: ${members.join(', ')}. Use synchronous Agent dispatch with run_in_background=false and omit name so members run as nested subagents. Assigned built-in specialists retain their GLaDOS safety gates; unassigned agents are unavailable.`);
     }
+  }
+  if (currentEntry?.packageId === 'herbie') {
+    let tshark;
+    try { tshark = discoverTsharkSync({ env }); }
+    catch { tshark = { installed: false }; }
+    lines.push(tshark.installed
+      ? `- Herbie offline packet tool: TShark ${tshark.version} at ${JSON.stringify(tshark.path)}. Its directory is included in the SDK PATH and GLADOS_TSHARK_PATH names this exact executable. Roles with Bash may inspect operator-supplied captures with -r; availability does not authorize live capture or network actions.`
+      : '- Herbie packet dependency is unavailable. Do not invent packet analysis or install tools during a task. The operator can repair TShark setup in Agents → Ford RT Agentic Teams. Return the precise missing dependency when a supplied capture requires it.');
+  }
+  if (agentId === CLIPPY_AGENT_ID && currentEntry?.managedIntegration
+    && currentEntry.managedSource === path.basename(CLIPPY_AGENT_SOURCE_PATH)) {
+    lines.push(CLIPPY_LEAD_POLICY);
   }
   if (clippyAvailable && (loadPolicy().clippyMcpTools?.[agentId] || []).length) {
     lines.push('- Clippy MCP provides prior assessment and inventory context. Use its mounted lookup tools only when the operator selected Clippy for this investigation or directly requested a Clippy lookup. In blind runs and proxy smoke tests, do not query Clippy. Treat results as leads with provenance and freshness, not current proof or testing scope. Employee directory lookups require a task-relevant reason. Do not dispatch Clippy assessments or write to its shared stores.');
@@ -1487,7 +1564,13 @@ function buildRuntimeContext(agentId, { model, registryRows = [], proxyUrl, work
     lines.push('- For browser_fill_form, every field must include name, type, target, and value. Use the raw snapshot target reference (for example f3e28), never ref=f3e28, and refresh the browser snapshot after navigation before reusing references.');
     lines.push(`- Browser uploads may read only from ${investigationsDir} or ${path.join(GLADOS_RUNTIME_DIR, 'workspaces')}. Create payload files there, never in /tmp. Click the file input once; while the file chooser modal is open, call browser_file_upload directly and do not click the input again.`);
     lines.push('- Prefer browser_snapshot, browser_find, browser_fill_form, browser_click, and browser_file_upload over browser_run_code_unsafe. For browser_evaluate, pass a valid function string such as () => location.href; page is not a variable there. For browser_run_code_unsafe, browser globals such as URLSearchParams must be created inside page.evaluate, not in the outer Node callback.');
-    lines.push(`- Local credential helper browser bridge: pass cdp_port=${browserCdpPort(agentId)} to glados-ops__local_auth_login or glados-ops__adfs_active_directory_login. The port is loopback-only and unique to this named agent.`);
+    if (managedBrowserMcp(env)) {
+      const { assessmentBrowserPaths } = require('../proxy/assessment-browser');
+      const manifest = assessmentBrowserPaths(env.GLADOS_SESSION_ID, agentId, env).manifest;
+      lines.push(`- The browser MCP controls the same headed assessment browser opened from Proxy for this session and named agent. It retains the operator's tabs and login state between turns. For the local credential helper, first call browser_snapshot to ensure it is running, then Read ${manifest} for its actual cdpPort and pass that value as cdp_port to glados-ops__local_auth_login or glados-ops__adfs_active_directory_login. Never guess a port or reuse one from another session or agent.`);
+    } else {
+      lines.push(`- Local credential helper browser bridge: pass cdp_port=${browserCdpPort(agentId, env)} to glados-ops__local_auth_login or glados-ops__adfs_active_directory_login. The port is loopback-only and unique to this named agent. A custom browser MCP configuration uses its own browser and is not the managed Proxy browser.`);
+    }
     lines.push('- If this turn is a proxy smoke test, perform exactly one low-impact GET through the GLaDOS proxy URL using browser MCP or curl -x; include X-GLaDOS-Agent, report the HTTP status/redirect, then stop. Do not crawl, authenticate, enumerate, or do formal recon.');
     if (agentId === 'webapp-recon') {
       lines.push('- After SSO returns to the target, the first application analysis is the landing-page JavaScript checkpoint. Do not click through navigation before returning its js_handoff to GLaDOS.');
@@ -1598,7 +1681,7 @@ function buildSdkEnv(env = process.env, policy = loadPolicy()) {
     );
   }
   const out = {
-    ...env,
+    ...applyTsharkEnvironment(env),
     ANTHROPIC_BASE_URL: env.ANTHROPIC_BASE_URL || policy.harness?.anthropicBaseUrl || 'https://llmapi.redteamstuff.com',
     ANTHROPIC_AUTH_TOKEN: token,
     CLAUDE_CODE_USE_GATEWAY: '1',
@@ -1621,6 +1704,10 @@ function buildSdkEnv(env = process.env, policy = loadPolicy()) {
   delete out.CLAUDE_CODE_OAUTH_TOKEN;
   delete out.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR;
   delete out.CCR_OAUTH_TOKEN_FILE;
+  // Only the browser wrapper receives this capability. Do not expose it to
+  // unrelated MCP servers or the agent's shell environment.
+  delete out.GLADOS_BROWSER_MANAGER_URL;
+  delete out.GLADOS_BROWSER_MANAGER_TOKEN;
   return out;
 }
 
@@ -1751,11 +1838,17 @@ function buildAgentSdkOptions(agentId, options = {}) {
       ? (policy.harness?.coordinatorMaxTurns ?? 40)
       : (policy.harness?.specialistMaxTurns ?? 100)),
   };
-  const effort = row.packageCapabilities ? packageReasoningEffort(options.effort ?? row.effort) : normalizeEffort(options.effort, null);
-  if (effort !== null && modelSupportsReasoningEffort(model)) sdkOptions.effort = effort;
+  const effort = row.packageCapabilities ? packageReasoningEffort(options.effort ?? row.effort) : normalizeEffort(options.effort ?? row.effort, null);
+  if (effort !== null && modelSupportsReasoningEffort(model)) {
+    // Top-level SDK Options.effort accepts named levels; numeric zero is
+    // dropped by its wrapper. AgentDefinition.effort separately supports zero.
+    if (effort === 0) sdkOptions.thinking = { type: 'disabled' };
+    else sdkOptions.effort = effort;
+  }
   if (options.resumeSessionId) sdkOptions.resume = options.resumeSessionId;
   if (reviewReservations) sdkOptions.gladosReviewReservations = reviewReservations;
-  if ((options.platform || process.platform) === 'win32' || sdkOptions.mcpServers.clippy) {
+  if ((options.platform || process.platform) === 'win32' || sdkOptions.mcpServers.clippy
+    || Object.values(sdkOptions.mcpServers).some(server => server.env?.GLADOS_BROWSER_MANAGER_TOKEN)) {
     sdkOptions.spawnClaudeCodeProcess = createWindowsSdkProcessSpawner({
       runtimeDir: (options.env || process.env).GLADOS_RUNTIME_DIR || GLADOS_RUNTIME_DIR,
     });
@@ -1792,6 +1885,7 @@ function buildAgentDraftSdkOptions(draft = {}, options = {}) {
       ...(draft.deliverables || []).map(value => `- ${String(value)}`),
       '# Test conversation boundary',
       'This is a temporary test of your instructions and response format. You have no tools, connectors, files, or subagents. Explain what information would be needed for unavailable operations; never claim to have performed them.',
+      AGENT_COMMUNICATION_CONTRACT,
     ].filter(Boolean).join('\n\n'),
     tools: [],
     gladosMountedTools: [],
@@ -1811,7 +1905,10 @@ function buildAgentDraftSdkOptions(draft = {}, options = {}) {
     maxTurns: 8,
   };
   const effort = packageReasoningEffort(draft.effort);
-  if (effort !== null && modelSupportsReasoningEffort(model)) sdkOptions.effort = effort;
+  if (effort !== null && modelSupportsReasoningEffort(model)) {
+    if (effort === 0) sdkOptions.thinking = { type: 'disabled' };
+    else sdkOptions.effort = effort;
+  }
   return sdkOptions;
 }
 
@@ -1951,18 +2048,23 @@ function sanitizeToolResultForTranscript(text, toolName, toolInput = {}) {
   return redactCredentialText(text);
 }
 
-function rememberStreamBlockKind(context, ev, kind) {
+function streamBlockKey(runId, index) { return `${runId || 'nosession'}:${index ?? 0}`; }
+
+function rememberStreamBlockKind(context, ev, kind, runId) {
   if (!context.streamBlockKindByIndex) context.streamBlockKindByIndex = new Map();
-  if (ev.index !== undefined && ev.index !== null) context.streamBlockKindByIndex.set(ev.index, kind);
+  context.streamBlockKindByIndex.set(streamBlockKey(runId, ev.index), kind);
 }
 
 function mapSdkMessageToEvents(agentId, message, context = {}) {
   const ts = new Date().toISOString();
   const parentToolUseId = message?.parent_tool_use_id || null;
   const renderAgentId = message?.subagent_type || context.subagentByParentToolUseId?.get(parentToolUseId) || agentId;
+  const streamRunId = parentToolUseId
+    ? `${message?.session_id || 'nosession'}:${parentToolUseId}`
+    : message?.session_id || message?.uuid || undefined;
   const base = {
     agentId: renderAgentId,
-    parentAgentId: renderAgentId === agentId ? null : agentId,
+    parentAgentId: renderAgentId === agentId ? null : context.parentAgentByParentToolUseId?.get(parentToolUseId) || agentId,
     ts,
     sdkType: message?.type,
     sessionId: message?.session_id,
@@ -1973,6 +2075,7 @@ function mapSdkMessageToEvents(agentId, message, context = {}) {
   };
   if (!message) return [];
   if (!context.subagentByParentToolUseId) context.subagentByParentToolUseId = new Map();
+  if (!context.parentAgentByParentToolUseId) context.parentAgentByParentToolUseId = new Map();
   if (!context.toolNameByToolUseId) context.toolNameByToolUseId = new Map();
   if (!context.toolInputByToolUseId) context.toolInputByToolUseId = new Map();
   if (message.subagent_type && parentToolUseId && context.subagentByParentToolUseId) {
@@ -1982,56 +2085,58 @@ function mapSdkMessageToEvents(agentId, message, context = {}) {
   if (message.type === 'stream_event') {
     const ev = message.event || {};
     if (ev.type === 'content_block_start' && ev.content_block?.type === 'text') {
-      rememberStreamBlockKind(context, ev, 'text');
+      rememberStreamBlockKind(context, ev, 'text', streamRunId);
       return [{
         ...base,
         kind: 'text-stream',
         evtType: 'text_start',
-        delta: '',
-        text: '',
-        runId: message.session_id || message.uuid || parentToolUseId || undefined,
+        delta: ev.content_block.text || '',
+        text: ev.content_block.text || '',
+        runId: streamRunId,
         id: message.uuid ? `${message.uuid}:text-start` : undefined,
       }];
     }
     if (ev.type === 'content_block_start' && (ev.content_block?.type === 'thinking' || ev.content_block?.type === 'redacted_thinking')) {
-      rememberStreamBlockKind(context, ev, 'thinking');
+      rememberStreamBlockKind(context, ev, 'thinking', streamRunId);
       return [{
         ...base,
         kind: 'thinking-stream',
         evtType: 'thinking_start',
         delta: '',
         text: '',
-        runId: message.session_id || message.uuid || parentToolUseId || undefined,
+        runId: streamRunId,
         id: message.uuid ? `${message.uuid}:thinking-start` : undefined,
       }];
     }
     if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
-      rememberStreamBlockKind(context, ev, 'text');
+      rememberStreamBlockKind(context, ev, 'text', streamRunId);
       return [{
         ...base,
         kind: 'text-stream',
         evtType: 'text_delta',
         delta: ev.delta.text,
         text: ev.delta.text,
-        runId: message.session_id || message.uuid || undefined,
+        runId: streamRunId,
         id: message.uuid || undefined,
       }];
     }
     if (ev.type === 'content_block_delta' && ev.delta?.type === 'thinking_delta' && ev.delta.thinking) {
-      rememberStreamBlockKind(context, ev, 'thinking');
+      rememberStreamBlockKind(context, ev, 'thinking', streamRunId);
       return [{
         ...base,
         kind: 'thinking-stream',
         evtType: 'thinking_delta',
         delta: ev.delta.thinking,
         text: ev.delta.thinking,
-        runId: message.session_id || message.uuid || undefined,
+        runId: streamRunId,
         id: message.uuid || undefined,
       }];
     }
     if (ev.type === 'content_block_stop') {
-      const streamKind = context.streamBlockKindByIndex?.get(ev.index);
+      const key = streamBlockKey(streamRunId, ev.index);
+      const streamKind = context.streamBlockKindByIndex?.get(key);
       if (!streamKind) return [];
+      context.streamBlockKindByIndex.delete(key);
       const isThinking = streamKind === 'thinking';
       return [{
         ...base,
@@ -2039,7 +2144,7 @@ function mapSdkMessageToEvents(agentId, message, context = {}) {
         evtType: isThinking ? 'thinking_end' : 'text_end',
         delta: '',
         text: '',
-        runId: message.session_id || message.uuid || parentToolUseId || undefined,
+        runId: streamRunId,
         id: message.uuid ? `${message.uuid}:${streamKind}-end` : undefined,
       }];
     }
@@ -2051,7 +2156,10 @@ function mapSdkMessageToEvents(agentId, message, context = {}) {
     return blocks.flatMap(block => {
       if (block.type === 'tool_use') {
         const targetAgentId = isTaskDispatchTool(block.name) ? targetAgentFromTaskInput(block.input || {}) : null;
-        if (targetAgentId && block.id) context.subagentByParentToolUseId.set(block.id, targetAgentId);
+        if (targetAgentId && block.id) {
+          context.subagentByParentToolUseId.set(block.id, targetAgentId);
+          context.parentAgentByParentToolUseId.set(block.id, renderAgentId);
+        }
         if (block.id) context.toolNameByToolUseId.set(block.id, block.name);
         if (block.id) context.toolInputByToolUseId.set(block.id, block.input || {});
         const effectiveInput = normalizeToolInput(block.name, block.input || {}, {
@@ -2099,7 +2207,7 @@ function mapSdkMessageToEvents(agentId, message, context = {}) {
       return [{
         ...base,
         agentId: targetAgentId || base.agentId,
-        parentAgentId: targetAgentId ? agentId : base.parentAgentId,
+        parentAgentId: targetAgentId ? context.parentAgentByParentToolUseId.get(block.tool_use_id) || agentId : base.parentAgentId,
         kind: 'tool-result',
         text,
         toolCallId: block.tool_use_id,
@@ -2157,22 +2265,27 @@ function mapSdkMessageToEvents(agentId, message, context = {}) {
     }
     if (message.subtype === 'task_started' || message.subtype === 'task_progress' || message.subtype === 'task_notification') {
       if (!context.subagentByTaskId) context.subagentByTaskId = new Map();
-      const toolCallId = message.tool_use_id || null;
+      if (!context.toolUseIdByTaskId) context.toolUseIdByTaskId = new Map();
+      const toolCallId = message.tool_use_id || context.toolUseIdByTaskId.get(message.task_id) || null;
       const mappedAgent = message.subagent_type
         || context.subagentByParentToolUseId?.get(toolCallId)
         || context.subagentByTaskId.get(message.task_id)
         || base.agentId;
       if (message.task_id && mappedAgent && message.subtype !== 'task_notification') {
         context.subagentByTaskId.set(message.task_id, mappedAgent);
+        if (toolCallId) context.toolUseIdByTaskId.set(message.task_id, toolCallId);
       }
       const live = message.subtype !== 'task_notification';
       const state = message.subtype === 'task_notification' ? message.status : 'running';
       const reviewWorker = (context.env || process.env).GLADOS_SECURITY_REVIEW === '1' && mappedAgent !== agentId;
-      if (!live && message.task_id) context.subagentByTaskId.delete(message.task_id);
+      if (!live && message.task_id) {
+        context.subagentByTaskId.delete(message.task_id);
+        context.toolUseIdByTaskId.delete(message.task_id);
+      }
       return [{
         ...base,
         agentId: mappedAgent,
-        parentAgentId: mappedAgent === agentId ? null : agentId,
+        parentAgentId: mappedAgent === agentId ? null : context.parentAgentByParentToolUseId.get(toolCallId) || agentId,
         kind: 'liveness',
         text: reviewWorker
           ? live
@@ -2637,6 +2750,8 @@ module.exports = {
   browserServerName,
   browserMountForAgent,
   writeBrowserMcpConfig,
+  browserCdpPort,
+  managedBrowserMcp,
   buildSdkEnv,
   resolveNodeRuntime,
   assembleAgentPrompt,

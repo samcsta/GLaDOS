@@ -360,7 +360,10 @@ test('v4 long-run workspace bounds transcript memory and retries tab reads', () 
   assert.match(app, /function pruneTranscriptEvents\(rec\)/);
   assert.match(app, /fetchJson\('\/api\/reports\/tree', \{ timeoutMs: 30000, retries: 1 \}\)/);
   assert.match(app, /fetchJson\(withSession\('\/api\/plans' \+ q\), \{ timeoutMs: 20000, retries: 1 \}\)/);
-  assert.match(app, /fetchJson\('\/api\/proxy\/history\?limit=500', \{ timeoutMs: 20000, retries: 1 \}\)/);
+  const proxy = fs.readFileSync(path.join(ROOT, 'dashboard/public/proxy-workspace.js'), 'utf8');
+  assert.match(proxy, /AbortSignal\.timeout\(20000\)/);
+  assert.match(proxy, /maxRows:5000/);
+  assert.match(proxy, /session_id:sessionId/);
   assert.match(server, /The overview represents the most recently started engagement/);
   assert.match(server, /blackboardReset: false/);
   assert.match(server, /onApproved: queueApprovedPlanExecution/);

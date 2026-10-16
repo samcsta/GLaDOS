@@ -21,6 +21,7 @@ function renderer(fetchImpl) {
     clearPlanClientState() {},
     markSessionSeen() {},
     loadAgents: async () => {},
+    loadDefaultTeamPreference: async () => ({ effectiveTeamId: 'glados' }),
     loadSecurityReviews: async () => {},
     closeSessionStreams() { calls.push('closeStreams'); context.state.transcripts.clear(); context.state.active.clear(); },
     ensureTranscript(tabId) { calls.push(`subscribe:${tabId}`); },
@@ -56,6 +57,51 @@ test('New session opens a blank page without creating a record or stopping backg
   assert.equal(context.state.currentSessionId, null);
   assert.equal(context.state.investigationSessions[0].runningCount, 1);
   assert.deepEqual(context.calls, ['closeStreams', 'openChat', 'lobby']);
+});
+
+test('new chats choose the saved default while explicit team launches override it', async () => {
+  const context = renderer(async () => { throw new Error('No session is created before the first message'); });
+  let preferenceReads = 0;
+  context.loadDefaultTeamPreference = async () => { preferenceReads++; return { effectiveTeamId: 'pkg-review--crew' }; };
+  context.state.currentSessionId = 'existing';
+  context.state.investigationSessions = [{ id: 'existing', teamId: 'glados' }];
+  await context.createInvestigationSession();
+  assert.equal(context.state.currentSessionId, null);
+  assert.equal(context.state.currentTeamId, 'pkg-review--crew');
+  assert.equal(context.state.investigationSessions[0].teamId, 'glados');
+  assert.equal(preferenceReads, 1);
+  await context.createInvestigationSession({ teamId: 'glados' });
+  assert.equal(context.state.currentTeamId, 'glados');
+  assert.equal(preferenceReads, 1, 'explicit team launches do not read or replace the saved choice');
+});
+
+test('reading a changed default never reassigns an existing chat or an explicitly chosen draft', async () => {
+  const helper = app.slice(app.indexOf('async function loadDefaultTeamPreference()'), app.indexOf('function activeTeam()'));
+  const context = vm.createContext({ state: { currentSessionId: 'existing', currentTeamId: 'glados' }, fetchJson: async () => ({ defaultTeamId: 'pkg-review--crew', effectiveTeamId: 'pkg-review--crew' }) });
+  vm.runInContext(helper, context);
+  await context.loadDefaultTeamPreference();
+  assert.equal(context.state.currentTeamId, 'glados');
+  assert.equal(context.state.currentSessionId, 'existing');
+  assert.equal(context.state.defaultTeamPreference.effectiveTeamId, 'pkg-review--crew');
+  context.state.currentSessionId = null;
+  context.state.currentTeamId = 'agent:chosen-specialist';
+  await context.loadDefaultTeamPreference();
+  assert.equal(context.state.currentTeamId, 'agent:chosen-specialist');
+});
+
+test('a late default lookup cannot replace a session opened while it was loading', async () => {
+  const context = renderer(async () => { throw new Error('Unexpected session mutation'); });
+  let release;
+  context.loadDefaultTeamPreference = () => new Promise(resolve => { release = resolve; });
+  const pending = context.createInvestigationSession();
+  context.state.sessionActivationGeneration++;
+  context.state.currentSessionId = 'opened-while-loading';
+  context.state.currentTeamId = 'glados';
+  release({ effectiveTeamId: 'pkg-review--crew' });
+  assert.equal(await pending, null);
+  assert.equal(context.state.currentSessionId, 'opened-while-loading');
+  assert.equal(context.state.currentTeamId, 'glados');
+  assert.deepEqual(context.calls, []);
 });
 
 test('concurrent first-send requests create one session and retain the draft transcript and attachments', async () => {

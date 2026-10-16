@@ -187,8 +187,24 @@ function dashboardTranscriptEvent(event, options = {}) {
   const includeStream = options.includeStream !== false;
   if (!includeStream && (ev.kind === 'text-stream' || ev.kind === 'thinking-stream')) return null;
   if (ev.kind === 'result' && !ev.isError && !includeStream) return null;
-  if (ev.kind === 'harness-init' || ev.kind === 'liveness') return null;
+  if (ev.kind === 'harness-init' || (ev.kind === 'liveness' && !includeStream)) return null;
   return ev;
+}
+
+function delegatedActivityForParent(event, parentAgentId) {
+  const toolCallId = event?.toolCallId || event?.parentToolUseId;
+  if (event?.kind !== 'liveness' || typeof event.live !== 'boolean' || !toolCallId
+    || !event.agentId || !parentAgentId || event.agentId === parentAgentId) return null;
+  // Mirror lifecycle only. Worker prompts, raw results and private thinking do
+  // not belong in the coordinator's compact work feed.
+  return {
+    kind: 'liveness', agentId: parentAgentId, childAgentId: event.agentId,
+    subagentType: event.subagentType || event.agentId, toolName: 'Agent',
+    toolCallId, taskId: event.taskId || null, live: event.live,
+    state: event.state || (event.live ? 'running' : 'completed'), ts: event.ts,
+    text: `${event.agentId} ${event.live ? 'is working' : 'finished'}.`,
+    id: `delegation:${parentAgentId}:${eventSseId(event)}`,
+  };
 }
 
 function truncateTransportField(value, maxFieldChars = DEFAULT_TRANSPORT_FIELD_CHARS) {
@@ -302,6 +318,7 @@ module.exports = {
   eventSseId,
   normalizeEvent,
   dashboardTranscriptEvent,
+  delegatedActivityForParent,
   mergeTranscriptEvents,
   afterLastEventId,
   sseFrame,
